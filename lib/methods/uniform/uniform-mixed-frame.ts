@@ -1,3 +1,4 @@
+import { GPU_RIGID_EXCHANGE_BYTES } from "../../core/webgpu-eulerian";
 import { settleGPUInitialization } from "../../core/gpu-initialization";
 import { uniformMixedGravitySupport } from "./uniform-mixed-detached-mass.wgsl";
 import { UniformNarrowBandFlip, type NarrowBandParticleBudget } from "./uniform-narrow-band-flip";
@@ -170,7 +171,11 @@ export const UNIFORM_MIXED_RECEIPT_RING=2;
  * rebuilt and entered cells displaced at the head. couple, when coupling is
  * on, encodes the fluid-to-body exchange and the body integration after the
  * projection, before the census. */
-export interface UniformMixedFrameBodies{couple?:(encoder:GPUCommandEncoder)=>void}
+export interface UniformMixedFrameBodies {
+ couple?: (encoder:GPUCommandEncoder)=>void;
+ /** Box3D owns integration. Return this step's fluid impulses with its pressure receipt. */
+ exchangeRead?: { buffer: GPUBuffer; destination: Int32Array };
+}
 /** Dynamic coarsening at horizon one (UniformMixedFrame.setRelayout): the
  * census and layout builder the frame head encodes, with no readback. */
 export interface UniformMixedFrameRelayout{
@@ -218,6 +223,7 @@ export interface UniformMixedFrameReceipt{cycles:number;encoded:number;residual:
  * target: the frame's residual target, undefined before the first (so the
  * number is kept by reference, like the extension key's). */
 interface ReceiptSlot{
+ exchangeDestination?: Int32Array;
  readonly readback:GPUBuffer;unchecked:boolean;frame:number;encoded:number;kick:boolean;target:number|undefined;
  readonly words:Uint32Array<ArrayBuffer>;readonly floats:Float32Array<ArrayBuffer>;
  readonly flip:Uint32Array;readonly status:Uint32Array;readonly work:Uint32Array;
@@ -517,7 +523,7 @@ export class UniformMixedFrame {
   this.params={extension:uniform("extension",16),surface:uniform("surface",32),momentum:uniform("momentum",32),forces:uniform("forces",64),authority:uniform("authority",32),projection:uniform("projection",48)};
   this.state=buffer("Uniform pressure acceptance",32,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.status=buffer("Uniform mixed frame status",4*UNIFORM_MIXED_STATUS_WORDS,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
-  this.receipts=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>this.receiptSlot(buffer(`Uniform pressure receipt and mass accounting ${i}`,TRACE_RECEIPT,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ)));
+  this.receipts=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>this.receiptSlot(buffer(`Uniform pressure receipt and mass accounting ${i}`,TRACE_RECEIPT+GPU_RIGID_EXCHANGE_BYTES,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ)));
   this.reductions=buffer("Uniform dust accounting",48,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC);
   const caches=Array.from({length:1},(_,i)=>{const t=device.createTexture({label:`Uniform 4h sampling cache ${i}`,size:uniformCoarseCacheExtent(f.arena.address),dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});this.owned.push(t);return t;});
   const coarseLayout=uniformMixedAllCoarseLayout(layout);
@@ -1314,6 +1320,8 @@ export class UniformMixedFrame {
    // Rigid coupling reads the accepted h pressure and projected field;
    // the census below promotes around the integrated poses.
    if(bodies?.couple){bodies.couple(encoder);trace?.phase(encoder,A.rigidCoupling);}
+   slot.exchangeDestination = bodies?.exchangeRead?.destination;
+   if (bodies?.exchangeRead) encoder.copyBufferToBuffer(bodies.exchangeRead.buffer,0,readback,TRACE_RECEIPT,GPU_RIGID_EXCHANGE_BYTES);
    encoder.copyBufferToBuffer(this.state,0,readback,0,32);encoder.copyBufferToBuffer(this.reductions,0,readback,32,48);
    this.band.encodeReceipt(encoder,readback,88);encoder.copyBufferToBuffer(this.status,0,readback,120,4*UNIFORM_MIXED_STATUS_WORDS);
    // Sticky detail-storage violations of both group-0 ownerships.
@@ -1382,7 +1390,13 @@ export class UniformMixedFrame {
  private refuse(slot:ReceiptSlot,error:unknown):never{this.phase="failed";slot.unchecked=false;throw error;}
  private receive(slot:ReceiptSlot):UniformMixedFrameReceipt{
   const mapped=slot.words,floats=slot.floats,frame=slot.frame,kick=slot.kick;
-  try{mapped.set(new Uint32Array(slot.readback.getMappedRange(),0,TRACE_RECEIPT/4));slot.readback.unmap();}
+  try{
+   const bytes=slot.readback.getMappedRange();
+   mapped.set(new Uint32Array(bytes,0,TRACE_RECEIPT/4));
+   slot.exchangeDestination?.set(new Int32Array(bytes,TRACE_RECEIPT,GPU_RIGID_EXCHANGE_BYTES/4));
+   slot.exchangeDestination=undefined;
+   slot.readback.unmap();
+  }
   catch(error){this.phase="failed";throw error;}finally{slot.unchecked=false;}
   try{
    const page=this.pagePoolInfo,base=POOL_RECEIPT/4,status=UNIFORM_PAGE_POOL_STATUS;

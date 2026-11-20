@@ -18,6 +18,8 @@ export interface GPUFieldLocation {
 export interface NBEngineStatus { readonly requested: "auto" | "uniform" | "brick"; readonly ran: "uniform" | "brick"; readonly gap?: string; readonly gaps?: number }
 
 export interface GPUEulerianInfo {
+  /** Controller timeline for which this solver has finished attaching. */
+  simulationEpoch?: number;
   /** Narrow-band FLIP: the accepted detail plan (policy, requested/admitted, support, residency). */
   uniformDetail?: SolverDetailDiagnostics;
   uniformMixedGeneration?: number;

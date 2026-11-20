@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createBackyardPoolPartyScene, POOL_PARTY_BOARD, POOL_PARTY_WATERLINE_M, POOL_PARTY_CELL_M, POOL_PARTY_GRID } from "../lib/core/backyard-pool-party-scene";
+import { createBackyardPoolPartyScene, POOL_PARTY_BOARD, POOL_PARTY_WATERLINE_M, POOL_PARTY_CELL_M, POOL_PARTY_INTERACTIVE_CELL_M, POOL_PARTY_GRID } from "../lib/core/backyard-pool-party-scene";
+import { nbEngineChoice } from "../lib/methods/narrow-band/brick-method";
 import { validateScene } from "../lib/core/model";
 import { initializeRigidBodies, quaternionInverseRotate, quaternionRotate } from "../lib/core/rigid-body";
 import { proceduralSolidField } from "../lib/core/procedural-solid";
@@ -8,6 +9,12 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { WebGPURigidBodySystem } from "../lib/core/webgpu-rigid-body";
 import { createUniformSolver, withUniformDevice } from "./helpers/uniform-geometric";
+
+test("Pool Party auto-selects a fluid engine with external impulse exchange for Bub", () => {
+  const choice = nbEngineChoice(createBackyardPoolPartyScene());
+  assert.equal(choice.ran, "uniform");
+  assert.match(choice.gap ?? "", /external rigid-step impulse exchange/);
+});
 
 test("pool party accepts a live body placement on its padded fluid lattice", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
   await withUniformDevice("pool party live placement", async device => {
@@ -31,7 +38,16 @@ test("pool party accepts a live body placement on its padded fluid lattice", { s
 
 test("pool party is discoverable with a smooth voxel board and real water settings", () => {
   const definition = getSceneDefinition("backyard-pool-party");
-  const scene = sceneDocument(definition);
+  const live = sceneDocument(definition);
+  assert.deepEqual(validateScene(live), []);
+  assert.equal(live.voxelDomain.finestCellSize_m, POOL_PARTY_INTERACTIVE_CELL_M);
+  assert.equal(live.numerics.fixedDt_s,1/24);
+  assert.equal(definition.methodProfile?.overrides.timeStep,"scene");
+  assert.equal(live.renderProfile?.interpolateWater,true);
+  assert.ok(live.scenery?.nodes.some(node=>node.id==="grounds/valley" && node.kind==="field-program"));
+  const scene = sceneDocument(getSceneDefinition("backyard-pool-party-fine"));
+  assert.equal(scene.numerics.fixedDt_s,1/60);
+  assert.equal(scene.sceneId, "backyard-pool-party-fine");
   assert.equal(definition.shelf, "Garden");
   assert.deepEqual(validateScene(scene), []);
   assert.deepEqual(scene.solidVoxels, createBackyardPoolPartyScene().solidVoxels);

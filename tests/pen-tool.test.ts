@@ -7,8 +7,9 @@ import { meshAssetHeader, registerMeshAssetDistanceField } from "../lib/core/imp
 import { createEmptyScene, minimalRoomSceneryGraph } from "../lib/core/empty-scene";
 import type { EditorRay } from "../lib/core/editor-entity";
 import { scenerySurfaceAt } from "../lib/core/editor-scenery";
-import type { SceneDescription } from "../lib/core/model";
-import { sceneWithSolidStroke } from "../lib/core/solid-world";
+import { parseScene, type SceneDescription } from "../lib/core/model";
+import { createBackyardPoolPartyScene, POOL_PARTY_INTERACTIVE_CELL_M } from "../lib/core/backyard-pool-party-scene";
+import { sampleSolidWorld, solidWorldForScene, sceneWithSolidStroke } from "../lib/core/solid-world";
 import { SVO_SCULPT_CUT_MAXIMUM_RECORDS } from "../lib/svo/features/scene-publication/svo-sculpt-cuts";
 import { sceneCellSizes_m } from "../lib/core/scene-lattice";
 import { SOLID_PATCH_ELLIPSOID_KIND } from "../lib/core/solid-patch/kind";
@@ -379,11 +380,16 @@ test("pen continues after the former cut-history capacity without losing prior s
 });
 
 
-test("a pen carve on a native imported paver exposes a pickable interior cut face", () => {
-  const asset = "honed-travertine-paver", header = meshAssetHeader(asset);
+function loadPaverField() {
+  const asset = "honed-travertine-paver";
   const volume = decodeMeshVolume(gunzipSync(readFileSync(new URL("../public/assets/pool-party/honed-travertine-paver.fvx.gz", import.meta.url))), true);
   registerMeshAssetDistanceField(asset, { header: volume.header, bricks: new Map([...volume.bricks].map(
     ([key, { origin, distance }]) => [key, { origin, distance }])) });
+}
+
+test("a pen carve on a native imported paver exposes a pickable interior cut face", () => {
+  const asset = "honed-travertine-paver", header = meshAssetHeader(asset);
+  loadPaverField();
   const center = header.origin.map((v, i) => v + header.dimensions[i]! * header.cellSize / 2);
   const base = createEmptyScene({ extents_m: { x: 4, y: 4, z: 4 }, finestCellSize_m: .025 });
   base.solidVoxels = [];
@@ -402,4 +408,87 @@ test("a pen carve on a native imported paver exposes a pickable interior cut fac
   assert.ok(cap.normal.y > .99);
   const second = penTool.begin({ scene: cut, ray: start, values: values(1, 1) })!.update(start)!;
   assert.ok(second.patches[0]!.minimum[1] < carve.patches[0]!.minimum[1], "another stroke starts on the cut face, not the original mesh");
+});
+
+for (const asset of ["garden-pavilion", "lane-bungalow", "hill-saltbox"]) {
+  test(`the ${asset} roof retains its uncut faces outside the fluid domain through a pen stroke and reload`, () => {
+    const header = meshAssetHeader(asset);
+    const url = new URL(`../public/assets/pool-neighborhood/${asset}.fvx.gz`, import.meta.url);
+    const volume = decodeMeshVolume(gunzipSync(readFileSync(url)), true);
+    registerMeshAssetDistanceField(asset, { header: volume.header, bricks: new Map([...volume.bricks].map(
+      ([key, { origin, distance }]) => [key, { origin, distance }])) });
+    const center = header.origin.map((v, i) => v + header.dimensions[i]! * header.cellSize / 2);
+    const base = createEmptyScene({ extents_m: { x: 16, y: 8, z: 12 }, finestCellSize_m: .125 });
+    base.solidVoxels = [];
+    base.scenery = { ...base.scenery!, nodes: [base.scenery!.nodes[0]!, { kind: "field-program", id: "offsite/roof",
+      place: { units: "metres", position: { x: -15 + center[0]!, y: 2 + center[1]!, z: center[2]! } },
+      program: { ops: [], result: 0, sampledVolume: { asset } }, material: { colorLinear: [1, 1, 1] } }] };
+    const down = (x: number): EditorRay => ({ origin: { x, y: 12, z: -1 }, direction: { x: 0, y: -1, z: 0 } });
+    const ray = down(-15), untouched = down(-13);
+    const before = scenerySurfaceAt(base, ray)!, neighbor = scenerySurfaceAt(base, untouched)!;
+    assert.equal(before.nodeId, "offsite/roof");
+    assert.equal(neighbor.nodeId, "offsite/roof");
+    const stroke = penTool.begin({ scene: base, ray, values: values(4, 1) })!.update(ray)!;
+    const edited = sceneWithSolidStroke(base, stroke.patches);
+    assert.ok(stroke.patches.every(patch => patch.maximumExclusive[0] < 0 && patch.affectsScenery));
+    for (const saved of [edited, parseScene(JSON.stringify(edited))]) {
+      assert.ok(scenerySurfaceAt(saved, ray)!.position_m.y < before.position_m.y - .02);
+      assert.deepEqual(scenerySurfaceAt(saved, untouched), neighbor);
+      assert.deepEqual(saved.scenery, base.scenery);
+    }
+    assert.deepEqual(scenerySurfaceAt(base, ray), before);
+  });
+}
+
+test("the distant farmland can be picked, cut, and reloaded at its authored world scale", () => {
+  const asset = "valley-farmland";
+  const volume = decodeMeshVolume(gunzipSync(readFileSync(new URL("../public/assets/pool-neighborhood/valley-farmland.fvx.gz", import.meta.url))), true);
+  registerMeshAssetDistanceField(asset, {header:volume.header,bricks:new Map([...volume.bricks].map(
+    ([key,{origin,distance}])=>[key,{origin,distance}]))});
+  const scene = createBackyardPoolPartyScene(POOL_PARTY_INTERACTIVE_CELL_M);
+  scene.scenery = {...scene.scenery!,nodes:scene.scenery!.nodes.filter(node=>node.id==="grounds/valley" || node.kind==="room-shell")};
+  for (const boundary of [32, 47]) {
+    const heights = [-.4, 0, .4].map(offset => {
+      const hit = scenerySurfaceAt(scene, { origin: { x: boundary + offset, y: 35, z: 7 }, direction: { x: 0, y: -1, z: 0 } });
+      assert.equal(hit?.nodeId, "grounds/valley");
+      return hit!.position_m.y;
+    });
+    assert.ok(Math.max(...heights) - Math.min(...heights) < .9, "the lawn and field join has no exposed ledge");
+  }
+  const ray = (x:number):EditorRay => ({origin:{x,y:35,z:-58},direction:{x:0,y:-1,z:0}});
+  const near=ray(-13),far=ray(-16);
+  const original=scenerySurfaceAt(scene,near)!,neighbor=scenerySurfaceAt(scene,far)!;
+  assert.equal(original.nodeId,"grounds/valley");
+  const stroke=penTool.begin({scene,ray:near,values:values(4,1)})!.update(near)!;
+  const edited=sceneWithSolidStroke(scene,stroke.patches);
+  for(const doc of [edited,parseScene(JSON.stringify(edited))]) {
+    const cut=scenerySurfaceAt(doc,near)!;
+    assert.ok(cut.position_m.y < original.position_m.y-.02,JSON.stringify({before:original,cut,patch:stroke.patches[0]}));
+    assert.deepEqual(scenerySurfaceAt(doc,far),neighbor);
+    assert.deepEqual(doc.scenery,scene.scenery);
+  }
+  assert.deepEqual(scenerySurfaceAt(scene,near),original);
+});
+
+test("cutting the authored patio opens its physical slab and retains the adjacent paver", () => {
+  loadPaverField();
+  const h = POOL_PARTY_INTERACTIVE_CELL_M, base = createBackyardPoolPartyScene(h);
+  const down = (x: number): EditorRay => ({ origin: { x, y: 4, z: 3.5 }, direction: { x: 0, y: -1, z: 0 } });
+  const ray = down(5.5), adjacent = down(6.65);
+  const original = scenerySurfaceAt(base, ray)!, neighbor = scenerySurfaceAt(base, adjacent)!;
+  assert.equal(original.nodeId, "patio/5/3");
+  const sample = (scene: SceneDescription, x: number) => sampleSolidWorld(solidWorldForScene(scene),
+    [Math.floor((x + 8) / h), Math.floor((2 - .8 * h) / h), Math.floor(9.5 / h)]).solidFraction;
+  assert.equal(sample(base, 5.5), 1);
+  const stroke = penTool.begin({ scene: base, ray, values: values(6, 1) })!.update(ray)!;
+  const cut = sceneWithSolidStroke(base, stroke.patches);
+  for (const doc of [cut, parseScene(JSON.stringify(cut))]) {
+    assert.equal(sample(doc, 5.5), 0);
+    assert.ok(scenerySurfaceAt(doc, ray)!.position_m.y < 2 - h);
+    assert.equal(sample(doc, 6.65), 1);
+    assert.deepEqual(scenerySurfaceAt(doc, adjacent), neighbor);
+    assert.deepEqual(doc.scenery, base.scenery);
+  }
+  assert.deepEqual(scenerySurfaceAt(base, ray), original);
+  assert.equal(sample(base, 5.5), 1);
 });

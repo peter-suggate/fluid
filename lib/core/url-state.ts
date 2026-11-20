@@ -656,7 +656,10 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
     if (preset.renderProfile.fluidSurfaceRenderMode && !["shaded", "wireframe", "simple"].includes(surface ?? "")) {
       features.fluidSurfaceRenderMode = preset.renderProfile.fluidSurfaceRenderMode;
     }
-    features.svoRenderTuning = { ...features.svoRenderTuning, environmentRefinementDepth: Math.trunc(numberParam(
+    features.svoRenderTuning = { ...features.svoRenderTuning,
+      ...(preset.renderProfile.resolutionScale !== undefined ? { resolutionScale: numberParam(
+        query, "svoResolution", preset.renderProfile.resolutionScale, .35, 2) } : {}),
+      environmentRefinementDepth: Math.trunc(numberParam(
       query, "svoRefinementDepth", sceneRenderTuning(preset.renderProfile).environmentRefinementDepth,
       0, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM)) };
   }
@@ -795,6 +798,10 @@ export function serializeQueryState(
     if (renderProfile.fluidSurfaceRenderMode) {
       if (uiState.fluidSurfaceRenderMode === renderProfile.fluidSurfaceRenderMode) query.delete("fluidSurface");
       else query.set("fluidSurface", uiState.fluidSurfaceRenderMode);
+    }
+    if (renderProfile.resolutionScale !== undefined) {
+      if (uiState.svoRenderTuning.resolutionScale === renderProfile.resolutionScale) query.delete("svoResolution");
+      else query.set("svoResolution", String(uiState.svoRenderTuning.resolutionScale));
     }
     // The generic codec omits global defaults. A scene may use another default,
     // so an explicit global value must survive a shared-link round trip too.

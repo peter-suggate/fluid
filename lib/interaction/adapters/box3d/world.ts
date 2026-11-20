@@ -101,6 +101,7 @@ export class Box3DWorld {
     for(const [tag,id] of this.shapeEntities)if(id===entity.id&&previousShapes.has(tag))this.shapeEntities.delete(tag);
     for(const key of this.sensorPairs.keys())if(key.split('/').includes(entity.id))this.sensorPairs.delete(key);
   }
+  private followsProceduralGround = false;
   updateSolids(scene: SceneDescription) {
     const next = compileSolidChunks(scene, [...this.bodies.values()].map(b => b.native.getPosition()), this.collisionCache);
     const staged = new Map<string, { signature: string; body: B3Body }>();
@@ -124,13 +125,14 @@ export class Box3DWorld {
     for (const [key, entry] of this.chunks) if (!keys.has(key) || staged.has(key)) { entry.body.destroy(); entry.body.delete(); this.chunks.delete(key); }
     for (const [key, entry] of staged) this.chunks.set(key, entry);
     this.scene = scene;
+    this.followsProceduralGround = Boolean(fluidSolidWorldForScene(scene).ground);
     this.coverage = new Map([...this.bodies].map(([id, b]) => [id, b.native.getPosition()]));
   }
   ensureCoverage() {
     // Finite authored solids were all compiled at admission. Only procedural
     // ground needs a moving neighbourhood; rebuilding the whole pool every
     // metre otherwise stalls steering and climbing.
-    if (!fluidSolidWorldForScene(this.scene).ground) return;
+    if (!this.followsProceduralGround) return;
     if ([...this.bodies].some(([id, b]) => { const p = b.native.getPosition(), old = this.coverage.get(id); return !old || Math.hypot(p.x-old.x,p.y-old.y,p.z-old.z) > 1; })) this.updateSolids(this.scene);
   }
   ray(origin: Vec3, direction: Vec3, distance: number, maskBits = 5): { entityId?: string; point: Vec3; normal: Vec3; distance: number } | undefined {

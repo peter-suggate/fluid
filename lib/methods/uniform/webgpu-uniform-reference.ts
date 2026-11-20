@@ -45,7 +45,7 @@ import {
 } from "./uniform-volume.wgsl";
 import { createUniformReferenceComputeShader, uniformT0Groups } from "./webgpu-uniform-reference.wgsl";
 import { uniformInitialLiquidVelocityPages, uniformLatticeFarPhi, uniformLatticePagedPhi, uniformLatticePagedVolume } from "./uniform-volume-initial";
-import { assertFreeSpaceSeedMargin, type LatticePages } from "../../core/initial-liquid-lattice";
+import { initialLiquidCellBounds, assertFreeSpaceSeedMargin, type LatticePages } from "../../core/initial-liquid-lattice";
 import { averageInflowStrength, createInflowGridBoundary, integratedInflowVolume, type InflowGridBoundary } from "../../core/inflow-boundary";
 import { inflowStrength as inflowStrengthAt } from "../../core/initial-fluid";
 import type { InitialLiquidSphere, SceneDescription, ScheduledLiquidDrop } from "../../core/model";
@@ -1646,7 +1646,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedAccountedBytes=this.mixedFrame.allocatedBytes;this.watchMixedAllocation();
     this.executionInfo.allocatedBytes+=this.mixedAccountedBytes+this.mixedDynamic.allocatedBytes+this.mixedBuilder.allocatedBytes+(this.mixedBodies?.allocatedBytes??0);
     this.mixedPageSource={...this.mixedFrame.pagePool.volumePageSource!,frame:{buffer:this.params,size:48},tiers:{buffer:this.mixedFrame.heat.tiers,size:4*this.mixedFrame.heat.regions,warmResolution:this.mixedFrame.nearSettled.warmResolution,coldRegions:this.narrowBandColdRegions}};
-    this.mixedSource={solidBoundary:this.mixedFrame.solid?.surfaceBoundary,vertexPhi:this.vertexPhiField,coarseVertexPhi:this.mixedFrame.coarseVertexPhi,detailVertexPhi:this.mixedFrame.ownership.capacity.fineTiles>0?this.vertexPhiField:undefined,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedBlocks:this.address.blocks,mixedFrame:{buffer:this.params,size:48},mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support},mixedBulkPages:this.mixedFrame.bulkPages?{binding:this.mixedFrame.bulkPages.binding,capacity:this.mixedFrame.bulkPages.layout.capacity}:undefined};
+    const liquidBounds = initialLiquidCellBounds(this.scene, this.containerCells);
+    const region = liquidBounds?.length === 1 ? liquidBounds[0] : undefined;
+    const sampleRegion = region && { origin: region[0].map(v => v - 3),
+      size: region[1].map((v, axis) => v - region[0][axis]! + 6) };
+    const staticContourGeometry = this.scene.container.walls !== "none" && (this.scene.solidVoxels?.length ?? 0) > 0
+      ? { dimensions: [this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz] as const, sampleRegion } : undefined;
+    this.mixedSource={staticContourGeometry,solidBoundary:this.mixedFrame.solid?.surfaceBoundary,vertexPhi:this.vertexPhiField,coarseVertexPhi:this.mixedFrame.coarseVertexPhi,detailVertexPhi:this.mixedFrame.ownership.capacity.fineTiles>0?this.vertexPhiField:undefined,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedBlocks:this.address.blocks,mixedFrame:{buffer:this.params,size:48},mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support},mixedBulkPages:this.mixedFrame.bulkPages?{binding:this.mixedFrame.bulkPages.binding,capacity:this.mixedFrame.bulkPages.layout.capacity}:undefined};
     for(let i=0;i<UNIFORM_MIXED_RELAYOUT_READS;i++)this.mixedRelayoutReads.give(this.device.createBuffer({label:`Uniform mixed relayout receipt read ${i}`,size:UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}));
     this.executionInfo.allocatedBytes+=UNIFORM_MIXED_RELAYOUT_READS*UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4;
     // The initial layout is the host's (authored regions, solids and bodies
@@ -3077,17 +3083,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (!this.rigidCoupling) throw new Error("Interactive scenes require fluid/body coupling");
     if (Math.abs(request.time_s - this.lastTime - request.dt_s) > 1e-7) throw new Error("Fluid and interactive clocks disagree");
     this.externalStepPending = true;
-    let staging: GPUBuffer | undefined;
+    const values = new Int32Array(GPU_RIGID_EXCHANGE_BYTES / 4);
+    this.mixedCoupledBodies.exchangeRead = { buffer: this.rigidExchange, destination: values };
     try {
       if (!this.advanceTo(request.time_s, request.bodies)) throw new Error("Fluid step was not admitted");
-      await this.awaitFrameCompletion();
+      // The pressure receipt includes the copy following this tick's coupling.
+      // A queue-wide fence here would also wait for unrelated presentation work.
+      await this.mixedPipelineAdmission;
+      await this.mixedFrameChain;
+      if (this.pressureFrameFailure) throw this.pressureFrameFailure;
       if (Math.abs((this.info.completedTime_s ?? 0) - request.time_s) > 1e-7) throw new Error("Fluid step did not complete the requested interval");
-      staging = this.device.createBuffer({ label: "Box3D fluid impulse readback", size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-      const encoder = this.device.createCommandEncoder();
-      encoder.copyBufferToBuffer(this.rigidExchange, 0, staging, 0, GPU_RIGID_EXCHANGE_BYTES);
-      this.device.queue.submit([encoder.finish()]);
-      await staging.mapAsync(GPUMapMode.READ);
-      const values = new Int32Array(staging.getMappedRange());
       return request.bodies.map((body, index) => {
         const base = index * 12, weight = values[base + 11] / 65536;
         return { generation: request.generation, tick: request.tick, solidRevision: request.solidRevision,
@@ -3098,7 +3103,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           fluidVelocity_m_s: { x: weight > 0 ? values[base+7] * 1e-4 / weight : 0, y: weight > 0 ? values[base+8] * 1e-4 / weight : 0, z: weight > 0 ? values[base+9] * 1e-4 / weight : 0 },
           policy: "pressure-traction" as const };
       });
-    } finally { staging?.destroy(); this.externalStepPending = false; }
+    } finally { this.mixedCoupledBodies.exchangeRead = undefined; this.externalStepPending = false; }
   }
 
   advanceTo(time_s: number, bodies: RigidBodyState[] = []): boolean {
@@ -3490,6 +3495,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // refuses one, not left half applied.
     const reach = dirty && this.bulkReach && this.mixedFrame?.bulkPages ? this.bulkReachMasks(this.bulkReach.capacity) : undefined;
     const reachTable = reach ? bulkReachTable(reach.masks, reach.capacity) : undefined;
+    if ((dirty || boundaryChanged) && this.mixedSource?.staticContourGeometry) {
+      this.mixedSource = { ...this.mixedSource, staticContourGeometry: { ...this.mixedSource.staticContourGeometry } };
+    }
     if (dirty) { this.solidVoxelsEmpty = this.solidMask.empty; this.mixedSolidMaskStamp++; }
     // Dynamic coarsening joins the edit's tiles on the GPU (the next head
     // adopts them); a requests-only layout takes the scene's request.

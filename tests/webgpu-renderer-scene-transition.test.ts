@@ -4,6 +4,7 @@ import test from "node:test";
 
 import "../lib/methods";
 import { defaultCamera, defaultScene } from "../lib/core/model";
+import { PlaybackPixelBudget } from "../lib/core/presentation-resolution";
 import { FluidLabRenderer, gpuSceneStructuralKey, type SimulationRunConfig } from "../lib/core/webgpu-renderer";
 
 const config: SimulationRunConfig = {
@@ -25,7 +26,7 @@ for (const mode of ["fluid-only", "full-scene"] as const) {
         },
         gpuFluid: transition === "cold load" ? undefined : solver,
         reseedInFlight: transition === "reset",
-        presentationTexture: {}, upscalePipeline: {}, upscaleBindGroup: {},
+        presentationTexture: {}, upscalePipeline: {}, upscaleBindGroup: {}, playbackBudget: new PlaybackPixelBudget(),
         surfaceTuningCache: { resolve: () => ({ resolutionScale: 1 }), key: "test" },
         resize: () => {},
         currentGPUFluid: () => { sourceRequests++; return ready ? solver : undefined; },

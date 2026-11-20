@@ -1,0 +1,4519 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "terrace-reader",
+  "source": "terrace-reader.glb",
+  "origin": [
+    -0.243,
+    -0.018,
+    -0.33299999999999996
+  ],
+  "dimensions": [
+    104,
+    152,
+    112
+  ],
+  "cellSize": 0.009,
+  "bandWidth": 0.018,
+  "brickCount": 686,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Nora | anatomical body.braid01",
+      "baseColorLinear": [
+        0.3686210513114929,
+        0.3809342384338379,
+        0.38911086320877075
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.eyebrow006",
+      "baseColorLinear": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.eyelashes01",
+      "baseColorLinear": [
+        0.00041386933298781514,
+        0.0001511657319497317,
+        5.014276030124165e-05
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | fine hair roots",
+      "baseColorLinear": [
+        0.30035239458084106,
+        0.31036660075187683,
+        0.3203665614128113
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.low-poly",
+      "baseColorLinear": [
+        0.34738123416900635,
+        0.33096247911453247,
+        0.312590092420578
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | top",
+      "baseColorLinear": [
+        0.21012434363365173,
+        0.07997513562440872,
+        0.13996724784374237
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | bottom",
+      "baseColorLinear": [
+        0.04501226916909218,
+        0.06397664546966553,
+        0.09504014253616333
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body",
+      "baseColorLinear": [
+        0.5794921517372131,
+        0.28564366698265076,
+        0.15941844880580902
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02",
+      "baseColorLinear": [
+        0.09360658377408981,
+        0.08957836776971817,
+        0.08254509419202805
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | top/15,10,13/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.0849214566468118,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,19,16/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.33381557452228633,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,20,17/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.373826020963952,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,20,16/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.373826020963952,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,21,17/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.41650253270397164,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,20,17/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.373826020963952,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,21,18/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.41650253270397164,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,20,16/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.373826020963952,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,19,15/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.33381557452228633,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,21,17/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.41650253270397164,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,19,15/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.33381557452228633,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | top/16,10,13/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.0849214566468118,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,19,14/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.33381557452228633,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,17,14/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,16,13/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,19,18/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.33381557452228633,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,17,13/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.26159205028716875,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,18,15/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,17,15/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.26159205028716875,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,21,19/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.41650253270397164,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,18,14/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.29642135334252967,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,15,12/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,18,14/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.29642135334252967,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,18,15/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,22,19/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.461893589520877,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,16,13/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,15,12/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,17,13/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.26159205028716875,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,20,17/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.373826020963952,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,19,16/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.33381557452228633,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,18,16/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,19,16/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.33381557452228633,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/29,23,20/r0.650",
+      "baseColorLinear": [
+        0.8594643671088052,
+        0.5100464056783279,
+        0.373826020963952
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,17,14/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,19,15/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.33381557452228633,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,20,16/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.373826020963952,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,23,20/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.5100464056783279,
+        0.373826020963952
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,16,12/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.229274769922375,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/29,23,19/r0.650",
+      "baseColorLinear": [
+        0.8594643671088052,
+        0.5100464056783279,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/29,22,19/r0.650",
+      "baseColorLinear": [
+        0.8594643671088052,
+        0.461893589520877,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,22,18/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.461893589520877,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,21,18/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.41650253270397164,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,23,19/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.5100464056783279,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,22,18/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.461893589520877,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,14,10/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.1719559031258607,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,16,14/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,16,12/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.229274769922375,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,19,17/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.33381557452228633,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,23,21/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.5100464056783279,
+        0.41650253270397164
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | top/15,10,12/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.0849214566468118,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,18,14/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.29642135334252967,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/24,24,24/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5610070143871524,
+        0.5610070143871524
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/21,21,21/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.41650253270397164,
+        0.41650253270397164
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/17,17,18/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.26159205028716875,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/19,19,20/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.373826020963952
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/18,18,19/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/23,24,24/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.5610070143871524,
+        0.5610070143871524
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/21,22,22/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.461893589520877,
+        0.461893589520877
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/20,21,21/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.41650253270397164,
+        0.41650253270397164
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/16,16,17/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.229274769922375,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | top/15,9,12/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.06853841290915133,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,19,14/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.33381557452228633,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,21,17/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.41650253270397164,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/29,22,18/r0.650",
+      "baseColorLinear": [
+        0.8594643671088052,
+        0.461893589520877,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,18,14/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.29642135334252967,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,18,13/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.29642135334252967,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,20,15/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.373826020963952,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,21,18/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.41650253270397164,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,18,13/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.29642135334252967,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,22,19/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.461893589520877,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,19,17/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.33381557452228633,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,24,23/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.5610070143871524,
+        0.5100464056783279
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,25,23/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.6148203434699,
+        0.5100464056783279
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,17,13/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.26159205028716875,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,18,16/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,22,20/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.461893589520877,
+        0.373826020963952
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/17,18,18/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.29642135334252967,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/15,15,15/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.19941489015347055,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/23,23,24/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.5100464056783279,
+        0.5610070143871524
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/20,20,20/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.373826020963952,
+        0.373826020963952
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/18,18,18/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/14,14,14/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/19,20,20/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.373826020963952,
+        0.373826020963952
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/20,20,21/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.373826020963952,
+        0.41650253270397164
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/22,22,22/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.461893589520877,
+        0.461893589520877
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/17,17,17/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.26159205028716875,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/23,23,23/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.5100464056783279,
+        0.5100464056783279
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/19,19,19/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/22,23,23/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.5100464056783279,
+        0.5100464056783279
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/14,14,15/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1719559031258607,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/16,16,16/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.229274769922375,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/13,13,13/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/15,16,16/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.229274769922375,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/13,14,14/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/16,17,17/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.26159205028716875,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/21,21,22/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.41650253270397164,
+        0.461893589520877
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/15,15,16/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.19941489015347055,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/18,19,19/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.33381557452228633,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/13,13,14/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,20,15/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.373826020963952,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/22,22,23/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.461893589520877,
+        0.5100464056783279
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/12,12,13/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/14,15,15/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.19941489015347055,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/10,10,11/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/10,11,11/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/12,12,12/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/8,8,8/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/8,8,9/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/10,10,10/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/11,11,11/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/9,10,10/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/9,9,9/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/12,13,13/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/11,12,12/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/8,9,9/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.06853841290915133,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/11,11,12/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/17,11,8/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.10338683447877332,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/21,14,11/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/18,12,8/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.1240040094060311,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/17,11,7/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.10338683447877332,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/20,14,11/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/19,13,9/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.14683923082122904,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/18,13,10/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/18,12,9/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/17,12,9/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/19,13,10/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/19,14,10/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.1719559031258607,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/14,8,5/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.05416457340265298,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/20,14,10/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.1719559031258607,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/20,15,11/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.19941489015347055,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/20,15,12/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/18,11,8/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.10338683447877332,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/19,14,11/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/20,13,10/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/18,13,9/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.14683923082122904,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/16,10,7/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.0849214566468118,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/17,12,8/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.1240040094060311,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/17,10,7/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.0849214566468118,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | fine hair roots/18,19,19/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.33381557452228633,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | top/15,9,13/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.06853841290915133,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,19,14/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.33381557452228633,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.braid01/9,9,10/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,20,15/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.373826020963952,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/21,15,11/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.19941489015347055,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/21,14,10/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.1719559031258607,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,15,11/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.19941489015347055,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,20,14/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.373826020963952,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/19,12,9/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/20,13,9/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.14683923082122904,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,17,12/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.26159205028716875,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,17,13/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.26159205028716875,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/16,11,7/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.10338683447877332,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/21,15,12/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/16,11,8/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.10338683447877332,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/19,12,8/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.1240040094060311,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/20,12,8/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.1240040094060311,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/21,13,10/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | fine hair roots/18,18,19/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | fine hair roots/18,18,18/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,16,12/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.229274769922375,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,17,12/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.26159205028716875,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | bottom/7,9,11/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.06853841290915133,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | bottom/7,9,10/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.06853841290915133,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | bottom/8,9,11/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.06853841290915133,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,21,16/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.41650253270397164,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,21,16/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.41650253270397164,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,15,11/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.19941489015347055,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,16,13/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,13,10/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,19,14/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.33381557452228633,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,19,15/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.33381557452228633,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.eyelashes01/1,0,0/r0.650",
+      "baseColorLinear": [
+        0.0024967542195146308,
+        0.0,
+        0.0
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,20,16/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.373826020963952,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,18,13/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.29642135334252967,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.low-poly/9,3,2/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.009529478582354435,
+        0.0053705373494325435
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,20,15/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.373826020963952,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,15,10/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.19941489015347055,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,12,9/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/29,21,17/r0.650",
+      "baseColorLinear": [
+        0.8594643671088052,
+        0.41650253270397164,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/21,14,12/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.1719559031258607,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,14,9/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.1719559031258607,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/21,11,8/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.10338683447877332,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.low-poly/9,3,1/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.009529478582354435,
+        0.0024967542195146308
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/21,14,9/r0.650",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.1719559031258607,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/15,9,6/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.06853841290915133,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,16,11/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.229274769922375,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,16,11/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.229274769922375,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/29,23,18/r0.650",
+      "baseColorLinear": [
+        0.8594643671088052,
+        0.5100464056783279,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/29,22,17/r0.650",
+      "baseColorLinear": [
+        0.8594643671088052,
+        0.461893589520877,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.eyebrow006/0,0,0/r0.650",
+      "baseColorLinear": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,15,12/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,12,10/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.1240040094060311,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,19,15/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.33381557452228633,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,18,14/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.29642135334252967,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,15,12/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,18,15/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,17,12/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.26159205028716875,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,16,14/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,17,14/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,17,13/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.26159205028716875,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,16,13/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,20,14/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.373826020963952,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.low-poly/4,1,0/r0.650",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.0024967542195146308,
+        0.0
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/16,10,8/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.0849214566468118,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,14,11/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/24,16,13/r0.650",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,18,15/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,11,9/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.10338683447877332,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,11,8/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.10338683447877332,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/22,14,11/r0.650",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.eyelashes01/0,0,0/r0.650",
+      "baseColorLinear": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,22,17/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.461893589520877,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | bottom/7,8,10/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.05416457340265298,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,21,16/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.41650253270397164,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/28,22,20/r0.650",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.461893589520877,
+        0.373826020963952
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/23,16,14/r0.650",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/29,24,20/r0.650",
+      "baseColorLinear": [
+        0.8594643671088052,
+        0.5610070143871524,
+        0.373826020963952
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/26,20,18/r0.650",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.373826020963952,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,6,6/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.03113008990948415,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,7,7/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.041722573919128626,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,8,8/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,10,10/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,11,11/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,10,8/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,11,11/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,17,18/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.26159205028716875,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,18,19/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.29642135334252967,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,9,9/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,8,7/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,10,9/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,10,9/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.0849214566468118,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,12,12/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,16,16/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.229274769922375,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,18,19/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.29642135334252967,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,8,8/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,9,8/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.06853841290915133,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,9,8/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,9,8/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.06853841290915133,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,11,10/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.10338683447877332,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,12,13/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.1240040094060311,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,7,7/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.041722573919128626,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,16,17/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.229274769922375,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,18,18/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.29642135334252967,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/5,6,6/r0.650",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.03113008990948415,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/6,7,7/r0.650",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.041722573919128626,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/6,7,6/r0.650",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.041722573919128626,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,7,6/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.041722573919128626,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,11,12/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/6,6,5/r0.650",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.03113008990948415,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,9,9/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.06853841290915133,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,5,5/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.02229888300503533,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/6,6,6/r0.650",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.03113008990948415,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/6,5,5/r0.650",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.02229888300503533,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/5,4,4/r0.650",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.01513350723396306,
+        0.01513350723396306
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/5,5,4/r0.650",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.02229888300503533,
+        0.01513350723396306
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,9,9/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.06853841290915133,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,13,13/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/4,4,4/r0.650",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.01513350723396306,
+        0.01513350723396306
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/4,4,3/r0.650",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.01513350723396306,
+        0.009529478582354435
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/6,5,4/r0.650",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.02229888300503533,
+        0.01513350723396306
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,16,16/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.229274769922375,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,15,15/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.19941489015347055,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,17,17/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.26159205028716875,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,16,16/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.229274769922375,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,13,13/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,14,14/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,17,16/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.26159205028716875,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/4,3,3/r0.650",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.009529478582354435,
+        0.009529478582354435
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/5,5,5/r0.650",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.02229888300503533,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,19,19/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.33381557452228633,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,7,6/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.041722573919128626,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/19,18,16/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,10,9/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.0849214566468118,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,8,8/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,12,11/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1240040094060311,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,13,12/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,11,10/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,13,11/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,13,12/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.14683923082122904,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,12,11/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,11,10/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,11,12/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.10338683447877332,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,13,13/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,8,7/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.05416457340265298,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,13,14/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.14683923082122904,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,17,15/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.26159205028716875,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,16,15/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.229274769922375,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,6,6/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.03113008990948415,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,13,14/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,10,10/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,8,9/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,9,10/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,10,10/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,16,17/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.229274769922375,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,15,15/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.19941489015347055,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/27,20,18/r0.650",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.373826020963952,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.body/25,17,14/r0.650",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,6,5/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.03113008990948415,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/3,3,3/r0.650",
+      "baseColorLinear": [
+        0.009529478582354435,
+        0.009529478582354435,
+        0.009529478582354435
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/5,4,5/r0.650",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.01513350723396306,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,12,12/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,16,16/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.229274769922375,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,14,14/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/18,18,17/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/19,19,18/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/19,19,19/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/18,18,18/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/18,19,18/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.33381557452228633,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/20,19,18/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.33381557452228633,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,17,17/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.26159205028716875,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,18,17/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.29642135334252967,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,15,14/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.19941489015347055,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/19,18,17/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,15,15/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.19941489015347055,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,16,15/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.229274769922375,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,14,15/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1719559031258607,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,17,18/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.26159205028716875,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,8,7/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.05416457340265298,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/19,21,22/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.41650253270397164,
+        0.461893589520877
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,14,14/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,16,17/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.229274769922375,
+        0.26159205028716875
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,15,16/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.19941489015347055,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,14,14/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,17,16/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.26159205028716875,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,15,16/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.19941489015347055,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,14,15/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1719559031258607,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/5,5,6/r0.650",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.02229888300503533,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,10,11/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,15,14/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.19941489015347055,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,16,15/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.229274769922375,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,15,14/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.19941489015347055,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,12,11/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.1240040094060311,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,14,13/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1719559031258607,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,11,9/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,14,13/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1719559031258607,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/3,2,2/r0.650",
+      "baseColorLinear": [
+        0.009529478582354435,
+        0.0053705373494325435,
+        0.0053705373494325435
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/20,19,19/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.33381557452228633,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/19,18,18/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/20,20,19/r0.650",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.373826020963952,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,18,16/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,13,12/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.14683923082122904,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/18,18,16/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,18,18/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.29642135334252967,
+        0.29642135334252967
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/18,17,16/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.26159205028716875,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,12,12/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/18,17,15/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.26159205028716875,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/19,17,16/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.26159205028716875,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,16,13/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,16,14/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/19,19,16/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.229274769922375
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,7,8/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.041722573919128626,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/19,19,15/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.19941489015347055
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,7,5/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.041722573919128626,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,12,10/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,8,6/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,6,4/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.03113008990948415,
+        0.01513350723396306
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,7,8/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.041722573919128626,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,11,11/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,12,13/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,11,9/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,9,8/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.06853841290915133,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,10,8/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.0849214566468118,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,10,9/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.0849214566468118,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,9,7/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.06853841290915133,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,8,7/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.05416457340265298,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,16,14/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,6,5/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.03113008990948415,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,11,10/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.10338683447877332,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,11,9/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.10338683447877332,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,12,10/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1240040094060311,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,7,6/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.041722573919128626,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,7,5/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.041722573919128626,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/5,6,5/r0.650",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.03113008990948415,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/3,3,2/r0.650",
+      "baseColorLinear": [
+        0.009529478582354435,
+        0.009529478582354435,
+        0.0053705373494325435
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,14,13/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,9,7/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/2,2,2/r0.650",
+      "baseColorLinear": [
+        0.0053705373494325435,
+        0.0053705373494325435,
+        0.0053705373494325435
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,10,7/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.0849214566468118,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,10,8/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.0849214566468118,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,10,8/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.0849214566468118,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,11,8/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,14,11/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,14,10/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.1719559031258607,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,9,6/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.06853841290915133,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,8,6/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.05416457340265298,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,9,6/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.06853841290915133,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,10,7/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.0849214566468118,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,14,12/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,14,10/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.1719559031258607,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,14,11/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,13,10/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,13,8/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.14683923082122904,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,7,5/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.041722573919128626,
+        0.02229888300503533
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,8,6/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.05416457340265298,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,9,7/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.06853841290915133,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,8,8/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,7,7/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.041722573919128626,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,5,4/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.02229888300503533,
+        0.01513350723396306
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/18,19,19/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.33381557452228633,
+        0.33381557452228633
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,12,10/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1240040094060311,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,13,10/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,10,6/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.0849214566468118,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,11,8/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.10338683447877332,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,13,10/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,13,9/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.14683923082122904,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,15,13/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.19941489015347055,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,15,13/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.19941489015347055,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,13,11/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.14683923082122904,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/18,16,14/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,15,13/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.19941489015347055,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,15,14/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.19941489015347055,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,16,13/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,14,12/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1719559031258607,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/5,4,3/r0.650",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.01513350723396306,
+        0.009529478582354435
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/6,4,4/r0.650",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.01513350723396306,
+        0.01513350723396306
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/18,15,10/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.19941489015347055,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,13,11/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.14683923082122904,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/7,9,8/r0.650",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.06853841290915133,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,13,12/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.14683923082122904,
+        0.1240040094060311
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/10,11,9/r0.650",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.10338683447877332,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/9,10,8/r0.650",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.0849214566468118,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/18,17,14/r0.650",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,14,13/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.1719559031258607,
+        0.14683923082122904
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/4,2,2/r0.650",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.0053705373494325435,
+        0.0053705373494325435
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,8,6/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.05416457340265298,
+        0.03113008990948415
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,12,9/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/14,12,11/r0.650",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1240040094060311,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,12,10/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1240040094060311,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/16,14,9/r0.650",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.1719559031258607,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,14,10/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/19,15,10/r0.650",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.19941489015347055,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,14,11/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/11,9,9/r0.650",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.06853841290915133,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/13,11,11/r0.650",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,15,11/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.19941489015347055,
+        0.10338683447877332
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/17,13,8/r0.650",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.14683923082122904,
+        0.05416457340265298
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/15,12,9/r0.650",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/5,3,3/r0.650",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.009529478582354435,
+        0.009529478582354435
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/8,6,7/r0.650",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.03113008990948415,
+        0.041722573919128626
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Nora | anatomical body.shoes02/12,10,10/r0.650",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "solidRule": "even-odd",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 377704,
+  "insideNodes": 95490
+}

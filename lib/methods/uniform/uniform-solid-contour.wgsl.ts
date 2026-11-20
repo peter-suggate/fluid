@@ -13,8 +13,7 @@ fn surfaceHasSolids()->bool{
 // Positive in the fluid domain. Voxel samples are at cell centres, with a
 // half-cell signed distance: their zero is the authored face, independent
 // of how deep the liquid is or how far its pressure continuation reaches.
-fn surfaceSolidClearance(q:vec3f)->f32{
- if(!surfaceHasSolids()){return 1e6;}
+fn surfaceStaticClearance(q:vec3f)->f32{
  let cell=vec3i(floor(q));let h=umSolidParams.cellGravity.xyz;
  let r=umBoundaryRecord(cell);var distance=1e6;
  if(r!=0u){distance=umBoundarySampleAt(q,cell,r).w;}
@@ -30,14 +29,42 @@ fn surfaceSolidClearance(q:vec3f)->f32{
    if(closed){distance=max(distance,-reach);}else{distance=min(distance,reach);}
   }}
  }
- if(umSolidHasTerrain()){distance=min(distance,umTerrainBoundary(q).w);}
- let world=umSolidParams.frame.xyz+q*h;
- for(var i=0u;i<umBodyCount();i++){distance=min(distance,umBodyDistance(i,world));}
  return distance;
 }
+@group(0) @binding(25) var contourStaticGrid:texture_3d<f32>;
+@group(0) @binding(26) var contourStaticTarget:texture_storage_3d<r32float,write>;
+@compute @workgroup_size(4,4,4)
+fn bakeContourStaticGrid(@builtin(global_invocation_id) gid:vec3u){
+ udrInit();
+ if(any(gid>=textureDimensions(contourStaticTarget))){return;}
+ let cell=vec3i(gid)-32*umFramePage();
+ textureStore(contourStaticTarget,vec3i(gid),vec4f(surfaceStaticClearance(vec3f(cell)+0.5)));
+}
+fn surfaceBoundedClearance(q:vec3f,limit:f32)->f32{
+ if(!surfaceHasSolids()){return 1e6;}
+ let h=umSolidParams.cellGravity.xyz;
+ let worldCell=vec3i(floor(q))+32*umFramePage();
+ let dimensions=textureDimensions(contourStaticGrid);
+ var distance=1e6;
+ // All contour queries are at cell centres. The same expression supplies the
+ // cache and the direct path for unbounded domains and coordinates outside it.
+ if(dimensions.x>1u&&all(vec3u(worldCell)<dimensions)){
+  distance=textureLoad(contourStaticGrid,worldCell,0).x;
+ }else{distance=surfaceStaticClearance(q);}
+ distance=min(limit,distance);
+ if(umSolidHasTerrain()){distance=min(distance,umTerrainBoundary(q).w);}
+ let world=umSolidParams.frame.xyz+q*h;
+ for(var i=0u;i<umBodyCount();i++){
+  if(umBodyNear(i,world,max(0.0,distance))){distance=min(distance,umBodyDistance(i,world));}
+ }
+ return distance;
+}
+fn surfaceSolidClearance(q:vec3f)->f32{return surfaceBoundedClearance(q,1e6);}
 fn surfaceClipValue(cell:vec3i,value:f32)->f32{
  if(!surfaceHasSolids()){return value;}
- return min(value,0.5+surfaceSolidClearance(vec3f(cell)+0.5)/(u.container.y/u.gridInfo.y));
+ let h=u.container.y/u.gridInfo.y;let limit=(value-0.5)*h;
+ let distance=surfaceBoundedClearance(vec3f(cell)+0.5,limit);
+ return select(min(value,0.5+distance/h),value,distance>=limit);
 }
 // The 5^3 contour samples of window g lie in these eight tiles. The solver's
 // cut map includes each tile's one-cell halo, even when the tile runs at 4h.

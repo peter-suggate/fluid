@@ -44,7 +44,8 @@ import { SVO_BRICK_RASTER_CONTRACT,svoBrickRasterSharedWGSL,svoRasterCoverageOve
 import { SVO_PRIMARY_ENTRY_PREPASS_CONTRACT } from "../primary-visibility/webgpu-svo-primary-entry-prepass";
 import { createWebgpuSvoTraversalWGSL } from "../primary-visibility/webgpu-svo-traversal";
 import { SVO_CONE_RADIANCE_RECONSTRUCTION_CODES } from "../radiance/definition";
-import { svoEnvironmentLightingWGSL } from "../radiance/svo-environment-lighting";
+import { SKY_CAPTURE_FIELD } from "../../../core/photographic-sky";
+import { environmentLightingShader } from "../radiance/svo-environment-lighting";
 import { SVO_NODE_MIP_LAYOUT } from "../radiance/svo-node-mip-pyramid";
 import { svoNodeMipSamplingWGSL } from "../radiance/svo-node-mip-sampling";
 import { svoNodeMipPageHashWGSL } from "../radiance/svo-node-mip-page-hash";
@@ -4081,7 +4082,7 @@ ${svoPrimitiveMotionWGSL}
 // on its own because the *geometry* still needs it.
 ${svoProceduralNoiseWGSL}
 ${svoLightWGSL}
-${svoEnvironmentLightingWGSL}
+${environmentLightingShader("dryLighting")}
 ${svoNodeMipSamplingWGSL}
 ${svoTetrahedralRadianceWGSL}
 ${svoTetrahedralRadianceConeCoreWGSL}
@@ -4176,6 +4177,7 @@ struct DryLightingArena {
   metadata:vec4u,
   lights:array<SvoLightRecord,${SVO_LIGHT_MAXIMUM_RECORDS}>,
   environment:SvoEnvironmentLightingRecord,
+  ${SKY_CAPTURE_FIELD}
 }
 struct DryHit {
   t:f32,
@@ -5665,6 +5667,11 @@ fn dryHorizonColor(rd:vec3f)->vec3f{
 // ring past the flat one by up to half: stored rings have real shadows, AO
 // and GI now, and the same porcelain as the set.
 fn dryBackdropHaze(hit:DryHit,position:vec3f,rd:vec3f,color:vec3f)->vec3f{
+  if(uniforms.reservedSceneMeta.x==0.0 && uniforms.reservedSceneMeta.y>0.0){
+    let path=max(0.0,distance(uniforms.cameraPosition.xyz,position)-20.0);
+    let transmittance=exp(-path/uniforms.reservedSceneMeta.y);
+    return mix(dryLighting.environment.lowerDiffuse.rgb,color,transmittance);
+  }
   if(dry.groundPlane.w<=0.0||dryResolvedMaterialId(hit)!=${VOXEL_MATERIAL_IDS.terrain}u){return color;}
   let d=dryGroundFootprintDistance(position.xz);if(d<=0.0){return color;}
   return mix(color,dryHorizonColor(rd),1.0-exp(-d/max(dry.groundPlane.z,1e-6)));

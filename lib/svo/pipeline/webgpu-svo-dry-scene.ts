@@ -1,3 +1,4 @@
+import { enclosingScreenRect, type ScreenRect } from "../features/primary-visibility/rigid-screen-bounds";
 import {RigidCutRenderAtlas} from '../../core/rigid-cut-render';
 import type {RigidBodyDescription} from '../../core/model';
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
@@ -207,6 +208,8 @@ export const SVO_PRESENTATION_STARTUP_STAGES = Object.freeze([
 ] as const);
 
 /** `{vertexCount, instanceCount, firstVertex, firstInstance}`. */
+import { SKY_CAPTURE_BYTES, skyCaptureWords } from "../../core/photographic-sky";
+
 const SVO_DRAW_INDIRECT_ARGS_BYTES = 16;
 /** How often the arena-pressure tripwire samples; roughly once a second at 60 Hz. */
 const SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_PERIOD_FRAMES = 60;
@@ -1653,7 +1656,8 @@ export class SparseVoxelDrySceneRenderer {
       size: SVO_DRY_SCENE_ARENA_LAYOUT.sizeBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
-    this.lightingBuffer = device.createBuffer({ label: "Sparse voxel dry scene lighting arena", size: SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.lightingBuffer = device.createBuffer({ label: "Sparse voxel dry scene lighting arena", size: SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.sizeBytes + SKY_CAPTURE_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(this.lightingBuffer, SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.sizeBytes, skyCaptureWords());
     this.rigidCutAtlas=new RigidCutRenderAtlas(device);
     this.rigidMotionUniformBuffer = device.createBuffer({ label: "Sparse voxel rigid motion uniform mirror", size: SVO_DRY_RIGID_MOTION_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     if (this.rasterPrimary) {
@@ -2391,8 +2395,17 @@ export class SparseVoxelDrySceneRenderer {
       || cached.rigidGroup !== this.rasterRigidInputBindGroup) {
       this.surfaceMeshDrawCache = this.createSurfaceMeshDrawBundle(usePrepass, group, compact);
     }
-    const draw = encoder.beginRenderPass(this.surfaceMeshPass!);
-    draw.executeBundles(this.surfaceMeshDrawCache!.bundles);
+    // The background draw rewrites reversed depth and all source planes before
+    // either old or new body pixels are shaded. Shadows, AO and water still
+    // run across the complete current frame.
+    const rect = !pending && this.primaryRedrawRect;
+    const descriptor = this.surfaceMeshPass!;
+    const draw = encoder.beginRenderPass(rect ? { ...descriptor,
+      colorAttachments: Array.from(descriptor.colorAttachments, a => a && { ...a, loadOp: "load" as const }),
+      depthStencilAttachment: { ...descriptor.depthStencilAttachment!, depthLoadOp: "load" },
+    } : descriptor);
+    if (rect) draw.setScissorRect(rect.x, rect.y, rect.width, rect.height);
+    if (!rect || rect.width && rect.height) draw.executeBundles(this.surfaceMeshDrawCache!.bundles);
     draw.end();
     // Build receipts remain prompt. Once ready, status is telemetry: the GPU
     // still checks revisions and culls the current camera every frame, while
@@ -5855,6 +5868,11 @@ export class SparseVoxelDrySceneRenderer {
     return { state: "enabled" };
   }
 
+  private readonly staticPrimaryReuse = new ExactDryFrameReuse();
+  private previousBodyRect?: ScreenRect;
+  private bodyRect?: ScreenRect;
+  private primaryRedrawRect?: ScreenRect;
+  setCpuBodyScreenBounds(bounds: ScreenRect | undefined): void { this.bodyRect = bounds; }
   private readonly dryFrameReuse = new ExactDryFrameReuse();
   private dryFrameReuseEligibility = "not-evaluated";
   private dryFrameControlRevision = 0;
@@ -6856,7 +6874,7 @@ export class SparseVoxelDrySceneRenderer {
 
   encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, tracePhase?: RenderFrameSeam<"svo">, bandPartitioner?: FrameBandPartitioner): DrySceneReplacementResult | false {
     encoder.clearBuffer(this.voxelSpecularCounters);
-    const unavailable = (): false => { this.dryFrameReuse.invalidate(); return false; };
+    const unavailable = (): false => { this.dryFrameReuse.invalidate(); this.staticPrimaryReuse.invalidate(); return false; };
     this.worldGiGatherEncoded = false;
     if (this.boundRadiance !== this.source?.tetrahedralRadiance) this.setSource(this.source);
     if ((!this.pipeline && !this.surfaceMeshPipelines) || !this.bindGroup) return unavailable();
@@ -6960,7 +6978,7 @@ export class SparseVoxelDrySceneRenderer {
     const derivedRequired = this.lightingOptions.coneTracingMode === "cones"
       || this.lightingOptions.globalIlluminationEnabled === true
       || this.lightingOptions.voxelSpecularReflectionsEnabled === true;
-    this.dryFrameReuseEligibility = dryFrameReuseReason({
+    const reuseState = {
       enabled: this.renderTuning.rasterStillViewReuse,
       viewValid: this.visibilityViewValid,
       splitReady: useSplit,
@@ -6971,8 +6989,12 @@ export class SparseVoxelDrySceneRenderer {
       // These optional caches can still converge without changing scene data.
       evolvingVisibilityCache: this.experiments.voxelLightCache !== false
         || (usePrepass && (this.splitPipelineLattice || this.lightingOptions.worldGiCacheEnabled === true)),
-    });
-    const dryFrameKey: DryFrameReuseKey | undefined = this.dryFrameReuseEligibility === "eligible"
+    };
+    this.dryFrameReuseEligibility = dryFrameReuseReason(reuseState);
+    const canRetainPrimary = this.bodyRect && this.experiments.surfaceMesh && this.rasterRigidActive
+      && dryFrameReuseReason({ ...reuseState, hasBodies: false }) === "eligible";
+
+    const sceneKey: DryFrameReuseKey | undefined = (this.dryFrameReuseEligibility === "eligible" || canRetainPrimary)
       && this.source && this.scene && targetTexture ? {
       viewRevision: this.visibilityViewRevision, parameterRevision: this.visibilityInputsRevision, controlRevision: this.dryFrameControlRevision,
       sourceRevision: this.source.revision, sceneRevision: this.scene.renderRevision ?? 0,
@@ -6980,6 +7002,10 @@ export class SparseVoxelDrySceneRenderer {
       source: this.source, scene: this.scene, bindings: this.bindGroup,
       pipeline: this.splitLightingPipeline!, optimizedPipeline: this.splitOptimizedLightingPipeline, precomputedPipeline: this.splitPrecomputedLightingPipeline, target: targetTexture, gBuffer: gBufferViews,
     } : undefined;
+    const dryFrameKey = reuseState.hasBodies ? undefined : sceneKey;
+    const primaryKey = canRetainPrimary ? sceneKey : undefined;
+    this.primaryRedrawRect = this.staticPrimaryReuse.matches(primaryKey) && this.previousBodyRect && this.bodyRect
+      ? enclosingScreenRect(this.previousBodyRect, this.bodyRect) : undefined;
     if (this.sculptWallMesh && this.sculptWallBuild) {
       if (this.sculptWallSourceKey?.[0] !== this.scene?.fieldProgramBlocks || this.sculptWallSourceKey?.[1] !== this.scene?.primitiveRecords) {
         this.sculptWallSourceKey = [this.scene?.fieldProgramBlocks, this.scene?.primitiveRecords];
@@ -7439,6 +7465,8 @@ export class SparseVoxelDrySceneRenderer {
     }
     this.lastPickingTarget = targetTexture;
     this.dryFrameReuse.publish(dryFrameKey);
+    this.staticPrimaryReuse.publish(primaryKey);
+    this.previousBodyRect = this.bodyRect;
     if (this.encodeResult?.sampledTargetView !== targetView) this.encodeResult = { encoded: true, sampledTargetView: targetView };
     return this.encodeResult;
   }

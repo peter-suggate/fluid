@@ -83,3 +83,23 @@ test("authored shaded water preserves explicit surface overrides and restores it
   assert.deepEqual(reset.reload, []);
   assert.throws(() => parseScene(JSON.stringify({ ...scene, renderProfile: { fluidSurfaceRenderMode: "invalid" } })), /surface render mode/);
 });
+
+test("pool resolution defaults, explicit native resolution and reset survive shared links", () => {
+  const id = "backyard-pool-party", scene = sceneDocument(getSceneDefinition(id));
+  const scale = scene.renderProfile!.resolutionScale!;
+  assert.equal(scale, 1);
+  assert.equal(scene.renderProfile!.playbackPixelBudget, undefined);
+  assert.equal(scene.renderProfile!.stillResolutionScale, undefined);
+  const oldProfile = { ...scene.renderProfile, resolutionScale: .6, stillResolutionScale: 1, playbackPixelBudget: 688 * 387 };
+  assert.deepEqual(parseScene(JSON.stringify({ ...scene, renderProfile: oldProfile })).renderProfile, scene.renderProfile);
+  const custom = { ...oldProfile, resolutionScale: .8 };
+  assert.deepEqual(parseScene(JSON.stringify({ ...scene, renderProfile: custom })).renderProfile, custom);
+  assert.equal(parseUIQueryState("", id).svoRenderTuning.resolutionScale, scale);
+  for (const forced of [scale, 1, .5]) {
+    const ui = parseUIQueryState(`svoResolution=${forced}`, id);
+    const serialized = serializeQueryState("", { scene, presetId: id }, parseMethodQueryState(""), ui);
+    assert.equal(new URLSearchParams(serialized).get("svoResolution"), forced === scale ? null : String(forced));
+    assert.equal(parseUIQueryState(serialized, id).svoRenderTuning.resolutionScale, forced);
+  }
+  assert.equal(sceneOverrideClearPlan(["svoResolution"], { scene, presetId: id }).svoRenderTuning.resolutionScale, scale);
+});

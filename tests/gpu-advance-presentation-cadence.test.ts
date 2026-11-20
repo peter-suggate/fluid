@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   canQueuePreparedGPUAdvance,
   FluidLabRenderer,
+  interpolatedWaterTime,
   presentationHeldByPendingFrame,
   submitNextPreparedGPUAdvance,
 } from "../lib/core/webgpu-renderer";
@@ -19,6 +20,21 @@ const DEPTH = 2;
 const RECEIPT_FRAMES = 3;
 /** Animation frames a submitted presentation takes to complete. */
 const PRESENTATION_FRAMES = 2;
+
+test("interpolated water stays inside solved history and advances monotonically through a late tick", () => {
+  const dt = 1 / 24;
+  let previous: { time_s: number; drawnAt_ms: number } | undefined;
+  const ticks = [0, 41, 83, 154, 166, 210, 250];
+  for (let now = 0; now < 340; now += 1000 / 60) {
+    const step = ticks.findLastIndex(start => start <= now);
+    const end = step * dt;
+    const time = interpolatedWaterTime(end, dt, ticks[step]!, now, previous);
+    assert.ok(time >= Math.max(0, end - 2 * dt) && time <= end);
+    if (previous) assert.ok(time >= previous.time_s);
+    previous = { time_s: time, drawnAt_ms: now };
+  }
+  assert.equal(previous!.time_s, (ticks.length - 1) * dt);
+});
 
 /**
  * A split-submission solver, exercising the shared receipt contract.

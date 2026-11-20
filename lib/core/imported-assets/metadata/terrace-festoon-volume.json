@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "terrace-festoon",
+  "source": "terrace-festoon.glb",
+  "origin": [
+    -7.575,
+    -0.025,
+    -0.07500000000000001
+  ],
+  "dimensions": [
+    1216,
+    264,
+    16
+  ],
+  "cellSize": 0.0125,
+  "bandWidth": 0.025,
+  "brickCount": 960,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Honey cedar",
+      "baseColorLinear": [
+        0.28999999165534973,
+        0.13600000739097595,
+        0.05999999865889549
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Dark brass lampholder",
+      "baseColorLinear": [
+        0.14499999582767487,
+        0.09799999743700027,
+        0.057999998331069946
+      ],
+      "roughness": 0.47999998927116394,
+      "metallic": 0.3199999928474426
+    },
+    {
+      "name": "Braided outdoor cable",
+      "baseColorLinear": [
+        0.03200000151991844,
+        0.028999999165534973,
+        0.024000000208616257
+      ],
+      "roughness": 0.8199999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "Daylight opal glass",
+      "baseColorLinear": [
+        0.8100000023841858,
+        0.7799999713897705,
+        0.6800000071525574
+      ],
+      "roughness": 0.25999999046325684,
+      "metallic": 0.029999999329447746
+    }
+  ],
+  "sign": "negative-inside",
+  "solidRule": "even-odd",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 556753,
+  "insideNodes": 29749
+}

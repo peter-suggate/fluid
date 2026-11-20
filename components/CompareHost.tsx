@@ -62,6 +62,15 @@ export function CompareHost() {
   // Pane B commits into pane B. One host per realm is the whole point of the
   // seam: a shared row rendered in this column must not reach pane A.
   const editorHostB = useMemo(() => studioEditorHost(sessionB), [sessionB]);
+  const [cleanView, setCleanView] = useState(false);
+  useEffect(() => {
+    if (!cleanView) return;
+    const restore = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCleanView(false);
+    };
+    window.addEventListener("keydown", restore);
+    return () => window.removeEventListener("keydown", restore);
+  }, [cleanView]);
   const [splitFraction, setSplitFraction] = useState(0.5);
   // One array per membership: the panels below subscribe per session, and a
   // fresh array each render resubscribed them on every render.
@@ -159,6 +168,7 @@ export function CompareHost() {
       data-solver-mode="eulerian"
       data-shell-view={shellView}
       data-compare={active}
+      data-clean-view={cleanView || undefined}
       style={active ? {
         gridTemplateColumns: `minmax(0, ${splitFraction}fr) 6px minmax(0, ${1 - splitFraction}fr)`,
       } : undefined}
@@ -192,7 +202,10 @@ export function CompareHost() {
         </div>
       </div>
       <SimulationStopPanel sessions={panes} message={transportFailure} />
-      <TransportBar hostBlockReason={transportBlock} viewSession={active && compare.focusedPane === "b" ? sessionB : sessionA}
+      {cleanView && <button type="button" className="restore-scene-controls" onClick={() => setCleanView(false)}>
+        Show controls <kbd>Esc</kbd>
+      </button>}
+      <TransportBar onCleanView={() => setCleanView(true)} hostBlockReason={transportBlock} viewSession={active && compare.focusedPane === "b" ? sessionB : sessionA}
         sessions={panes} />
       <RecordingPlaybackModal />
     </main>

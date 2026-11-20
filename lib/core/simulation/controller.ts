@@ -332,6 +332,7 @@ export class SimulationController {
    */
   private paneRuntimes = new Map<PaneId, PaneRuntime>([[PRIMARY_PANE_ID, createPaneRuntime()]]);
   private lastClock: number | null = null;
+  private interactionTimer?: ReturnType<typeof setTimeout>;
   private rateWallClock = 0;
   private rateSimTime = 0;
   private safeBrowserStepConsumed = false;
@@ -427,12 +428,33 @@ export class SimulationController {
       const runtime = this.runtime(paneId), host = this.interaction(paneId);
       if (runtime.interactionPending || host.getView().readiness.state !== 'ready') continue;
       const time = host.getView().snapshot?.time_s ?? 0;
-      if (time + dt > this.clock.targetTime() + 1e-8) continue;
+      if (time + dt > this.clock.targetTime() + 1e-8) {
+        // A pressure receipt can arrive between refreshes. Wake at the next
+        // physical deadline so a slightly early refresh doesn't cost a full frame.
+        if (typeof window !== "undefined" && this.clock.canAcceptNextStep() && this.paneSessions.size === 1
+          && this.interactionTimer === undefined && session.runtime.getState().runState === "running") {
+          const due = (this.lastClock ?? performance.now()) + 1000 * (dt - this.clock.pendingTime_s());
+          this.interactionTimer = setTimeout(() => {
+            this.interactionTimer = undefined;
+            if (this.paneSessions.size === 1 && session.runtime.getState().runState === "running" && !document.hidden)
+              this.tick(performance.now());
+          }, Math.max(1, Math.ceil(due - performance.now())));
+        }
+        continue;
+      }
       const epoch = runtime.interactionEpoch ?? 0;
       const pending = host.advance(dt).then(() => {
         if (epoch === (runtime.interactionEpoch ?? 0)) this.gpuAdvanceCompleted(host.getView().snapshot!.time_s, paneId);
       }).catch(error => { if (epoch === (runtime.interactionEpoch ?? 0)) { this.setRunState('paused'); session.runtime.getState().setNotice(String(error), 'warn'); } })
-        .finally(() => { if (runtime.interactionPending === pending) runtime.interactionPending = undefined; });
+        .finally(() => {
+          if (runtime.interactionPending !== pending) return;
+          runtime.interactionPending = undefined;
+          // A display refresh may have arrived while Box3D was waiting for the
+          // pressure receipt. Admit any already-due tick immediately, retaining
+          // the same target clock, one-step barrier and pause/reset semantics.
+          if (epoch === (runtime.interactionEpoch ?? 0) && this.paneSessions.size === 1
+            && session.runtime.getState().runState === "running") this.tick(performance.now());
+        });
       runtime.interactionPending = pending;
     }
   }
@@ -630,6 +652,10 @@ export class SimulationController {
     const failure = hostTransportFailure([...this.paneSessions.values()]);
     const interactionsReady = [...this.paneSessions].every(([id, pane]) => !pane.scene.getState().scene.interaction?.entities.length || this.interaction(id).getView().readiness.state === "ready");
     const next = runState === "running" && (failure || !interactionsReady) ? "paused" : runState;
+    if (next === "paused" && this.interactionTimer !== undefined) {
+      clearTimeout(this.interactionTimer);
+      this.interactionTimer = undefined;
+    }
     applyHostRunState(this.paneSessions.values(), next);
     for (const [id, pane] of this.paneSessions) if (pane.scene.getState().scene.interaction?.entities.length) this.interaction(id).setRunning(next === "running");
   }
@@ -692,7 +718,7 @@ export class SimulationController {
     try {
     if (this.lastClock === null) this.lastClock = now;
     const elapsed = Math.max(0, (now - this.lastClock) / 1000);
-    this.lastClock = now;
+    this.lastClock = Math.max(now, this.lastClock);
     const runtime = this.session(PRIMARY_PANE_ID).runtime.getState();
     // Whether there is anything to advance is the *host's* question, not pane
     // A's. Panes may hold different scenes, so a scenery-only document in A

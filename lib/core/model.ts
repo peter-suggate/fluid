@@ -177,6 +177,9 @@ export interface SceneDescription {
     environment?: {
       /** Optional distant cloud layer shared by visible and reflected sky; 0 disables it. */
       cloudCoverage?: number;
+      skyCapture?: "kloofendal";
+      /** Distance over which atmospheric transmittance falls to 1/e. */
+      aerialPerspective_m?: number;
       diffuseScale?: number;
       specularScale?: number;
       /** Optional scene-owned image-free backdrop/fill palette. */
@@ -668,6 +671,14 @@ export function parseScene(input: string): SceneDescription {
   parsed.container.fluidWallMode ??= "no-slip";
   parsed.fluid.initialCondition ??= "dam-break";
   parsed.fluid.surfaceTension_N_m ??= 0.072;
+  // Early pool-party saves included the preset's automatic playback downscale.
+  // Migrate only that exact default so authored custom resolutions survive.
+  const profile = parsed.renderProfile;
+  if (parsed.sceneId === "backyard-pool-party" && profile?.resolutionScale === .6
+    && profile.stillResolutionScale === 1 && profile.playbackPixelBudget === 688 * 387) {
+    const { stillResolutionScale, playbackPixelBudget, ...settings } = profile;
+    parsed.renderProfile = { ...settings, resolutionScale: 1 };
+  }
   if (parsed.interaction) parsed.interaction = interactionCatalog.inspectDocument(parsed.interaction).document;
   const errors = validateScene(parsed);
   if (errors.length > 0) throw new Error(errors.join("; "));
@@ -719,6 +730,10 @@ export function validateScene(scene: SceneDescription): string[] {
     const balance = lighting.grade.whiteBalance;
     if (balance.length !== 3 || !balance.every((value) => Number.isFinite(value) && value > 0)) errors.push("Scene grade white balance must contain three positive finite channel gains");
   }
+  const capture = lighting?.environment?.skyCapture;
+  if (capture !== undefined && capture !== "kloofendal") errors.push("Unknown sky capture");
+  const aerialDistance = lighting?.environment?.aerialPerspective_m;
+  if (aerialDistance !== undefined && (!(aerialDistance > 0) || !Number.isFinite(aerialDistance))) errors.push("Aerial perspective distance must be positive and finite");
   const cloudCoverage = lighting?.environment?.cloudCoverage;
   if (cloudCoverage !== undefined && (!Number.isFinite(cloudCoverage) || cloudCoverage < 0 || cloudCoverage > 1)) errors.push("Scene environment cloud coverage must be between zero and one");
   for (const [value, label] of [[lighting?.environment?.diffuseScale, "diffuse"], [lighting?.environment?.specularScale, "specular"]] as const) {
@@ -838,7 +853,7 @@ export function validateScene(scene: SceneDescription): string[] {
     if (optics.indexOfRefraction !== undefined && !(optics.indexOfRefraction > 1 && optics.indexOfRefraction <= 2)) {
       errors.push("Water index of refraction must lie in (1, 2]");
     }
-    for (const [value, label] of [[optics.fresnelF0, "Fresnel F0"], [optics.causticStrength, "caustic strength"]] as const) {
+    for (const [value, label] of [[optics.fresnelF0, "Fresnel F0"], [optics.causticStrength, "caustic strength"], [optics.windRippleSlope, "wind ripple slope"]] as const) {
       if (value !== undefined && (!Number.isFinite(value) || value < 0 || value > 1)) errors.push(`Water ${label} must lie in [0, 1]`);
     }
     if (optics.roughness !== undefined && (!Number.isFinite(optics.roughness) || optics.roughness < WATER_ROUGHNESS_MIN || optics.roughness > 1)) {

@@ -245,6 +245,13 @@ export interface DenseLevelSetVolumeConsumerSource {
   /** Liquid phi is continued through obstacles for cut-cell pressure. The
    * physical liquid is its intersection with this independent open domain. */
   readonly solidBoundary?: LevelSetSolidBoundarySource;
+  /** Bounded static voxel/field geometry. A new identity means that a local edit
+   * changed the mask or its procedural samples. Dynamic bodies are independent. */
+  readonly staticContourGeometry?: {
+    readonly dimensions: readonly [number, number, number];
+    /** Frequent contour samples near the authored liquid. Outside, use the sparse source directly. */
+    readonly sampleRegion?: { readonly origin: number[]; readonly size: number[] };
+  };
   /** Optional canonical h/4h ownership; no materialized fine expansion. Its
    * tail is the detail table of the packed fields. */
   readonly mixedOwnership?: GPUBufferBinding;

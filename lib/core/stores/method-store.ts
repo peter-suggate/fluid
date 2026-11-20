@@ -87,8 +87,17 @@ export const useMethodStore = new Proxy(
   { get: (_target, key) => Reflect.get(defaultMethodStore(), key) },
 ) as MethodStoreHook;
 
+// Zustand replaces the method state on every configuration edit. Clock, transport
+// and input callbacks can share its validated, flat parameter record.
+const resolvedByState = new WeakMap<object, MethodParamValues>();
+
 /** Effective values for the active method: defaults ← quality preset ← app defaults ← user overrides. */
 export function resolvedMethodValues(state: Pick<MethodStore, "methodId" | "quality" | "overrides">): MethodParamValues {
-  const method = getMethod(state.methodId);
-  return resolveMethodValues(method, state.quality, { ...method.appDefaults, ...state.overrides[state.methodId] });
+  let values = resolvedByState.get(state);
+  if (!values) {
+    const method = getMethod(state.methodId);
+    values = resolveMethodValues(method, state.quality, { ...method.appDefaults, ...state.overrides[state.methodId] });
+    resolvedByState.set(state, values);
+  }
+  return { ...values };
 }

@@ -110,6 +110,7 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   if (scene.terrain && (scene.solidVoxels ?? []).some(p => p.operation === "clear" && p.affectsScenery === true)) gaps.push("a sculpted terrain needs the ground's sculpt field (collisionSculptSample)");
   // Rigid bodies (lane P, M5: bodies-host.ts): the body stages need K slots, and the host's own refusals.
   gaps.push(...brickRigidBodyGaps(scene));
+  if (scene.interaction?.entities.length) gaps.push("interactive bodies require external rigid-step impulse exchange");
   // Scheduled drops and the inflow are lane F's sources (brick-source.ts, M4); the pool rule covers their volume and the
   // drops' band particles (brickSourcesExtent, brickDropParticles).
   // F's stages refuse the forces they do not implement (velocity-formulas nbfVelocitySupported): a gap here, so "auto"

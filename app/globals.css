@@ -2713,3 +2713,7 @@ button.rail-cost-name:not(:disabled):hover, button.rail-cost-name[aria-expanded=
 .control-widget-menu { position: absolute; z-index: 2; display: grid; min-width: 150px; padding: 4px; color-scheme: dark; pointer-events: auto; }
 .control-widget-menu button { height: 22px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-s); background: none; color: var(--muted); font: var(--text-micro); text-align: left; cursor: pointer; }
 .control-widget-menu button:hover { background: var(--hover); color: var(--ink); }
+
+.lab-shell[data-clean-view] :is(.viewport-topline, .transport-card, .tool-rail, .rail-stack, .interactive-layer, .control-widget-layer, .editor-mode-chip, .pane-tag) { display: none; }
+.restore-scene-controls { position: absolute; right: 16px; bottom: 16px; z-index: 5; padding: 6px 10px; opacity: 0; transition: opacity .15s; }
+.restore-scene-controls:hover, .restore-scene-controls:focus-visible { opacity: 1; }

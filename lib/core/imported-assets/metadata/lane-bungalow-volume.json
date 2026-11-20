@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "lane-bungalow",
+  "source": "lane-bungalow.glb",
+  "origin": [
+    -5.46,
+    -0.63,
+    -3.57
+  ],
+  "dimensions": [
+    104,
+    64,
+    88
+  ],
+  "cellSize": 0.105,
+  "bandWidth": 0.21,
+  "brickCount": 798,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Oxide toned brick",
+      "baseColorLinear": [
+        0.2800000011920929,
+        0.16200000047683716,
+        0.09099999815225601
+      ],
+      "roughness": 0.8999999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Sawn limestone",
+      "baseColorLinear": [
+        0.4699999988079071,
+        0.4000000059604645,
+        0.3100000023841858
+      ],
+      "roughness": 0.7300000190734863,
+      "metallic": 0.0
+    },
+    {
+      "name": "Oyster painted trim",
+      "baseColorLinear": [
+        0.5600000023841858,
+        0.5899999737739563,
+        0.5299999713897705
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Honey cedar",
+      "baseColorLinear": [
+        0.28999999165534973,
+        0.13600000739097595,
+        0.05999999865889549
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Patinated slate blue metal",
+      "baseColorLinear": [
+        0.06800000369548798,
+        0.09799999743700027,
+        0.11100000143051147
+      ],
+      "roughness": 0.6100000143051147,
+      "metallic": 0.25
+    },
+    {
+      "name": "Limewashed warm white",
+      "baseColorLinear": [
+        0.6700000166893005,
+        0.6000000238418579,
+        0.47999998927116394
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Oiled cedar end grain",
+      "baseColorLinear": [
+        0.125,
+        0.06599999964237213,
+        0.03500000014901161
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Blue grey smoked pane",
+      "baseColorLinear": [
+        0.04800000041723251,
+        0.10999999940395355,
+        0.12999999523162842
+      ],
+      "roughness": 0.11999999731779099,
+      "metallic": 0.44999998807907104
+    },
+    {
+      "name": "Graphite folded zinc",
+      "baseColorLinear": [
+        0.04699999839067459,
+        0.057999998331069946,
+        0.06300000101327896
+      ],
+      "roughness": 0.5099999904632568,
+      "metallic": 0.3400000035762787
+    }
+  ],
+  "sign": "negative-inside",
+  "solidRule": "even-odd",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 428793,
+  "insideNodes": 197691
+}

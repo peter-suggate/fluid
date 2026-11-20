@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "assets": [
+    {
+      "id": "terrace-host",
+      "cellSize": 0.009,
+      "bandCells": 2,
+      "mesh": "terrace-host.glb",
+      "volume": "terrace-host.fvx.gz"
+    },
+    {
+      "id": "terrace-reader",
+      "cellSize": 0.009,
+      "bandCells": 2,
+      "mesh": "terrace-reader.glb",
+      "volume": "terrace-reader.fvx.gz"
+    },
+    {
+      "id": "garden-pavilion",
+      "cellSize": 0.05,
+      "bandCells": 2,
+      "mesh": "garden-pavilion.glb",
+      "volume": "garden-pavilion.fvx.gz"
+    },
+    {
+      "id": "neighbor-cottage",
+      "cellSize": 0.095,
+      "bandCells": 2,
+      "mesh": "neighbor-cottage.glb",
+      "volume": "neighbor-cottage.fvx.gz"
+    },
+    {
+      "id": "neighborhood-ground",
+      "cellSize": 0.35,
+      "bandCells": 2,
+      "mesh": "neighborhood-ground.glb",
+      "volume": "neighborhood-ground.fvx.gz"
+    },
+    {
+      "id": "wooded-horizon",
+      "cellSize": 0.7,
+      "bandCells": 2,
+      "mesh": "wooded-horizon.glb",
+      "volume": "wooded-horizon.fvx.gz"
+    },
+    {
+      "id": "lavender-border",
+      "cellSize": 0.015,
+      "bandCells": 2,
+      "mesh": "lavender-border.glb",
+      "volume": "lavender-border.fvx.gz"
+    },
+    {
+      "id": "terrace-festoon",
+      "cellSize": 0.0125,
+      "bandCells": 2,
+      "mesh": "terrace-festoon.glb",
+      "volume": "terrace-festoon.fvx.gz"
+    },
+    {
+      "id": "valley-farmland",
+      "cellSize": 0.65,
+      "bandCells": 2,
+      "mesh": "valley-farmland.glb",
+      "volume": "valley-farmland.fvx.gz"
+    },
+    {
+      "id": "lane-bungalow",
+      "cellSize": 0.105,
+      "bandCells": 2,
+      "mesh": "lane-bungalow.glb",
+      "volume": "lane-bungalow.fvx.gz"
+    },
+    {
+      "id": "hill-saltbox",
+      "cellSize": 0.105,
+      "bandCells": 2,
+      "mesh": "hill-saltbox.glb",
+      "volume": "hill-saltbox.fvx.gz"
+    }
+  ]
+}

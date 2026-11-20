@@ -8,7 +8,8 @@ import { waterTransmissionWGSL } from "./water-transmission.wgsl";
 import { waterInterfaceSamplingWGSL } from "./water-interface-sampling.wgsl";
 import { waterSolidContactWGSL } from "./water-solid-contact";
 import { waterDielectricInterfaceWGSL } from "./water-dielectric-interface";
-import { svoEnvironmentCloudsWGSL } from "../svo/features/radiance/svo-environment-lighting";
+import { SKY_CAPTURE_BYTES, SKY_CAPTURE_FIELD, skyCaptureWords } from "./photographic-sky";
+import { environmentCloudShader } from "../svo/features/radiance/svo-environment-lighting";
 import { waterReflectionFilterWGSL } from "./water-reflection-filter.wgsl";
 import {uniformSolidContourWGSL} from "../methods/uniform/uniform-solid-contour.wgsl";
 import { createWaterReflectionWGSL } from "./water-reflection.wgsl";
@@ -377,6 +378,24 @@ fn freeFieldCell(cell: vec3i) -> f32 {
 // one-cell sheet with rho=.6 becomes .3 under [1 2 1]^3 / 64 and vanishes even
 // though the solver and the surface-density diagnostic both classify it as
 // liquid. Marching cubes owns interpolation between these cell-centred nodes.
+// A revision-local cache of the unmodified solver samplers. A splash that
+// leaves this box follows the identical sparse path at its new position.
+@group(0) @binding(27) var<uniform> sampleOrigin:vec4i;
+@group(0) @binding(28) var contourSamples:texture_3d<f32>;
+@group(1) @binding(0) var sampleTarget:texture_storage_3d<rgba32float,write>;
+fn sampleCoord(cell:vec3i)->vec3i{return cell+32*umFramePage()-sampleOrigin.xyz;}
+fn sampleAvailable(coord:vec3i)->bool{
+ let size=textureDimensions(contourSamples);return size.x>1u&&all(vec3u(coord)<size);
+}
+@compute @workgroup_size(4,4,4)
+fn bakeContourSamples(@builtin(global_invocation_id) gid:vec3u){
+ udrInit();if(any(gid>=textureDimensions(sampleTarget))){return;}
+ let c=vec3i(gid)+sampleOrigin.xyz-32*umFramePage();
+ let kind=umCellKind(c);
+ let tag=select(select(0.0,1.0,kind==UM_BULK16),-1.0,kind==UM_SOLID);
+ let sample=vec4f(freeFieldCell(c),surfaceSolidClearance(vec3f(c)+0.5),tag,umVertexValue(vec3u(c)));
+ textureStore(sampleTarget,vec3i(gid),sample);
+}
 fn presentationFieldCell(cell:vec3i)->f32{
   return surfaceClipValue(cell,freeFieldCell(cell));
 }
@@ -652,7 +671,11 @@ fn uniformPhiNormal(lattice:vec3f, fallback:vec3f) -> vec3f {
   let gather=select(0u,normalCube,uniformNormalGather&&all(abs(center-normalCubeBase)<=vec3i(1)));
   var weightSum=0.0;var phiSum=0.0;var phiReference=0.0;
   var derivativeWeightSum=vec3f(0.0);var phiDerivativeSum=vec3f(0.0);
-  if(uniformNormalLoops&&gather==1u){
+  let sampleBase=sampleCoord(center);
+  if(mixed && sampleAvailable(sampleBase-1) && sampleAvailable(sampleBase+1)
+     && all(center-1>=sampleLow) && all(center+1<=sampleHigh)){
+  ${uniformNormalLoopWGSL("phi=textureLoad(contourSamples,sampleBase+vec3i(ox,oy,oz),0).w;","let q=center+vec3i(ox,oy,oz);")}
+  }else if(uniformNormalLoops&&gather==1u){
   ${uniformNormalLoopWGSL("if(all((q&vec3i(3))==vec3i(0))){phi=umVertexValue(vec3u(q));}else{phi=umLoadFineVertex(vec3u(q));}")}
   }else if(uniformNormalLoops&&gather==2u){
   ${uniformNormalLoopWGSL("phi=uniformNormalBase(q);")}
@@ -693,6 +716,11 @@ fn surfaceHaloClearance(p:vec3i)->f32{
 }
 // With obstacles, the nearer of the halo and the obstacle's face.
 fn surfaceLatticeClearance(p:vec3i)->f32{
+  let cell=uniformSurfaceCell(p);let coord=sampleCoord(cell);
+  if(sampleAvailable(coord)){
+    let s=textureLoad(contourSamples,coord,0);
+    return select(s.y/(u.container.y/u.gridInfo.y),-0.5,s.z<0.0);
+  }
   let halo=surfaceHaloClearance(p);
   if(halo<0.0||!surfaceHasSolids()){return halo;}
   return surfaceSolidClearance(vec3f(uniformSurfaceCell(p))+0.5)/(u.container.y/u.gridInfo.y);
@@ -703,6 +731,8 @@ fn surfaceContactLevel(p:vec3i)->f32{
   var cell=vec3i(p.x-1,max(p.y-1,0),p.z-1);
   if(umPresentationEnabled()){
     cell=uniformSurfaceCell(p);
+    let coord=sampleCoord(cell);
+    if(sampleAvailable(coord)){let s=textureLoad(contourSamples,coord,0);return select(s.x-0.5,0.5,s.z>0.0);}
     if(umCellKind(cell)==UM_BULK16){return 0.5;}
   }
   return freeFieldCell(cell)-0.5;
@@ -744,19 +774,45 @@ fn surfaceContactLattice(a:vec3f,b:vec3f,t:f32,cubeScale:f32,ends:vec2f)->vec3f{
   return p;
 }
 
+// All crossings of one active cube use the same eight liquid and obstacle
+// samples. Keep these per invocation, including samples on the closed halo
+// that classification itself would discard but contact interpolation needs.
+var<private> cornerSolid:array<f32,8>;
+var<private> cornerLiquid:array<f32,8>;
+var<private> cornerHalo:array<f32,8>;
+fn loadSolidCube(base:vec3i,scale:i32)->array<f32,8>{
+  let offsets=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),
+    vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
+  let h=u.container.y/u.gridInfo.y;
+  var values:array<f32,8>;
+  for(var i=0u;i<umPresentationLoopBound();i++){
+    let p=base+offsets[i]*scale;let c=uniformSurfaceCell(p);let coord=sampleCoord(c);
+    var solid:f32;var liquid:f32;var closed:bool;var bulk:bool;
+    if(sampleAvailable(coord)){let s=textureLoad(contourSamples,coord,0);liquid=s.x;solid=s.y;closed=s.z<0.0;bulk=s.z>0.0;}
+    else{let kind=umCellKind(c);closed=kind==UM_SOLID;bulk=kind==UM_BULK16;
+      solid=surfaceSolidClearance(vec3f(c)+0.5);liquid=freeFieldCell(c);}
+
+    cornerSolid[i]=solid;cornerLiquid[i]=0.5-liquid;
+    cornerHalo[i]=select(0.5,-0.5,closed);
+    values[i]=select(select(min(liquid,0.5+solid/h),1.0,bulk),0.0,closed);
+  }
+  return values;
+}
+
 // Liquid and obstacle constraints retain independent linear edge crossings.
 // The cube arrays travel by pointer because WGSL passes arrays by value.
-fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f32, cubeValue: ptr<function, array<f32, 8>>, dims:vec3f) -> SurfaceVertex {
+fn crossing(ia:u32, ib:u32, a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f32, cubeValue: ptr<function, array<f32, 8>>, dims:vec3f) -> SurfaceVertex {
   let denominator = vb - va;
   var t = 0.5;
   if (abs(denominator) > 1e-20) { t = clamp((0.5 - va) / denominator, 0.0, 1.0); }
   var contact=false;
   var solidValues:array<f32,8>;
-  var ends=vec2f(surfaceHaloClearance(vec3i(a)),surfaceHaloClearance(vec3i(b)));
+  var ends=vec2f(0.5);
   if(surfaceHasSolids()){
     let ca=uniformSurfaceCell(vec3i(a));let cb=uniformSurfaceCell(vec3i(b));
-    let sa=surfaceSolidClearance(vec3f(ca)+0.5);let sb=surfaceSolidClearance(vec3f(cb)+0.5);
-    var la=0.5-freeFieldCell(ca);var lb=0.5-freeFieldCell(cb);
+    let sa=cornerSolid[ia];let sb=cornerSolid[ib];
+    var la=cornerLiquid[ia];var lb=cornerLiquid[ib];
+    ends=vec2f(cornerHalo[ia],cornerHalo[ib]);
     // A wholly closed cell has no liquid state. Continue from the open end
     // of the edge, not from its arbitrary buried padding sentinel.
     if(sa<0.0&&umCellOpen(ca)<=1e-5){la=lb;}
@@ -765,13 +821,8 @@ fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f3
     let range=surfaceEdgeInterval(-sa,-sb,surfaceEdgeInterval(la,lb,vec2f(0,1)));
     t=select(range.x,range.y,va>=0.5);
     contact=(sa<=0.0||sb<=0.0)&&abs(mix(sa,sb,t))<1e-5*(u.container.y/u.gridInfo.y);
-    if(contact){
-      let offsets=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
-      for(var i=0u;i<umPresentationLoopBound();i++){
-        solidValues[i]=surfaceSolidClearance(vec3f(uniformSurfaceCell(vec3i(cubeBase)+offsets[i]*i32(cubeScale)))+0.5);
-      }
-    }
-  }
+    if(contact){solidValues=cornerSolid;}
+  }else{ends=vec2f(surfaceHaloClearance(vec3i(a)),surfaceHaloClearance(vec3i(b)));}
   let lattice = surfaceContactLattice(a, b, t, cubeScale, ends);
   if(contact){return SurfaceVertex(vec4f(latticeWorld(lattice,dims),1),vec4f(surfaceNormal(lattice,cubeBase,cubeScale,&solidValues,dims),0));}
   return SurfaceVertex(vec4f(latticeWorld(lattice,dims), 1.0),
@@ -801,7 +852,7 @@ fn emitTriangle(a: SurfaceVertex, b: SurfaceVertex, c: SurfaceVertex) {
 
 fn cubeEdgeVertex(edgeId:u32,p:ptr<function,array<vec3f,8>>,value:ptr<function,array<f32,8>>,cubeBase:vec3f,cubeScale:f32,dims:vec3f)->SurfaceVertex{
   let a=MC_EDGE_A[edgeId];let b=MC_EDGE_B[edgeId];
-  return crossing((*p)[a],(*p)[b],(*value)[a],(*value)[b],cubeBase,cubeScale,value,dims);
+  return crossing(a,b,(*p)[a],(*p)[b],(*value)[a],(*value)[b],cubeBase,cubeScale,value,dims);
 }
 
 // A crossing is evaluated once per cube and reused by every triangle of the
@@ -911,7 +962,8 @@ fn polygoniseMain(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invo
     // and every crossing's normal stencil below.
     if (cubeScale == 1u) { uniformNormalCube(base); }
     if (uniformCubeMemo && (normalCube == 1u || normalCube == 3u)) { cubeMemo = normalCube; }
-    value = loadCubeCornersScaled(base, i32(cubeScale));
+    if(surfaceHasSolids()){value=loadSolidCube(base,i32(cubeScale));}
+    else{value=loadCubeCornersScaled(base,i32(cubeScale));}
     cubeMemo = 0u;
     vertexCount = 3u * cubeTriangleCount(&value);
   }
@@ -1012,7 +1064,7 @@ fn extractSharedMain(@builtin(workgroup_id) group:vec3u,@builtin(local_invocatio
 // window 8, so its union is seven samples wide (six on the low half).
 var<workgroup> collectedCoarsePhi: array<f32, 343>;
 fn uniformWindowQuiet(b: u32, page: vec3i, g: vec3u, cacheOrigin: vec3i) -> bool {
-  if(surfaceWindowHasSolid(vec3i(g))){return false;}
+
   // Only SOLID pages close the contour; AIR and resident pages stay open.
   // A BULK16 page (deep liquid) stores no tiles: its vertices are held.
   let low = vec3i(g) - vec3i(1);
@@ -1034,7 +1086,8 @@ fn uniformWindowQuiet(b: u32, page: vec3i, g: vec3u, cacheOrigin: vec3i) -> bool
     air = air && phi > margin;
     liquid = liquid && phi <= 0.0;
   }
-  return air || liquid;
+  // Clipping can only remove liquid. Solid proximity matters solely for a liquid window.
+  return air || (liquid && !surfaceWindowHasSolid(vec3i(g)));
 }
 
 // Two launches. The first runs one lane per window of every stored page
@@ -1435,7 +1488,7 @@ fn extractWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(num_workgrou
     if (header.w != 0u) {
       let signs = atomicLoad(&windowSigns);
       // Air, or liquid with no corner in the wall halo.
-      quiet = !surfaceWindowHasSolid(g)&&((signs & 1u) == 0u || ((signs & 2u) == 0u && uniformWindowInterior(g)));
+      quiet = (signs & 1u) == 0u || ((signs & 2u) == 0u && uniformWindowInterior(g) && !surfaceWindowHasSolid(g));
     }
     if (header.w != 0u && !quiet) {
       if (header.w == 1u) { uniformWindowCellsFine(g, index); }
@@ -1580,8 +1633,28 @@ fn project(world:vec3f)->vec4f {
   }
   return o;
 }
+// The FLIP surface supplies the large-scale normal. Unresolved gravity-capillary
+// waves perturb the optical interface only. Filter by the projected pixel width
+// so distant highlights fade into roughness instead of aliasing.
+fn breezeSlope(p:vec2f, time:f32, dx:vec2f, dy:vec2f, direction:vec2f, k:f32, phase:f32)->vec2f {
+  let footprint=k*max(abs(dot(dx,direction)),abs(dot(dy,direction)));
+  let resolved=1.-smoothstep(1.25,3.14,footprint);
+  let omega=sqrt(9.80665*k+.000072*k*k*k);
+  return direction*(resolved*cos(dot(p,direction)*k-time*omega+phase));
+}
 struct SurfaceOut { @location(0) position:vec4f, @location(1) normal:vec4f }
 @fragment fn surfaceFragment(input:Out)->SurfaceOut {
+  let dx=dpdx(input.world.xz);let dy=dpdy(input.world.xz);
+  var optical=normalize(input.normal);
+  if(u.cameraBasisRight.w>0. && optical.y>.55 && input.film<.001){
+    let p=input.world.xz;let t=u.viewport.z;
+    let slope=breezeSlope(p,t,dx,dy,vec2f(.9701,.2425),22.1,0.3)
+      +.72*breezeSlope(p,t,dx,dy,vec2f(.6347,.7728),34.4,1.7)
+      +.54*breezeSlope(p,t,dx,dy,vec2f(-.3051,.9524),48.7,3.1)
+      +.38*breezeSlope(p,t,dx,dy,vec2f(.9104,-.4138),71.8,2.3);
+    let strength=u.cameraBasisRight.w*smoothstep(.55,.94,optical.y);
+    optical=normalize(optical-strength*vec3f(slope.x,0.,slope.y));
+  }
   if(peelBehindFirstExit>.5){
     let firstBack=textureLoad(firstBackPosition,vec2i(input.clip.xy),0);
     if(firstBack.a<.5){discard;}
@@ -1595,7 +1668,7 @@ struct SurfaceOut { @location(0) position:vec4f, @location(1) normal:vec4f }
   // premultiplied by the same value so filtered coverage recovery still
   // returns a unit normal. Position alpha remains ordinary coverage.
   let encodedFilm=1.0+max(input.film,0.0);
-  var o:SurfaceOut;o.position=vec4f(input.world,1.0);o.normal=vec4f(normalize(input.normal)*encodedFilm,encodedFilm);return o;
+  var o:SurfaceOut;o.position=vec4f(input.world,1.0);o.normal=vec4f(optical*encodedFilm,encodedFilm);return o;
 }
 `;
 
@@ -1855,7 +1928,7 @@ struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, c
 ${uniformMixedPresentationWGSL(17,"contactDetailPhi","contactCoarsePhi","liquidTopology")}
 struct ContactFrame { grid:vec4f, cell:vec4f, origin:vec4f }
 @group(0) @binding(20) var<uniform> contactFrame:ContactFrame;
-${waterSceneOpticsShaderLibrary(0, 15, 16)}
+${waterSceneOpticsShaderLibrary(0, 15, 16, SKY_CAPTURE_FIELD)}
 ${cameraApertureShaderLibrary("u")}
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
@@ -2037,7 +2110,7 @@ fn waterReflectionDepth(uv:vec2f)->f32{
   let pixel=clamp(vec2i(uv*vec2f(size)),vec2i(0),size-vec2i(1));
   return resolvedDrySceneDepth(textureLoad(sceneTexture,pixel,0).a);
 }
-${svoEnvironmentCloudsWGSL}
+${environmentCloudShader("waterScene")}
 // The reflected sky uses the same resolved radiance palette as dry scenery.
 // Its directional key is evaluated separately by unifiedWaterSpecular, once.
 fn waterEnvironmentRadiance(direction:vec3f)->vec3f{
@@ -2126,14 +2199,25 @@ fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
 // the scene's own scenery graph, so it parallaxes, occludes and takes light like the rest
 // of the world. Only the lens falloff remains, which belongs to the camera.
 fn finish(color:vec3f,ndc:vec2f)->vec4f{if(linearHdrOutput>.5){return vec4f(color,1);}let c=color*(1.0-.08*dot(ndc*.55,ndc*.55));return vec4f(unifiedDisplayGradeBalanced(c,waterDisplayExposure(),waterDisplayToneCurve(),waterDisplayWhiteBalance()),1);}
+@fragment fn dryCompositeMain(input:VOut)->@location(0) vec4f{
+  return finish(textureLoad(sceneTexture,vec2i(input.position.xy),0).rgb,input.uv*2.0-1.0);
+}
 @fragment fn fragmentMain(input:VOut)->@location(0) vec4f{
-  udrInit();
   // Full-screen interpolated UV has Y=1 at the top of the render target,
   // while sampled WebGPU textures have Y=0 there. The shared legacy upscaler
   // performs the same conversion for the final target; all raster-path
   // intermediate reads and world projections must do it here as well.
   let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=cameraRightDirection(forward);let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);
-  let scene=safeSample(sceneTexture,textureUV);if(wireframeOnly>.5){return finish(scene.rgb,ndc);}var front=safePositionSample(frontPosition,textureUV);if(front.a<.5){return finish(scene.rgb,ndc);}var frontDepth=dot(front.xyz-ro,rd);
+  // All three attachments share this raster grid. An aligned surface sample
+  // has only one contributing texel, including at a silhouette.
+  let pixelCoord=vec2i(input.position.xy);
+  let scene=textureLoad(sceneTexture,pixelCoord,0);
+  if(wireframeOnly>.5){return finish(scene.rgb,ndc);}
+  var front=textureLoad(frontPosition,pixelCoord,0);
+  if(front.a<.5){return finish(scene.rgb,ndc);}
+  front=vec4f(front.xyz/front.a,front.a);
+  udrInit();
+  var frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
   // Simple material: the actual mesh silhouette and normals over undistorted
   // scenery, fogged by the liquid the ray crosses. No refraction, environment
@@ -2325,10 +2409,40 @@ export class RasterWaterPipeline {
   private lastWorldReflectionsApplied = false;
   private rearReflections?: GPUTexture;
   private compositePipeline?: GPURenderPipeline;
+  private dryCompositePipeline?: GPURenderPipeline;
   private environmentCompositePipeline?: GPURenderPipeline;
   private reflectionMode: WaterReflectionMode = "screen-space";
   private wireframeCompositePipeline?: GPURenderPipeline;
   private simpleCompositePipeline?: GPURenderPipeline;
+  private contourStaticPipeline?: GPUComputePipeline;
+  private samplePipeline?: GPUComputePipeline;
+  private sampleGrid?: GPUTexture;
+  private interpolateSamples = false;
+  private sampleFraction = 1;
+  private extractedFraction = 1;
+  private sampleHistory?: {
+    older: GPUTexture; previous: GPUTexture; current: GPUTexture;
+    blend: GPUBindGroup; blendPrevious: GPUBindGroup; revision?: number;
+  };
+  private sampleBlendPipeline?: GPUComputePipeline;
+  private interpolationFactor?: GPUBuffer;
+
+  get hasSampleHistory() { return this.sampleHistory?.revision !== undefined; }
+
+  setSurfaceInterpolation(enabled: boolean, fraction: number) {
+    if (this.interpolateSamples !== enabled) {
+      this.interpolateSamples = enabled;
+      this.contourSourceDirty = true;
+      this.extractedRevision = -1;
+    }
+    this.sampleFraction = fraction;
+  }
+  private sampleOrigin?: GPUBuffer;
+  private sampleInputs?: GPUBindGroup;
+  private sampleOutput?: GPUBindGroup;
+  private contourStaticGrid?: GPUTexture;
+  private contourStaticSource?: DenseLevelSetVolumeConsumerSource["staticContourGeometry"];
+  private contourSourceDirty = false;
   private extractLayout?: GPUBindGroupLayout;
   private prepareLayout?: GPUBindGroupLayout;
   private causticLayout?: GPUBindGroupLayout;
@@ -2599,7 +2713,14 @@ export class RasterWaterPipeline {
       ,{ binding: 22, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
       ,{ binding: 23, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
       ,{ binding: 24, visibility: GPUShaderStage.COMPUTE, texture:{sampleType:"unfilterable-float",viewDimension:"2d"} }
+      ,{ binding: 25, visibility: GPUShaderStage.COMPUTE, texture:{sampleType:"unfilterable-float",viewDimension:"3d"} }
+      ,{ binding: 27, visibility: GPUShaderStage.COMPUTE, buffer:{type:"uniform"} }
+      ,{ binding: 28, visibility: GPUShaderStage.COMPUTE, texture:{sampleType:"unfilterable-float",viewDimension:"3d"} }
     ] });
+    const sampleOutputLayout = this.device.createBindGroupLayout({ entries: [
+      {binding:0,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}}
+    ] });
+    this.sampleOrigin = this.device.createBuffer({ label:"Contour cache origin", size:16, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
     this.bulkPrepareLayout = this.device.createBindGroupLayout({ label: "Water BULK16 window prepare bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
@@ -2697,6 +2818,26 @@ export class RasterWaterPipeline {
         accept(await this.device.createRenderPipelineAsync(descriptor));
       } });
 
+    const sampleBlendModule = await checkedModule(this.device, "Water sample interpolation", `
+      @group(0) @binding(0) var previous:texture_3d<f32>;
+      @group(0) @binding(1) var current:texture_3d<f32>;
+      @group(0) @binding(2) var display:texture_storage_3d<rgba32float,write>;
+      @group(0) @binding(3) var<uniform> fraction: f32;
+      @compute @workgroup_size(4,4,4) fn main(@builtin(global_invocation_id) gid:vec3u) {
+        if(any(gid>=textureDimensions(display))){return;}
+        let p=vec3i(gid); let a=textureLoad(previous,p,0); let b=textureLoad(current,p,0);
+        // A changing ownership tag is neither a wholly buried nor a full bulk
+        // cell between the two solves. Its sampled liquid and clearance decide.
+        let value=mix(a,b,fraction);
+        textureStore(display,p,vec4f(value.xy,select(0.,b.z,a.z==b.z),value.w));
+      }`);
+    compute("Preparing water interpolation", {label:"Interpolate committed fluid fields",layout:"auto",
+      compute:{module:sampleBlendModule,entryPoint:"main"}}, pipeline => { this.sampleBlendPipeline=pipeline; });
+    compute("Preparing shared contour samples", { label:"Cache live contour samples",
+      layout:this.device.createPipelineLayout({bindGroupLayouts:[this.extractLayout,sampleOutputLayout]}),
+      compute:{module:extract,entryPoint:"bakeContourSamples"} }, pipeline => { this.samplePipeline=pipeline; });
+    compute("Preparing static contour distances", { label: "Static contour distances", layout: "auto",
+      compute: { module: extract, entryPoint: "bakeContourStaticGrid" } }, pipeline => { this.contourStaticPipeline = pipeline; });
     compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractSharedMain" } },pipeline=>{this.extractPipeline=pipeline;});
     compute("Listing liquid surface windows",{ label: "List liquid surface windows", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "collectWindowsMain" } },pipeline=>{this.collectWindowsPipeline=pipeline;});
     compute("Listing BULK16 surface windows",{ label: "List BULK16 surface windows", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "collectBulkWindowsMain" } },pipeline=>{this.collectBulkWindowsPipeline=pipeline;});
@@ -2725,7 +2866,15 @@ export class RasterWaterPipeline {
     compute("Bounding water reflection depth", {label:"Bound water reflection depth",layout:"auto",compute:{module:reflectionBounds,entryPoint:"main"}}, pipeline=>{this.reflectionBoundsPipeline=pipeline;});
     render("Tracing water reflections", {label:"Trace layered water reflections",layout:reflectionPipelineLayout,
       vertex:{module:composite,entryPoint:"vertexMain"},fragment:{module:composite,entryPoint:"reflectionMain",targets:[{format:"rgba16float"},{format:"rgba16float"}]},primitive:{topology:"triangle-list"}}, pipeline=>{this.reflectionPipeline=pipeline;});
-    render("Compositing water optics",compositeDescriptor,pipeline=>{this.compositePipeline=pipeline;});
+    // The fullscreen triangle has reversed-Z depth zero. Complementary tests
+    // send only covered water pixels through the register-heavy optical shader.
+    render("Compositing water optics", { ...compositeDescriptor,
+      depthStencil: { format: WATER_INTERFACE_DEPTH.format, depthWriteEnabled: false, depthCompare: "less" },
+    }, pipeline => { this.compositePipeline = pipeline; });
+    render("Grading dry pixels", { ...compositeDescriptor, label: "Dry scene display grade",
+      fragment: { module: composite, entryPoint: "dryCompositeMain", targets: [{ format: this.targetFormat }] },
+      depthStencil: { format: WATER_INTERFACE_DEPTH.format, depthWriteEnabled: false, depthCompare: "equal" },
+    }, pipeline => { this.dryCompositePipeline = pipeline; });
     render("Requesting offscreen water transmission",{label:"Water transmission requests",layout:transmissionRequestPipelineLayout,
       vertex:{module:composite,entryPoint:"vertexMain"},fragment:{module:composite,entryPoint:"transmissionRequestMain",targets:[{format:"rgba16float"},{format:"rgba16float"}]},primitive:{topology:"triangle-list"}},pipeline=>{this.transmissionRequestPipeline=pipeline;});
     render("Verifying liquid transmission intervals",{label:"Water transmission liquid verification",layout:compositePipelineLayout,
@@ -2757,7 +2906,8 @@ export class RasterWaterPipeline {
     this.fallbackSolidTerrain=this.device.createTexture({label:"Water unread solid terrain",size:[1,1],format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING});
     this.fallbackSolidUniform=this.device.createBuffer({label:"Water disabled solid uniforms",size:Math.max(GPU_RIGID_BODY_CAPACITY*128,UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES),usage:GPUBufferUsage.UNIFORM});
     this.fallbackField = this.device.createTexture({ label: "Water unread field binding", size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING });
-    this.waterSceneOpticsBuffer = this.device.createBuffer({ label: "Water scene optics and caustic receiver", size: WATER_SCENE_OPTICS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.waterSceneOpticsBuffer = this.device.createBuffer({ label: "Water scene optics and caustic receiver", size: WATER_SCENE_OPTICS_BYTES + SKY_CAPTURE_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(this.waterSceneOpticsBuffer, WATER_SCENE_OPTICS_BYTES, skyCaptureWords());
     // Allocated unconditionally: the composite declares the receiver whether or
     // not the scene has ground, and a bind group with a missing entry is not a
     // bind group. A container-less scene leaves it zeroed and the uniform's
@@ -2793,7 +2943,8 @@ export class RasterWaterPipeline {
    * vertex field raw. */
   private adoptLevelSetSource(source: DenseLevelSetVolumeConsumerSource | undefined): boolean {
     if (source === this.levelSetSource) return false;
-    const contourChanged = this.levelSetSource?.contourVertexPhi !== source?.contourVertexPhi || this.levelSetSource?.solidBoundary !== source?.solidBoundary;
+    const contourChanged = this.levelSetSource?.contourVertexPhi !== source?.contourVertexPhi || this.levelSetSource?.solidBoundary !== source?.solidBoundary
+      || this.levelSetSource?.staticContourGeometry !== source?.staticContourGeometry;
     this.levelSetSource = source;
     const mixed = source?.mixedOwnership && source.coarseVertexPhi ? source : undefined;
     const detail = mixed ? mixed.detailVertexPhi : source?.vertexPhi, ownership = mixed?.mixedOwnership, coarse = mixed?.coarseVertexPhi;
@@ -2891,10 +3042,12 @@ export class RasterWaterPipeline {
    * production ones are. options.collector compares collection implementations
    * on a frozen source. options.timestampQuerySet supplies four timestamp slots:
    * classify/prepare begin/end, then polygonise begin/end (unless countOnly). */
-  encodeDenseSurfaceExtractionForQA(encoder: GPUCommandEncoder, nx: number, ny: number, nz: number, classify: WaterSurfaceClassify, countOnly = false, classifier?: GPUComputePipeline, polygoniser?: GPUComputePipeline, options?: { collector?: GPUComputePipeline; timestampQuerySet?: GPUQuerySet }): void {
+  encodeDenseSurfaceExtractionForQA(encoder: GPUCommandEncoder, nx: number, ny: number, nz: number, classify: WaterSurfaceClassify, countOnly = false, classifier?: GPUComputePipeline, polygoniser?: GPUComputePipeline, options?: { collector?: GPUComputePipeline; timestampQuerySet?: GPUQuerySet; sampleTimestamps?: GPUComputePassTimestampWrites; revision?: number }): void {
     this.ensureGeometry(nx, ny, nz);
+    this.prepareStaticContour(encoder);
     if (!this.extractBindGroup || !this.prepareBindGroup || !this.indirectBuffer || !this.surfaceWindows || !this.preparePipeline || !this.polygonisePipeline || !this.extractPipeline || !this.collectWindowsPipeline || !this.extractWindowsPipeline || !this.orderWorklistPipeline || !this.polygoniseDispatchBuffer)
       throw new Error("Water extraction is not initialized");
+    this.sampleContour(encoder, options?.sampleTimestamps,options?.revision);
     const indirectReset = this.indirectResetTemplate ??= this.createIndirectResetTemplate();
     encoder.copyBufferToBuffer(indirectReset, 32, this.indirectBuffer, 0, 36);
     encoder.copyBufferToBuffer(indirectReset, 32, this.surfaceWindows, 0, 4);
@@ -3053,6 +3206,97 @@ export class RasterWaterPipeline {
     return true;
   }
 
+  private prepareStaticContour(encoder: GPUCommandEncoder) {
+    const geometry = this.levelSetSource?.staticContourGeometry;
+    if (!this.contourSourceDirty && geometry === this.contourStaticSource) return;
+    this.contourSourceDirty = false;
+    this.contourStaticSource = geometry;
+    const boundary = this.levelSetSource?.solidBoundary;
+    const size = geometry?.dimensions;
+    // Keep the direct sparse lookup for large or open worlds. This cache is
+    // a bounded texture of static distances, independent of fluid resolution.
+    const fits = size && size[0] > 1 && size.every(n => n <= this.device.limits.maxTextureDimension3D)
+      && 4 * size[0] * size[1] * size[2] <= 64 * 1024 * 1024;
+    if (!fits || !boundary || !this.contourStaticPipeline) {
+      this.contourStaticGrid?.destroy();
+      this.contourStaticGrid = undefined;
+    } else {
+      const grid = this.contourStaticGrid;
+      if (!grid || grid.width !== size[0] || grid.height !== size[1] || grid.depthOrArrayLayers !== size[2]) {
+        grid?.destroy();
+        this.contourStaticGrid = this.device.createTexture({ label: "Static contour distances", size, dimension: "3d",
+          format: "r32float", usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING });
+      }
+      const bindings = this.device.createBindGroup({ layout: this.contourStaticPipeline.getBindGroupLayout(0), entries: [
+        { binding: 14, resource: this.mixedOwnership! }, { binding: 18, resource: boundary.params },
+        { binding: 19, resource: boundary.mask },
+        { binding: 26, resource: this.contourStaticGrid!.createView() },
+      ] });
+      const pass = encoder.beginComputePass({ label: "Bake static contour distances after geometry change" });
+      pass.setPipeline(this.contourStaticPipeline);
+      pass.setBindGroup(0, bindings);
+      pass.dispatchWorkgroups(Math.ceil(size[0] / 4), Math.ceil(size[1] / 4), Math.ceil(size[2] / 4));
+      pass.end();
+    }
+    this.sampleHistory?.older.destroy(); this.sampleHistory?.previous.destroy(); this.sampleHistory?.current.destroy(); this.sampleHistory=undefined;
+    this.sampleGrid?.destroy(); this.sampleGrid=undefined; this.sampleOutput=undefined;
+    const region=geometry?.sampleRegion;
+    if (this.contourStaticGrid && this.samplePipeline && region && region.size.every(n => n>1 && n<=this.device.limits.maxTextureDimension3D)
+        && region.size.reduce((a,b)=>a*b,1)<=192_000) {
+      const [width,height,depthOrArrayLayers]=region.size as [number,number,number];
+      const grid = (label: string) => this.device.createTexture({label,size:{width,height,depthOrArrayLayers},
+        dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING
+          |GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST});
+      this.sampleGrid=grid("Shared live contour samples");
+      if(this.interpolateSamples && this.sampleBlendPipeline){
+        const older=grid("Older fluid samples"),previous=grid("Previous fluid samples"),current=grid("Current fluid samples");
+        this.interpolationFactor ??= this.device.createBuffer({label:"Liquid display fraction",size:16,
+          usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.UNIFORM});
+        const bindPair=(from:GPUTexture,to:GPUTexture)=>this.device.createBindGroup({layout:this.sampleBlendPipeline!.getBindGroupLayout(0),
+          entries:[...[from,to,this.sampleGrid!].map((texture,binding)=>({binding,resource:texture.createView()})),
+            {binding:3,resource:{buffer:this.interpolationFactor!}}]});
+        this.sampleHistory={older,previous,current,blend:bindPair(previous,current),blendPrevious:bindPair(older,previous)};
+      }
+      this.device.queue.writeBuffer(this.sampleOrigin!,0,new Int32Array([...region.origin,0]));
+      const destination=this.sampleHistory?.current ?? this.sampleGrid;
+      this.sampleOutput=this.device.createBindGroup({layout:this.samplePipeline.getBindGroupLayout(1),entries:[{binding:0,resource:destination.createView()}]});
+    }
+    this.rebuildBindGroups();
+  }
+
+  private sampleContour(encoder: GPUCommandEncoder, timestampWrites?: GPUComputePassTimestampWrites, revision?: number) {
+    if(!this.sampleInputs || !this.sampleOutput || !this.sampleGrid || !this.samplePipeline)return;
+    const history = this.sampleHistory;
+    const size = {width:this.sampleGrid.width,height:this.sampleGrid.height,depthOrArrayLayers:this.sampleGrid.depthOrArrayLayers};
+    const dispatch = (pass:GPUComputePassEncoder) =>
+      pass.dispatchWorkgroups(Math.ceil(size.width/4),Math.ceil(size.height/4),Math.ceil(size.depthOrArrayLayers/4));
+    if (!history || revision === undefined || history.revision !== revision) {
+      const consecutive = history?.revision !== undefined && revision === history.revision + 1;
+      if (history && consecutive) {
+        encoder.copyTextureToTexture({texture:history.previous},{texture:history.older},size);
+        encoder.copyTextureToTexture({texture:history.current},{texture:history.previous},size);
+      }
+      const pass=encoder.beginComputePass({label:"Share live water samples",timestampWrites});
+      pass.setPipeline(this.samplePipeline); pass.setBindGroup(0,this.sampleInputs); pass.setBindGroup(1,this.sampleOutput);
+      dispatch(pass); pass.end();
+      if (history) {
+        if (!consecutive) {
+          encoder.copyTextureToTexture({texture:history.current},{texture:history.previous},size);
+          encoder.copyTextureToTexture({texture:history.current},{texture:history.older},size);
+        }
+        history.revision=revision;
+      }
+    }
+    if (history) {
+      if(this.sampleFraction===1) encoder.copyTextureToTexture({texture:history.current},{texture:this.sampleGrid},size);
+      else {
+        this.device.queue.writeBuffer(this.interpolationFactor!,0,new Float32Array([this.sampleFraction < 0 ? 1 + this.sampleFraction : this.sampleFraction]));
+        const pass=encoder.beginComputePass({label:"Interpolate liquid and moving solid boundaries"});
+        pass.setPipeline(this.sampleBlendPipeline!);pass.setBindGroup(0,this.sampleFraction < 0 ? history.blendPrevious : history.blend);dispatch(pass);pass.end();
+      }
+    }
+  }
+
   private ensureGeometry(nx: number, ny: number, nz: number) {
     const windows = this.ensureSurfaceWindows();
     const key = `${nx}x${ny}x${nz}`;
@@ -3206,7 +3450,8 @@ export class RasterWaterPipeline {
     // when all fluid owners are coarse.
     const mixedSurface = Boolean(this.mixedOwnership && this.coarseVertexPhi);
     const contourField = this.levelSetSource?.contourVertexPhi ? this.levelSetSource.vertexPhi : this.volume;
-    if (this.extractLayout && this.volume && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.fallbackSparseControl && this.fallbackField && this.surfaceWindows) this.extractBindGroup = this.device.createBindGroup({ layout: this.extractLayout, entries: [
+    if (this.extractLayout && this.volume && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.fallbackSparseControl && this.fallbackField && this.surfaceWindows) {
+    const entries: GPUBindGroupEntry[] = [
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: (mixedSurface ? this.fallbackField : contourField!).createView({ dimension: "3d" }) }, { binding: 3, resource: { buffer: this.vertexBuffer } }, { binding: 4, resource: { buffer: this.indirectBuffer } }, { binding: 5, resource: { buffer: this.activeCubeBuffer } },
       { binding: 13, resource: (this.denseNormalPhi ?? (mixedSurface ? this.fallbackField : this.volume)).createView({ dimension: "3d" }) },
       { binding: 14, resource: this.mixedOwnership ?? { buffer: this.fallbackSparseControl, size: 4 } },
@@ -3219,8 +3464,15 @@ export class RasterWaterPipeline {
       { binding: 21, resource: this.levelSetSource?.solidBoundary?.bodies ?? {buffer:this.fallbackSolidUniform!} },
       { binding: 22, resource: this.levelSetSource?.solidBoundary?.analyticTerrain ?? {buffer:this.fallbackSolidUniform!} },
       { binding: 23, resource: this.mixedBulk?.binding ?? { buffer: this.fallbackSparseControl, size: 4 } },
-      { binding: 24, resource: (this.levelSetSource?.solidBoundary?.bodyCuts??this.fallbackSolidTerrain!).createView() }
-    ] });
+      { binding: 24, resource: (this.levelSetSource?.solidBoundary?.bodyCuts??this.fallbackSolidTerrain!).createView() },
+      { binding: 25, resource: (this.contourStaticGrid ?? this.fallbackField).createView({ dimension: "3d" }) },
+      { binding: 27, resource: {buffer:this.sampleOrigin!} },
+    ];
+    const build = (samples:GPUTexture) => this.device.createBindGroup({layout:this.extractLayout!,
+      entries:[...entries,{binding:28,resource:samples.createView({dimension:"3d"})}]});
+    this.extractBindGroup=build(this.sampleGrid ?? this.fallbackField);
+    this.sampleInputs=this.sampleGrid ? build(this.fallbackField) : undefined;
+    }
     if (this.bulkPrepareLayout && this.bulkWindowsDispatchBuffer && this.fallbackSparseControl) this.bulkPrepareBindGroup = this.device.createBindGroup({ layout: this.bulkPrepareLayout, entries: [
       { binding: 0, resource: this.mixedBulk?.binding ?? { buffer: this.fallbackSparseControl, size: 4 } }, { binding: 1, resource: { buffer: this.bulkWindowsDispatchBuffer } }
     ] });
@@ -3289,11 +3541,12 @@ export class RasterWaterPipeline {
     }
     if (this.meshOverflowVertices) throw new Error(`Water surface: the mesh needs ${this.meshOverflowVertices} vertices, over its capacity of ${this.meshOverflowCapacity}; whole triangles were dropped`);
     this.ensureGeometry(nx, ny, nz);
+    this.prepareStaticContour(encoder);
     if (!this.extractPipeline || !this.extractWindowsPipeline || !this.orderWorklistPipeline
       || !this.collectWindowsPipeline || !this.preparePipeline || !this.polygonisePipeline
       || !this.surfaceFrontPipeline || !this.surfaceBackPipeline || !this.surfaceRearFrontPipeline
       || !this.surfaceRearBackPipeline || !this.surfaceWireframePipeline || !this.causticPipeline
-      || !this.reflectionPipeline || !this.reflectionBoundsPipeline || !this.compositePipeline || !this.environmentCompositePipeline || !this.wireframeCompositePipeline || !this.simpleCompositePipeline
+      || !this.reflectionPipeline || !this.reflectionBoundsPipeline || !this.compositePipeline || !this.dryCompositePipeline || !this.environmentCompositePipeline || !this.wireframeCompositePipeline || !this.simpleCompositePipeline
       || !this.extractBindGroup || !this.prepareBindGroup || !this.surfaceBindGroup || !this.causticBindGroup
       || !this.surfaceUnpeeledBindGroup || !this.surfacePeelBindGroup || !this.compositeBindGroup
       || !this.indirectBuffer || !this.polygoniseDispatchBuffer || !this.volume || !this.sceneTexture
@@ -3315,8 +3568,8 @@ export class RasterWaterPipeline {
     // forever behind a diagnostic switch.
     const updateSurface = forceSurfaceDiagnostics
       || (!this.disabledStages.has("surface-extraction")
-        && shouldUpdateWaterSurface(this.extractedRevision, revision,
-          this.lastExtractionAt_ms, now_ms, revisionCadenceBypass));
+        && (this.extractedFraction !== this.sampleFraction || shouldUpdateWaterSurface(this.extractedRevision, revision,
+          this.lastExtractionAt_ms, now_ms, revisionCadenceBypass)));
     let surfaceDiagnosticsCaptured = false;
     // The map follows the mesh: a retained surface deposits the same bundles,
     // so re-projecting it would spend a full pass to write the same texels. A
@@ -3339,6 +3592,7 @@ export class RasterWaterPipeline {
       // against the empty border on every container face. The reset above is
       // the whole extraction, an empty mesh.
       if (this.sceneHasFluid) {
+        this.sampleContour(encoder, undefined, revision);
         let compute=encoder.beginComputePass({label:"Extract water isosurface"});compute.setBindGroup(0,this.extractBindGroup);
         const prepareAndPolygonise=(pipeline:GPUComputePipeline,group:GPUBindGroup)=>{
           compute.setPipeline(this.preparePipeline!);compute.setBindGroup(0,this.prepareBindGroup!);compute.dispatchWorkgroups(1);
@@ -3351,6 +3605,7 @@ export class RasterWaterPipeline {
         compute.end();
       }
       this.surfaceDiagnosticsDirty = true;
+      this.extractedFraction = this.sampleFraction;
       this.extractedRevision = revision; this.lastExtractionAt_ms = advancePresentationClock(this.lastExtractionAt_ms, now_ms);
       tracePhase?.("surface-extraction");
     }
@@ -3527,11 +3782,17 @@ export class RasterWaterPipeline {
       &&surfaceRenderMode==="shaded"&&!this.disabledStages.has("optical-composite");
     this.lastLensApplied=useLens;
     const opticalOutput=useLens?this.lensCamera!.ensureSize(this.sceneTexture.width,this.sceneTexture.height,this.lensOptions).createView():outputView;
-    const composite=encoder.beginRenderPass({label:"Layered water optical composite",colorAttachments:[{view:opticalOutput,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});
+    const splitCoverage = !useLens && surfaceRenderMode === "shaded" && this.reflectionMode !== "environment";
+    const composite=encoder.beginRenderPass({label:"Layered water optical composite",depthStencilAttachment:splitCoverage ? { view:this.frontDepth.createView(),depthReadOnly:true } : undefined,colorAttachments:[{view:opticalOutput,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});
     // The single final transform every render path shares: withholding it keeps
     // the clear so the presentation target is the background colour rather than
     // a stale composite that would look like the pass still ran.
     if (!this.disabledStages.has("optical-composite")) {
+      if (splitCoverage) {
+        composite.setPipeline(this.dryCompositePipeline);
+        composite.setBindGroup(0, compositeBindGroup);
+        composite.draw(3);
+      }
       composite.setPipeline(useLens
         ? this.reflectionMode==="environment"?lensComposite!.environment:lensComposite!.shaded
         : surfaceRenderMode === "wireframe" ? this.wireframeCompositePipeline : surfaceRenderMode === "simple" ? this.simpleCompositePipeline : this.reflectionMode === "environment" ? this.environmentCompositePipeline : this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
@@ -3554,6 +3815,11 @@ export class RasterWaterPipeline {
   }
 
   destroy() {
+    this.contourStaticGrid?.destroy();
+    this.sampleGrid?.destroy();
+    this.sampleHistory?.older.destroy(); this.sampleHistory?.previous.destroy(); this.sampleHistory?.current.destroy();
+    this.interpolationFactor?.destroy();
+    this.sampleOrigin?.destroy();
     this.fallbackRigidSurfaceCuts?.destroy();
     this.lensCamera?.destroy();
     this.frontWorldReflections?.destroy(); this.rearWorldReflections?.destroy();

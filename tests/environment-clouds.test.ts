@@ -2,10 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { cloneScene, defaultScene, parseScene, serializeScene, validateScene } from "../lib/core/model";
 import { svoSceneEnvironmentLightingOptions } from "../lib/svo/features/lighting-visibility/svo-dry-scene-lighting";
-import { buildSvoEnvironmentLighting, evaluateSvoEnvironmentCloudRadiance, evaluateSvoEnvironmentPrefilteredSpecular, packSvoEnvironmentLightingRecords, svoEnvironmentLightingRecord, svoEnvironmentLightingWGSL, unpackSvoEnvironmentLightingRecord } from "../lib/svo/features/radiance/svo-environment-lighting";
+import { buildSvoEnvironmentLighting, evaluateSvoEnvironmentCloudRadiance, evaluateSvoEnvironmentPrefilteredSpecular, packSvoEnvironmentLightingRecords, svoEnvironmentLightingRecord, environmentLightingShader, unpackSvoEnvironmentLightingRecord } from "../lib/svo/features/radiance/svo-environment-lighting";
 import { buildOctreeSvoEnvironmentLightingPublication } from "../lib/svo/features/construction/webgpu-svo-sparse-bricks";
-import { buildSparseVoxelDrySceneLightingMirrors } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
+import { buildSparseVoxelDrySceneLightingMirrors, SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
 import type { SvoVec3 } from "../lib/svo/features/primary-visibility/webgpu-svo-traversal";
+
+import { SKY_CAPTURE_BYTES, SKY_CAPTURE_FIELD, skyCaptureWords } from "../lib/core/photographic-sky";
+import { WATER_SCENE_OPTICS_BYTES } from "../lib/core/webgpu-lighting";
+
+test("the photographic sky and both lighting headers fit a standard WebGPU uniform binding", () => {
+  assert.equal(skyCaptureWords().byteLength, SKY_CAPTURE_BYTES);
+  assert.ok(Math.max(WATER_SCENE_OPTICS_BYTES, SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.sizeBytes) + SKY_CAPTURE_BYTES <= 65536);
+});
 
 const directions: readonly SvoVec3[] = [[.2,.3,.9],[-.6,.5,.4],[.7,.1,-.8],[-.3,.95,-.1],[.6,-.2,.4],[0,1,0]];
 
@@ -26,6 +34,19 @@ test("clouds default off, serialize as scene lighting, and affect the existing r
   }
   const base=[.3,.4,.5] as const;
   assert.deepEqual(evaluateSvoEnvironmentCloudRadiance(base,[0,1,0],0,0,[.1,.2,.3],[.7,.8,1],[1,1,1],[0,1,0]),base);
+});
+
+test("captured daylight, distance haze and optical ripples survive a document round trip",()=>{
+  const scene=cloneScene(defaultScene);
+  scene.lighting={environment:{skyCapture:"kloofendal",aerialPerspective_m:110}};
+  scene.fluid.optics={windRippleSlope:.042};
+  const saved=parseScene(serializeScene(scene));
+  assert.deepEqual(saved.lighting,scene.lighting);
+  assert.equal(saved.fluid.optics?.windRippleSlope,.042);
+  scene.lighting.environment!.aerialPerspective_m=0;
+  assert.ok(validateScene(scene).some(error=>error.includes("Aerial perspective")));
+  scene.fluid.optics = { ...scene.fluid.optics, windRippleSlope: -.1 };
+  assert.ok(validateScene(scene).some(error=>error.includes("wind ripple slope")));
 });
 
 test("cloud detail varies with direction and disappears at full roughness; below-horizon radiance is unchanged",()=>{
@@ -71,9 +92,12 @@ test("GPU visible/reflected sky evaluator agrees with CPU for cloud coverage and
   const {withUniformDevice}=await import("./helpers/uniform-geometric");
   await withUniformDevice("environment clouds CPU GPU oracle",async device=>{
     const records=[0,.35,.85,1].map(cloudCoverage=>svoEnvironmentLightingRecord("garden",1,{cloudCoverage,keyLightDirection:[.2,.7,-.4],sunIntensity:1.3}));
+    records.push(svoEnvironmentLightingRecord("garden",1,{skyCapture:"kloofendal",cloudCoverage:.45,keyLightDirection:[.2,.7,-.4],sunIntensity:1.3}));
     const packed=new Uint32Array(records.length*24);records.forEach((r,i)=>packed.set(packSvoEnvironmentLightingRecords([r]),i*24));
     const count=records.length*directions.length*3;
-    const module=device.createShaderModule({code:`${svoEnvironmentLightingWGSL}
+    const module=device.createShaderModule({code:`struct CapturedSky { ${SKY_CAPTURE_FIELD} }
+      @group(0) @binding(2) var<uniform> capture:CapturedSky;
+      ${environmentLightingShader("capture")}
       @group(0) @binding(0) var<storage,read> rigs:array<SvoEnvironmentLightingRecord>;
       @group(0) @binding(1) var<storage,read_write> result:array<vec4f>;
       const directions=array<vec3f,6>(${directions.map(d=>`vec3f(${d.join(",")})`).join(",")});
@@ -82,15 +106,17 @@ test("GPU visible/reflected sky evaluator agrees with CPU for cloud coverage and
     const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
     const input=device.createBuffer({size:packed.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(input,0,packed);
     const output=device.createBuffer({size:count*16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+    const words=skyCaptureWords();
+    const sky=device.createBuffer({size:words.byteLength,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(sky,0,words);
     const read=device.createBuffer({size:count*16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
     try{
-      const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:input}},{binding:1,resource:{buffer:output}}]}));pass.dispatchWorkgroups(count);pass.end();encoder.copyBufferToBuffer(output,0,read,0,count*16);device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);
+      const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:input}},{binding:1,resource:{buffer:output}},{binding:2,resource:{buffer:sky}}]}));pass.dispatchWorkgroups(count);pass.end();encoder.copyBufferToBuffer(output,0,read,0,count*16);device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);
       const actual=new Float32Array(read.getMappedRange()).slice();read.unmap();
       for(let i=0;i<count;i++){
         const record=unpackSvoEnvironmentLightingRecord(packed,Math.floor(i/18));
         const expected=evaluateSvoEnvironmentPrefilteredSpecular(record,directions[Math.floor(i/3)%6]!,i%3*.5);
         expected.forEach((value,c)=>assert.ok(Math.abs(actual[i*4+c]!-value)<.001,`sample${i} channel${c}: GPU${actual[i*4+c]} CPU${value}`));
       }
-    }finally{input.destroy();output.destroy();read.destroy();}
+    }finally{input.destroy();output.destroy();read.destroy();sky.destroy();}
   });
 });

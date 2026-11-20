@@ -53,7 +53,7 @@ import { CHURNING_TANK_SCENE_ID, createChurningTankScene } from "./churning-tank
 import { NBFLIP_STAIR_CUBE_ID, createNbflipStairCube, nbflipStairCubeCamera } from "./nbflip-stair-cube-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
 import { HERO_GARDEN_BLENDER_ID, createHeroGardenBlenderScene, heroGardenBlenderCamera } from "./hero-garden-blender-scene";
-import { BACKYARD_POOL_DRIFT_ID, BACKYARD_POOL_PARTY_ID, backyardPoolPartyCamera, createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
+import { BACKYARD_POOL_DRIFT_ID, BACKYARD_POOL_PARTY_ID, POOL_PARTY_CELL_M, POOL_PARTY_INTERACTIVE_CELL_M, backyardPoolPartyCamera, createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
 import { FOREST_WATERFALL_ID, createForestWaterfallScene, forestWaterfallCamera } from "./forest-waterfall-scene";
 import { ALPINE_LAKE_SCENE_ID, createAlpineLakeScene, alpineLakeCamera } from "./alpine-lake-scene";
 import { TOKYO_RAIN_ID, createTokyoRainScene, tokyoRainCamera } from "./tokyo-rain-scene";
@@ -1794,18 +1794,24 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       target_m: { x: 0, y: 2.2, z: 0 },
     },
   }),
-  defineScene({
-    id: BACKYARD_POOL_PARTY_ID,
-    name: "Backyard pool party",
+  ...[
+    { id: BACKYARD_POOL_PARTY_ID, name: "Backyard pool party", pitch: POOL_PARTY_INTERACTIVE_CELL_M },
+    { id: "backyard-pool-party-fine", name: "Backyard pool party · 50 mm fluid", pitch: POOL_PARTY_CELL_M },
+  ].map(({ id, name, pitch }) => defineScene({
+    id,
+    name,
     blurb: "A sunlit backyard pool with Bub, a little controllable robot. Explore the patio, hold Space at the ladder to climb, then run and somersault off the diving board with F.",
     audience: "explore",
     shelf: "Garden",
     environment: "garden",
     containerShell: "authored",
     presentationMode: "full-scene",
-    build: createBackyardPoolPartyScene,
+    methodProfile: { methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: { timeStep: "scene" } },
+    renderProfile: { resolutionScale: 1, interpolateWater: pitch === POOL_PARTY_INTERACTIVE_CELL_M,
+      edgeAntialiasing: true, environmentRefinementDepth: 0, fluidSurfaceRenderMode: "shaded", fluidParticleDisplay: "off" },
+    build: () => ({ ...createBackyardPoolPartyScene(pitch), sceneId: id }),
     camera: backyardPoolPartyCamera,
-  }),
+  })),
   defineScene({
     id: TOKYO_RAIN_ID,
     name: "Tokyo · rain after dark",

@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "garden-pavilion",
+  "source": "garden-pavilion.glb",
+  "origin": [
+    -5.95,
+    -0.25,
+    -6.3500000000000005
+  ],
+  "dimensions": [
+    240,
+    96,
+    160
+  ],
+  "cellSize": 0.05,
+  "bandWidth": 0.1,
+  "brickCount": 4084,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Honey cedar",
+      "baseColorLinear": [
+        0.28999999165534973,
+        0.13600000739097595,
+        0.05999999865889549
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Oiled cedar end grain",
+      "baseColorLinear": [
+        0.125,
+        0.06599999964237213,
+        0.03500000014901161
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Graphite folded zinc",
+      "baseColorLinear": [
+        0.04699999839067459,
+        0.057999998331069946,
+        0.06300000101327896
+      ],
+      "roughness": 0.5099999904632568,
+      "metallic": 0.3400000035762787
+    },
+    {
+      "name": "Limewashed warm white",
+      "baseColorLinear": [
+        0.6700000166893005,
+        0.6000000238418579,
+        0.47999998927116394
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Powder coated frames",
+      "baseColorLinear": [
+        0.03200000151991844,
+        0.0430000014603138,
+        0.04399999976158142
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.4000000059604645
+    },
+    {
+      "name": "Natural linen",
+      "baseColorLinear": [
+        0.6800000071525574,
+        0.6499999761581421,
+        0.5299999713897705
+      ],
+      "roughness": 0.8999999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Sawn limestone",
+      "baseColorLinear": [
+        0.4699999988079071,
+        0.4000000059604645,
+        0.3100000023841858
+      ],
+      "roughness": 0.7300000190734863,
+      "metallic": 0.0
+    },
+    {
+      "name": "Warm clay kitchen plaster",
+      "baseColorLinear": [
+        0.28999999165534973,
+        0.23999999463558197,
+        0.17000000178813934
+      ],
+      "roughness": 0.6499999761581421,
+      "metallic": 0.0
+    },
+    {
+      "name": "Green glazed stoneware",
+      "baseColorLinear": [
+        0.11999999731779099,
+        0.2199999988079071,
+        0.17000000178813934
+      ],
+      "roughness": 0.2800000011920929,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "solidRule": "even-odd",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 2209493,
+  "insideNodes": 605502
+}

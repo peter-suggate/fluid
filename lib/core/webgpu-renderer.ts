@@ -1,3 +1,4 @@
+import { rigidScreenBounds } from "../svo/features/primary-visibility/rigid-screen-bounds";
 import { ROUNDED_PLATE_RENDER_TAG } from "./rigid-cut-render";
 import {publishSceneRigidSurfaces} from './rigid-surface';
 import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
@@ -6,7 +7,7 @@ import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StagedReadback } from "./staged-readback";
 import { rigidControlOwnerId } from "./rigid-motor";
 import { rigidAppearanceSkin } from "./rigid-appearance";
-import { boundedPresentationScale } from "./presentation-resolution";
+import { boundedPresentationScale, PlaybackPixelBudget } from "./presentation-resolution";
 import { svoEnvironmentLightingRecord } from "../svo/features/radiance/svo-environment-lighting";
 import { svoDerivedRadianceRequired } from "../svo/features/lighting-visibility/derived-lighting-demand";
 import { sceneRenderTuning } from "./scene-render-profile";
@@ -31,7 +32,7 @@ import {
   buildSvoSceneLights,
   waterKeyDirectionalFromSceneLights,
 } from "../svo/contracts/svo-light-abi";
-import { boundingRadius, type RigidBodyState } from "./rigid-body";
+import { boundingRadius, quaternionNormalize, type RigidBodyState } from "./rigid-body";
 import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, type DrawnRigidBodyPose } from "./webgpu-rigid-body";
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
 import type { GPUQuality } from "./gpu-quality";
@@ -242,6 +243,21 @@ export function presentationHeldByPendingFrame(framePending: boolean, advanceSub
 export function presentationHeldForSimulationState(simulationRunning: boolean,
   submittedTime_s: number, presentedTime_s: number | undefined): boolean {
   return simulationRunning && submittedTime_s > 0 && submittedTime_s === presentedTime_s;
+}
+
+/** Display a time covered by the three actual fluid samples. A late pressure
+ * receipt may move the next tick's arrival in either direction. Correct the
+ * display clock gradually so the wave continues forward across that arrival. */
+export function interpolatedWaterTime(stateTime_s: number, dt_s: number, tickStarted_ms: number,
+  now_ms: number, previous?: { time_s: number; drawnAt_ms: number }): number {
+  let target = stateTime_s - 1.5 * dt_s + (now_ms - tickStarted_ms) / 1000;
+  if (previous && previous.time_s <= stateTime_s) {
+    const elapsed = Math.max(0, (now_ms - previous.drawnAt_ms) / 1000);
+    const predicted = previous.time_s + elapsed;
+    const correction = Math.max(-.12 * elapsed, Math.min(.12 * elapsed, target - predicted));
+    target = predicted + correction;
+  }
+  return Math.min(stateTime_s, Math.max(0, stateTime_s - 2 * dt_s, target));
 }
 
 /**
@@ -798,7 +814,26 @@ struct Out { @builtin(position) position: vec4f, @location(0) uv: vec2f }
   var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
   var out: Out; out.position = vec4f(positions[index], 0.0, 1.0); out.uv = positions[index] * 0.5 + 0.5; return out;
 }
+fn presentSample(uv:vec2f)->vec3f { return textureSampleLevel(source,sourceSampler,uv,0).rgb; }
+fn luminance(rgb:vec3f)->f32 { return dot(rgb,vec3f(.299,.587,.114)); }
 @fragment fn fragmentMain(input: Out) -> @location(0) vec4f { return textureSample(source, sourceSampler, vec2f(input.uv.x, 1.0-input.uv.y)); }
+// Directional FXAA on display-referred colour. Flat regions retain the
+// original sample, including highlights and grain within low-contrast stone.
+@fragment fn antialiasMain(input: Out) -> @location(0) vec4f {
+  let uv=vec2f(input.uv.x,1.0-input.uv.y);
+  let px=1.0/vec2f(textureDimensions(source));
+  let center=presentSample(uv); let mid=luminance(center);
+  let nw=luminance(presentSample(uv-px)); let se=luminance(presentSample(uv+px));
+  let ne=luminance(presentSample(uv+vec2f(px.x,-px.y))); let sw=luminance(presentSample(uv+vec2f(-px.x,px.y)));
+  let low=min(mid,min(min(nw,ne),min(sw,se))); let high=max(mid,max(max(nw,ne),max(sw,se)));
+  if(high-low<max(0.025,high*.09)){ return vec4f(center,1); }
+  let grad=vec2f(sw+se-nw-ne,nw+sw-ne-se);
+  let reduce=max(.0078125,(nw+ne+sw+se)*.03125);
+  let dir=clamp(grad/(min(abs(grad.x),abs(grad.y))+reduce),vec2f(-6),vec2f(6))*px;
+  let near=.5*(presentSample(uv-dir/6.0)+presentSample(uv+dir/6.0));
+  let wide=near*.5+.25*(presentSample(uv-dir*.5)+presentSample(uv+dir*.5));
+  let y=luminance(wide);return vec4f(select(wide,near,y<low||y>high),1);
+}
 `;
 
 /**
@@ -851,9 +886,11 @@ export class FluidLabRenderer {
   private initializationPromise?: Promise<void>;
   private shutdownPromise?: Promise<void>;
   private context?: GPUCanvasContext;
+  private antialiasPipeline?: GPURenderPipeline;
   private upscalePipeline?: GPURenderPipeline;
   private upscaleSampler?: GPUSampler;
   private upscaleBindGroup?: GPUBindGroup;
+  private filteredPresentation?: { texture: GPUTexture; view: GPUTextureView; bindings: GPUBindGroup };
   private waterPipeline?: RasterWaterPipeline;
   private svoDryScenePipeline?: SparseVoxelDrySceneRenderer;
   private clothSurfaceRenderer?: ClothSurfaceRenderer;
@@ -870,6 +907,8 @@ export class FluidLabRenderer {
   private renderSceneStamp = 0;
   private renderSceneRevision = 0;
   private renderSceneTerrainContentStamp?: string;
+  private opticsSource?: {scene:SceneDescription; environment:EnvironmentId; sparse:boolean;
+    revision:number; terrainStamp?:string; pipeline:RasterWaterPipeline};
   private liveSceneAnimation?: {
     readonly rest: readonly SvoPrimitiveDescriptor[];
     readonly sway: readonly (EnvironmentProxySway | undefined)[];
@@ -932,6 +971,7 @@ export class FluidLabRenderer {
   private presentationTexture?: GPUTexture;
   private presentationTextureKey = "";
   private activeRenderScale = 1;
+  private readonly playbackBudget = new PlaybackPixelBudget();
   /** Presentation pixels per CSS pixel: device pixel ratio times render scale. */
   private presentationPixelRatio = 1;
   private uniformBuffer?: GPUBuffer;
@@ -1748,7 +1788,16 @@ export class FluidLabRenderer {
 
     progress("Compiling presentation upscale",2);
     const upscaleModule=device.createShaderModule({label:"Presentation upscale shader",code:upscaleShader});
-    const upscalePipeline=await device.createRenderPipelineAsync({label:"Presentation upscale",layout:"auto",vertex:{module:upscaleModule,entryPoint:"vertexMain"},fragment:{module:upscaleModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
+    const presentLayout = device.createPipelineLayout({ bindGroupLayouts: [device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
+    ] })] });
+    const upscalePipeline=await device.createRenderPipelineAsync({label:"Presentation upscale",layout:presentLayout,vertex:{module:upscaleModule,entryPoint:"vertexMain"},fragment:{module:upscaleModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
+    if (!this.lifecycle.open || this.device !== device) return;
+    this.antialiasPipeline=await device.createRenderPipelineAsync({label:"Presentation edge antialiasing",
+      layout:presentLayout,
+      vertex:{module:upscaleModule,entryPoint:"vertexMain"},
+      fragment:{module:upscaleModule,entryPoint:"antialiasMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
     if (!this.lifecycle.open || this.device !== device) return;
     this.upscalePipeline=upscalePipeline;
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
@@ -1834,6 +1883,7 @@ export class FluidLabRenderer {
       this.waterPipeline?.invalidateSurface();
       if(presentationMode === "full-scene")this.attachSparsePresentationSource(
         solver,buildSerial,performance.now(),solver.sparseVoxelSceneSource);
+      solver.info.simulationEpoch = config.simulationEpoch ?? 0;
       solver.info.initialRasterSurfaceReady=true;
       solver.info.initialRasterSurfaceState="gpu-authoritative";
       solver.info.initialRasterSurfaceDiagnostic="Direct solver field attached after re-seed";
@@ -2170,6 +2220,7 @@ export class FluidLabRenderer {
       if (config.detailFocus) solver.applyDetailInput?.({ focus: config.detailFocus });
       this.attachedSolverDocumentKey = gpuSceneSolverKey(scene, config);
       this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;
+      solver.info.simulationEpoch = config.simulationEpoch ?? 0;
       solver.info.initialRasterSurfaceReady=true;
       solver.info.initialRasterSurfaceState="gpu-authoritative";
       solver.info.initialRasterSurfaceDiagnostic=rendererOnlyScene
@@ -2603,10 +2654,25 @@ export class FluidLabRenderer {
     }
   }
 
+  private previousDisplayFraction = 1;
+  private waterDisplayClock?: { solver: GPUSolverInstance; generation: number; time_s: number; drawnAt_ms: number };
+  private rigidPresentation?: {
+    solver: GPUSolverInstance; generation: number; time_s: number; started_ms: number; dt_s: number;
+    older: readonly RigidBodyState[]; previous: readonly RigidBodyState[]; current: readonly RigidBodyState[];
+  };
+
   private currentInteractionScene = false;
   async advanceInteractionFluid(request: FluidStepRequest): Promise<readonly FluidExchange[]> {
     const fluid = this.gpuFluid;
     if (!fluid?.advanceExternalRigidStep || fluid.simulationReady === false) throw new Error("The active fluid method has no ready interactive coupling adapter");
+    // These are exactly the two poses supplied to the two fluid fields. The
+    // display can sample between them without changing Box3D or the next solve.
+    const previous = this.rigidPresentation;
+    const contiguous = previous?.solver === fluid && previous.generation === request.generation
+      && Math.abs(previous.time_s+request.dt_s-request.time_s)<1e-7;
+    this.rigidPresentation = {solver:fluid,generation:request.generation,time_s:request.time_s,
+      started_ms:performance.now(),dt_s:request.dt_s,current:request.bodies,
+      previous:contiguous ? previous.current : request.bodies, older:contiguous ? previous.previous : request.bodies};
     const result = await fluid.advanceExternalRigidStep(request);
     if (this.gpuFluid !== fluid || !this.lifecycle.open) throw new Error("Fluid generation changed during interactive step");
     this.gpuAccountedSubmittedTime_s = request.time_s;
@@ -2671,7 +2737,7 @@ export class FluidLabRenderer {
     return fluid.info;
   }
 
-  resize(renderScale = 1): void {
+  resize(renderScale = 1, playbackPixelBudget?: number): void {
     if (!this.lifecycle.open) return;
     const htmlCanvas = "clientWidth" in this.canvas ? this.canvas : undefined;
     const ratio = this.workerViewport?.devicePixelRatio
@@ -2686,13 +2752,15 @@ export class FluidLabRenderer {
     // Supersampling uses the existing filtered presentation resolve. At 200%
     // its bilinear footprint averages the four shaded samples per output pixel.
     // Bound the requested scale to the device's texture extent before allocating.
-    const scale = boundedPresentationScale(width, height, renderScale, this.device.limits.maxTextureDimension2D);
+    const scale = boundedPresentationScale(width, height, renderScale, this.device.limits.maxTextureDimension2D, playbackPixelBudget);
     this.activeRenderScale = scale;
     this.presentationPixelRatio = ratio * scale;
     const renderWidth = Math.max(1, Math.floor(width * scale));
     const renderHeight = Math.max(1, Math.floor(height * scale));
     const key = `${renderWidth}x${renderHeight}`;
     if (key === this.presentationTextureKey) return;
+    this.filteredPresentation?.texture.destroy();
+    this.filteredPresentation = undefined;
     this.presentationTexture?.destroy();
     this.presentationTexture = this.device.createTexture({label:"Water presentation target",size:[renderWidth,renderHeight],format:this.format,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST});
     this.upscaleBindGroup=this.device.createBindGroup({layout:this.upscalePipeline.getBindGroupLayout(0),entries:[{binding:0,resource:this.presentationTexture.createView()},{binding:1,resource:this.upscaleSampler}]});
@@ -2717,6 +2785,7 @@ export class FluidLabRenderer {
 
   draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, presentationMode: ScenePresentationMode = "full-scene", fluidSurfaceRenderMode: FluidSurfaceRenderMode = "shaded", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning?: SvoRenderTuning, pixelTrace?: PixelTraceConfig): RendererFrameMetrics {
     this.currentInteractionScene = Boolean(scene.interaction?.entities.length);
+    if (!this.currentInteractionScene) this.rigidPresentation = undefined;
     scene = interactionScene(scene);
     // A method declares that its field views compose as layers; every other
     // method draws one overlay mode, and a layer selection left behind by a
@@ -2747,7 +2816,11 @@ export class FluidLabRenderer {
       && !svoRenderStageUsesPrimaryWorkMap(svoDiagnostics.stageView)
       && resolveSvoPrimaryTraversal(svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal) === "mesh";
     const activeSvoTuning = this.surfaceTuningCache.resolve(sceneRenderTuning(scene.renderProfile, svoTuning), smoothRaster);
-    this.resize(activeSvoTuning.resolutionScale);
+    const authoredScale = activeSvoTuning.resolutionScale === scene.renderProfile?.resolutionScale;
+    const stillScale = !this.simulationRunning && authoredScale ? scene.renderProfile?.stillResolutionScale : undefined;
+    const playbackBudget = this.simulationRunning && authoredScale ? scene.renderProfile?.playbackPixelBudget : undefined;
+    const targetPixels = this.playbackBudget.resolve(playbackBudget, performance.now(), this.completedPresentations);
+    this.resize(stillScale ?? activeSvoTuning.resolutionScale, targetPixels);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     const requestedSvoDiagnostics = normalizeSvoRenderDiagnostics(svoDiagnostics);
     const activeSvoDiagnostics = requestedSvoDiagnostics;
@@ -2906,10 +2979,14 @@ export class FluidLabRenderer {
       this.pixelTraceEncodedAt_ms = Number.NEGATIVE_INFINITY;
       if (this.latestPixelTraceValue) { this.latestPixelTraceValue = undefined; this.pixelTraceRevisionValue += 1; }
     }
-    if (this.presentationsInFlight >= (config.inFlightDepth ?? BROWSER_GPU_THROUGHPUT_DEPTH)) {
-      // The next draw uses the newest camera and solver state. Do not append a
-      // stale presentation to a saturated FIFO: double buffering is sufficient
-      // to keep execution dense without turning throughput into input latency.
+    const interpolate = Boolean(scene.renderProfile?.interpolateWater && this.currentInteractionScene
+      && fluidSurfaceRenderMode === "shaded" && (!gridOverlay || gridOverlay.axis === "off" || !composedVisualLayers(gridOverlay)?.visible));
+    const transportDepth = config.inFlightDepth ?? BROWSER_GPU_THROUGHPUT_DEPTH;
+    // A coupled solve can occupy a whole refresh. Leave one additional slot
+    // for an intermediate surface behind it, without queueing another solve
+    // or allowing a pane to get ahead of a lockstep comparison.
+    const displayDepth = interpolate && this.simulationRunning && transportDepth > 1 ? transportDepth + 1 : transportDepth;
+    if (this.presentationsInFlight >= displayDepth) {
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
     let gpuInfo = readyGPUFluid?.info;
@@ -2925,12 +3002,23 @@ export class FluidLabRenderer {
       );
     }
     const advanceSubmitted = this.gpuAccountedSubmittedTime_s > accountedSubmittedTime_s;
+    const stateTime = gpuInfo?.submittedTime_s ?? 0;
+    const sameState = readyGPUFluid && presentationHeldForSimulationState(this.simulationRunning,
+      stateTime, this.presentedStateTimes.get(readyGPUFluid));
+    const pair = this.rigidPresentation;
+    const hasPair = interpolate && this.simulationRunning && stateTime > 0 && this.waterPipeline.hasSampleHistory
+      && pair && pair.solver === readyGPUFluid && Math.abs(pair.time_s-stateTime)<1e-7;
+    const drawTime_ms = performance.now();
+    const lastClock = this.waterDisplayClock;
+    const displayTime_s = hasPair ? interpolatedWaterTime(stateTime, pair.dt_s, pair.started_ms, drawTime_ms,
+      lastClock?.solver === pair.solver && lastClock.generation === pair.generation ? lastClock : undefined) : time_s;
+    const fraction = hasPair ? Math.max(-1, Math.min(1, 1 + (displayTime_s - stateTime) / pair.dt_s)) : 1;
     if (readyGPUFluid?.presentationPending
       || presentationHeldByPendingFrame(Boolean(readyGPUFluid?.framePending), advanceSubmitted)
-      || (readyGPUFluid && presentationHeldForSimulationState(this.simulationRunning,
-        readyGPUFluid.info.submittedTime_s ?? 0, this.presentedStateTimes.get(readyGPUFluid)))) {
+      || (sameState && !(hasPair && fraction > this.previousDisplayFraction))) {
       return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
     }
+    this.waterPipeline.setSurfaceInterpolation(interpolate,fraction);
     this.waterPipeline.setFluidDomain(readyGPUFluid?.fluidDomain);
     const requestedSurface = readyGPUFluid
       ? readyGPUFluid.surfaceFieldTexture ?? readyGPUFluid.volumeTexture
@@ -2981,7 +3069,7 @@ export class FluidLabRenderer {
     const fineSource = particlesVisible && composedLayers && particleView(composedLayers) === "fine" ? this.gpuFluid?.particleSource : undefined;
     packed[0] = this.presentationTexture.width;
     packed[1] = this.presentationTexture.height;
-    packed[2] = time_s;
+    packed[2] = displayTime_s;
     packed[3] = cameraChanging ? SVO_CAMERA_CHANGING_FRAME : -1;
     packed[4] = position.x;
     packed[5] = position.y;
@@ -3014,23 +3102,29 @@ export class FluidLabRenderer {
     packed[29] = gpuInfo?.lastDt_s ?? 0;
     packed[30] = gpuInfo?.maxSpeed_m_s ?? 0;
     packed[31] = 0;
+    // Scene terrain now lives in its own binding. The dormant terrain header
+    // (x=0) can carry atmospheric range without enabling legacy terrain.
+    packed[33] = scene.lighting?.environment?.aerialPerspective_m ?? 0;
 
     // Lanes 100..103 are the hover rim: the owner range under the cursor, its
     // strength, and the falloff exponent. Appended at the end so every other
     // shader's view of this buffer is byte-identical.
     packed[100] = this.hoverHighlight?.first ?? 0; packed[101] = this.hoverHighlight?.last ?? 0;
     packed[102] = this.hoverHighlight ? .45 : 0; packed[103] = this.hoverHighlight ? 2.6 : 0;
-    packed.set([basis.right.x,basis.right.y,basis.right.z,0],104);
+    packed.set([basis.right.x,basis.right.y,basis.right.z,scene.fluid.optics?.windRippleSlope ?? 0],104);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, packed);
-    // A body-free dry view can remain identical while the water advances.
+    // A fixed camera can retain the dry view or its static geometry outside CPU-owned body bounds.
     // The visibility key ignores only simulation-only uniform lanes; scene,
     // camera and receiver changes still invalidate it. Water-shadow variants
     // explicitly refuse reuse because optical coverage changes independently.
-    this.svoDryScenePipeline?.setRasterVisibilityView(sparsePresentationRequired && bodies.length===0 ? packed : undefined);
+    this.svoDryScenePipeline?.setRasterVisibilityView(sparsePresentationRequired && (!bodies.length || this.currentInteractionScene) ? packed : undefined);
     // A paused placement or carry still needs fresh render records. The rigid
     // system uploads only changed commands/roster entries, preserving GPU-owned
     // poses for all other bodies without spending a simulation step.
-    if (!this.simulationRunning || this.currentInteractionScene) this.gpuFluid?.syncRigidBodies?.(bodies);
+    // Running interactive physics uploads the body roster in advanceExternalRigidStep.
+    // Replaying the previous display pose here also invalidates the solver's
+    // cold-region and solid-boundary caches after every presentation.
+    if (!this.currentInteractionScene || !this.simulationRunning) this.gpuFluid?.syncRigidBodies?.(bodies);
     // Interactive poses are CPU-owned; presentation may animate independently
     // of the capsule uploaded to the fluid solver.
     const residentRigidBuffer = this.currentInteractionScene ? undefined : this.gpuFluid?.rigidRenderBuffer;
@@ -3040,6 +3134,20 @@ export class FluidLabRenderer {
     // solver's readback is, so picking, cuts and gizmos see the drawn frame.
     if (!residentRigidBuffer && !this.currentInteractionScene)
       bodies = this.posePrescribedDryBodies(scene, bodies, readyGPUFluid?.info.submittedTime_s ?? time_s);
+    if (hasPair) {
+      bodies=bodies.map(body=>{
+        const from = fraction < 0 ? pair.older : pair.previous, to = fraction < 0 ? pair.previous : pair.current;
+        const id=body.description.id, a=from.find(b=>b.description.id===id), b=to.find(b=>b.description.id===id);
+        if(!a || !b)return body;
+        if(fraction===1)return {...body,position_m:b.position_m,renderOrientation:b.renderOrientation??b.orientation};
+        const p=a.position_m,q=b.position_m, r=a.renderOrientation??a.orientation, t=b.renderOrientation??b.orientation;
+        const sign=r.w*t.w+r.x*t.x+r.y*t.y+r.z*t.z<0?-1:1;
+        const alpha = fraction < 0 ? 1+fraction : fraction;
+        const w=1-alpha, v=alpha*sign;
+        return {...body,position_m:{x:w*p.x+alpha*q.x,y:w*p.y+alpha*q.y,z:w*p.z+alpha*q.z},
+          renderOrientation:quaternionNormalize({w:w*r.w+v*t.w,x:w*r.x+v*t.x,y:w*r.y+v*t.y,z:w*r.z+v*t.z})};
+      });
+    }
     if (residentRigidBuffer) {
       this.gpuFluid?.setSelectedRigidBody?.(bodies.findIndex((body) => body.description.id === selectedBodyId));
     } else {
@@ -3064,6 +3172,9 @@ export class FluidLabRenderer {
     const rigidCuts=this.rigidCutRenderAtlas??=new RigidCutRenderAtlas(this.device);
     rigidCuts.setBodies(surfaceBodies);this.waterPipeline.setRigidSurfaceCuts(rigidCuts.view);
     if (sparsePresentationRequired) {
+      this.svoDryScenePipeline?.setCpuBodyScreenBounds(this.currentInteractionScene && bodies.length && !residentRigidBuffer
+        ? rigidScreenBounds(this.bodyUploadWords, Math.min(bodies.length, GPU_RIGID_BODY_CAPACITY), basis,
+          cameraTanHalfFov(camera), this.presentationTexture.width, this.presentationTexture.height) : undefined);
       this.svoDryScenePipeline?.setRigidSurfaceBodies(surfaceBodies);
       this.svoDryScenePipeline?.setRigidBodyCount(bodies.length, svoDryRigidBounds(bodies, this.rigidBoundsScratch));
     }
@@ -3231,29 +3342,31 @@ export class FluidLabRenderer {
     // pipeline authors the same attachment itself. Zero here is not "no bodies"
     // but "not yours" — the roster is unchanged, the renderer of it is not.
     this.waterPipeline.setRigidBodyCount(sparsePresentationRequired ? 0 : bodies.length);
-    // The medium, the key and the caustic receiver are all document facts the
-    // composite used to have inlined into its WGSL at build time. The pipeline
-    // ignores a call that changes nothing, so this stays a per-frame statement
-    // of what the scene is rather than a per-frame upload.
-    // The shared rig belongs to the full-scene SVO presentation path, whether
-    // or not fluid physics is also running. A fluid-only raster presentation
-    // remains entitled to its authored lighting.
-    const sceneLighting = sparsePresentationRequired ? svoSceneLighting(scene) : scene.lighting;
-    const waterDirectional = sparsePresentationRequired
-      ? waterKeyDirectionalFromSceneLights(
-        buildSvoSceneLights(scene).records,
-        [0, 0.5 * scene.container.height_m, 0],
-      ) ?? sceneLighting?.directional
-      : sceneLighting?.directional;
-    this.waterPipeline.setSceneOptics({
-      optics: scene.fluid.optics,
-      environment: svoEnvironmentLightingRecord(environmentId, 1, sparsePresentationRequired ? svoSceneEnvironmentLightingOptions(scene) : sceneLighting?.environment),
-      directional: waterDirectional,
-      grade: sceneLighting?.grade,
-      terrain: scene.terrain,
-      terrainContentStamp: this.renderSceneTerrainContentStamp,
-      container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
-    });
+    // Resolving the water key walks every scenery light candidate. Resolve the
+    // immutable document once and refresh after lighting, terrain or pipeline edits.
+    const optics = this.opticsSource;
+    if (!optics || optics.scene !== scene || optics.environment !== environmentId ||
+      optics.pipeline !== this.waterPipeline || optics.sparse !== sparsePresentationRequired ||
+      optics.revision !== this.renderSceneRevision || optics.terrainStamp !== this.renderSceneTerrainContentStamp) {
+      const sceneLighting = sparsePresentationRequired ? svoSceneLighting(scene) : scene.lighting;
+      const waterDirectional = sparsePresentationRequired
+        ? waterKeyDirectionalFromSceneLights(
+          buildSvoSceneLights(scene).records,
+          [0, 0.5 * scene.container.height_m, 0],
+        ) ?? sceneLighting?.directional
+        : sceneLighting?.directional;
+      this.waterPipeline.setSceneOptics({
+        optics: scene.fluid.optics,
+        environment: svoEnvironmentLightingRecord(environmentId, 1, sparsePresentationRequired ? svoSceneEnvironmentLightingOptions(scene) : sceneLighting?.environment),
+        directional: waterDirectional,
+        grade: sceneLighting?.grade,
+        terrain: scene.terrain,
+        terrainContentStamp: this.renderSceneTerrainContentStamp,
+        container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
+      });
+      this.opticsSource = {scene,environment:environmentId,sparse:sparsePresentationRequired,
+        revision:this.renderSceneRevision,terrainStamp:this.renderSceneTerrainContentStamp,pipeline:this.waterPipeline};
+    }
     // Everything encoded so far — world maintenance, rigid copies, coverage —
     // is the source band; the water/SVO pipelines cross their own boundaries.
     const rasterResult = this.waterPipeline.encode(
@@ -3442,9 +3555,36 @@ export class FluidLabRenderer {
     // never wrote it would leave the compositor showing an older one, so a
     // withheld blit would read as "free" while the image stopped updating for a
     // reason nothing on screen could explain.
+    const present = !disabledStages.has("present");
+    let displayBindings = this.upscaleBindGroup;
+    let displayPipeline = scene.renderProfile?.edgeAntialiasing ? this.antialiasPipeline! : this.upscalePipeline;
+    if (present && scene.renderProfile?.edgeAntialiasing && this.activeRenderScale < 1) {
+      // FXAA examines edges one source texel apart. Filter them once on the
+      // shaded grid, then let the sampler enlarge that image for the display.
+      if (!this.filteredPresentation) {
+        const texture = this.device.createTexture({ label: "Antialiased playback image",
+          size: [this.presentationTexture.width, this.presentationTexture.height], format: this.format!,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+        const view = texture.createView();
+        const bindings = this.device.createBindGroup({ layout: this.upscalePipeline.getBindGroupLayout(0),
+          entries: [{ binding: 0, resource: view }, { binding: 1, resource: this.upscaleSampler! }] });
+        this.filteredPresentation = { texture, view, bindings };
+      }
+      const filter = encoder.beginRenderPass({ label: "Antialias at shaded resolution", colorAttachments: [
+        { view: this.filteredPresentation.view, loadOp: "clear", storeOp: "store", clearValue: [0,0,0,1] },
+      ] });
+      filter.setPipeline(this.antialiasPipeline!);
+      filter.setBindGroup(0, this.upscaleBindGroup);
+      filter.draw(3);
+      filter.end();
+      displayBindings = this.filteredPresentation.bindings;
+      displayPipeline = this.upscalePipeline;
+    }
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.0194,g:0.0145,b:0.0097,a:1},loadOp:"clear",storeOp:"store"}]});
-    if (!disabledStages.has("present")) {
-      upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);
+    if (present) {
+      upscalePass.setPipeline(displayPipeline);
+      upscalePass.setBindGroup(0, displayBindings);
+      upscalePass.draw(3);
     }
     upscalePass.end();
     closeStage("present");
@@ -3462,6 +3602,8 @@ export class FluidLabRenderer {
     presentationQueueTrace?.begin();
     this.device.queue.submit([presentationCommands]);
     this.particleSurfacePipeline?.pumpStats();
+    this.previousDisplayFraction = fraction;
+    this.waterDisplayClock = hasPair ? { solver: pair.solver, generation: pair.generation, time_s: displayTime_s, drawnAt_ms: drawTime_ms } : undefined;
     if (readyGPUFluid) this.presentedStateTimes.set(readyGPUFluid, readyGPUFluid.info.submittedTime_s ?? 0);
     const presentationHealth = readPresentationHealth?.();
     // Mapping can overlap completion. Always drain the receipt, even if a
@@ -3469,6 +3611,7 @@ export class FluidLabRenderer {
     void presentationHealth?.catch(() => {});
     this.presentationsInFlight+=1;
     const completedPresentationDevice=this.device;
+    const submittedAt_ms = playbackBudget === undefined ? undefined : performance.now();
     let presentationRetired=false;
     const retirePresentation=()=>{
       if(presentationRetired)return;
@@ -3478,6 +3621,7 @@ export class FluidLabRenderer {
     const presentationCompletion = completedPresentationDevice.queue.onSubmittedWorkDone();
     const validatedFluid = this.gpuFluid;
     void presentationCompletion.then(async ()=>{
+      if (submittedAt_ms !== undefined) this.playbackBudget.observeCompletion(performance.now() - submittedAt_ms);
       if(!this.lifecycle.open
         ||this.device!==completedPresentationDevice||this.gpuFluid!==validatedFluid){
         retirePresentation();
@@ -3575,7 +3719,7 @@ export class FluidLabRenderer {
     try { this.svoDryScenePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.clothSurfaceRenderer?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.rigidCutRenderAtlas?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
-    for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseReadbacks]) {
+    for (const resource of [this.filteredPresentation?.texture, this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseReadbacks]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }
     }
     this.rigidPoseReadbacks = [];

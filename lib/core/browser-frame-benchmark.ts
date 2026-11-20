@@ -46,6 +46,9 @@ export function createBrowserFrameBenchmark() {
     },
     sample(completed: number, encoding_ms: number, metrics: RendererFrameMetrics, resolution: string, configuration: Record<string, unknown>, ready: boolean) {
       if (!armed || done || completed === 0) return;
+      // A missed worker reply has no configuration of its own. Its elapsed
+      // wall time still counts, including every frame missed while it is busy.
+      if (metrics.context === "webgpu-worker-pending") return;
       const context = JSON.stringify([metrics.context, resolution, configuration.scene, configuration.camera]);
       const changedContext = measuredContext !== undefined && measuredContext !== context;
       measuredContext = context;

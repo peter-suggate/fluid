@@ -215,7 +215,8 @@ export class GPUViewportSession implements GPUViewportLifecycle {
       onLoad: (sample) => session.diagnostics.getState().pushWorkerLoad(sample),
     });
     this.detach.push(simulation.attachInteractionFluid(paneId,
-      createInteractionFluidDriver(session.diagnostics, request => this.renderer.advanceInteractionFluid(request))));
+      createInteractionFluidDriver(session.diagnostics, request => this.renderer.advanceInteractionFluid(request),
+        () => session.runtime.getState().simulationEpoch)));
     this.syncRunState(session.runtime.getState().runState);
     this.detach.push(session.runtime.subscribe((state, previous) => {
       if (state.simulationEpoch !== previous.simulationEpoch) {

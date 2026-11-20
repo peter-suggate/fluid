@@ -1,3 +1,4 @@
+import { capturedSkyRadiance, capturedSkyWGSL } from "../../../core/photographic-sky";
 import { environmentIds, environmentIndex, type EnvironmentId } from "../../../core/environments";
 import type { LinearRgb } from "../../../core/webgpu-lighting";
 import type { SvoVec3 } from "../primary-visibility/webgpu-svo-traversal";
@@ -22,6 +23,7 @@ export interface SvoEnvironmentLightingRecord {
   sunSharpness: number;
   /** Optional directional cloud coverage, zero preserves the original gradient. */
   cloudCoverage?: number;
+  skyCapture?: "kloofendal";
 }
 
 export interface SvoEnvironmentLightingBuild {
@@ -33,6 +35,7 @@ export interface SvoEnvironmentLightingBuild {
 
 export interface SvoEnvironmentLightingOptions {
   cloudCoverage?: number;
+  skyCapture?: "kloofendal";
   keyLightColorLinear?: LinearRgb;
   keyLightDirection?: SvoVec3;
   sunIntensity?: number;
@@ -143,6 +146,7 @@ export function svoEnvironmentLightingRecord(
     sunIntensity: options.sunIntensity ?? 2.5,
     keyLightDirection: options.keyLightDirection ?? palette.keyDirection,
     cloudCoverage: options.cloudCoverage ?? 0,
+    ...(options.skyCapture ? { skyCapture: options.skyCapture } : {}),
     sunSharpness: 360,
   });
 }
@@ -168,7 +172,8 @@ export function packSvoEnvironmentLightingRecords(records: readonly SvoEnvironme
     floats.set([...record.keyLightColorLinear, record.sunIntensity], offset + 12);
     floats.set([...record.keyLightDirection, record.sunSharpness], offset + 16);
     words.set([environmentIndex(record.environmentId), record.revision, SVO_ENVIRONMENT_LIGHTING_VERSION, 0], offset + 20);
-    floats[offset + 23] = record.cloudCoverage ?? 0;
+    // Analytic coverage is [0,1]. Negative values identify the photographed dome.
+    floats[offset + 23] = record.skyCapture ? -1 - (record.cloudCoverage ?? 0) : record.cloudCoverage ?? 0;
   });
   return words;
 }
@@ -183,7 +188,8 @@ export function unpackSvoEnvironmentLightingRecord(packed: Uint32Array, recordIn
   return canonicalSvoEnvironmentLightingRecord({
     environmentId,
     revision: packed[offset + 21],
-    cloudCoverage: floats[offset + 23],
+    cloudCoverage: floats[offset + 23]! < 0 ? -1 - floats[offset + 23]! : floats[offset + 23],
+    ...(floats[offset + 23]! < 0 ? { skyCapture: "kloofendal" as const } : {}),
     lowerRadianceLinear: [floats[offset], floats[offset + 1], floats[offset + 2]], diffuseScale: floats[offset + 3],
     upperRadianceLinear: [floats[offset + 4], floats[offset + 5], floats[offset + 6]], specularScale: floats[offset + 7],
     accentRadianceLinear: [floats[offset + 8], floats[offset + 9], floats[offset + 10]], accentPower: floats[offset + 11],
@@ -245,6 +251,11 @@ export function evaluateSvoEnvironmentPrefilteredSpecular(
   const broadEnergy = (broadExponent + 2) / 17;
   const sun = scale(record.keyLightColorLinear, record.sunIntensity * Math.pow(cosine, sharpExponent) * sharpEnergy + 0.22 * (record.sunIntensity / 2.5) * Math.pow(cosine, broadExponent) * broadEnergy);
   const accent = scale(record.accentRadianceLinear, 0.13 * Math.pow(1 - Math.abs(direction[1]), record.accentPower * (1 - roughnessSquared) + roughnessSquared));
+  if (record.skyCapture) {
+    const weight = Math.min(1, (record.cloudCoverage ?? 0) / .45) * smoothCloud(-.08,.025,direction[1]);
+    const capture = capturedSkyRadiance(direction,record.keyLightDirection,roughness);
+    return scale(add(add(mix(sky, capture, weight), sun), accent),record.specularScale);
+  }
   return scale(evaluateSvoEnvironmentCloudRadiance(add(add(sky, sun), accent), direction, roughness, record.cloudCoverage ?? 0, record.lowerRadianceLinear, record.upperRadianceLinear, scale(record.keyLightColorLinear, record.sunIntensity), record.keyLightDirection), record.specularScale);
 }
 
@@ -329,10 +340,17 @@ export function evaluateSvoEnvironmentCloudRadiance(base: LinearRgb, direction: 
 }
 
 /** Binding-free cloud evaluator, reused by the liquid sky fallback. */
-export const svoEnvironmentCloudsWGSL = /* wgsl */ `
+export function environmentCloudShader(captureUniform?: string) {
+  return /* wgsl */ `
+${captureUniform ? capturedSkyWGSL(captureUniform) : ""}
 fn svoCloudHash(p:vec2i)->f32{var h=bitcast<u32>(p.x)*374761393u+bitcast<u32>(p.y)*668265263u;h=(h^(h>>13u))*1274126177u;return f32(h^(h>>16u))/4294967295.0;}
 fn svoCloudNoise(p:vec2f)->f32{let i=vec2i(floor(p));let f=fract(p);let u=f*f*(vec2f(3.0)-2.0*f);return mix(mix(svoCloudHash(i),svoCloudHash(i+vec2i(1,0)),u.x),mix(svoCloudHash(i+vec2i(0,1)),svoCloudHash(i+vec2i(1,1)),u.x),u.y);}
 fn svoEnvironmentCloudRadiance(baseRadiance:vec3f,direction:vec3f,roughness:f32,coverage:f32,lower:vec3f,upper:vec3f,keyColor:vec3f,keyDirection:vec3f)->vec3f{
+  ${captureUniform ? `if(coverage<0.0){
+    let weight=clamp((-1.0-coverage)/.45,0.0,1.0)*smoothstep(-.08,.025,direction.y);
+    let clear=mix(mix(lower,upper,clamp(direction.y*.5+.5,0.0,1.0)),.5*(lower+upper),roughness*roughness);
+    return baseRadiance + weight*(capturedSky(direction,keyDirection,roughness)-clear);
+  }` : ""}
   if(coverage<=0.0){return baseRadiance;}
   var p=direction.xz*(1.2/(max(direction.y,0.0)+.18))+vec2f(17.3,-9.2);var noise=0.0;var amplitude=.5079365079;
   for(var octave=0u;octave<6u;octave+=1u){noise+=svoCloudNoise(p)*amplitude;p=p*2.03+vec2f(11.7,-5.2);amplitude*=.5;}
@@ -341,10 +359,16 @@ fn svoEnvironmentCloudRadiance(baseRadiance:vec3f,direction:vec3f,roughness:f32,
 }
 `;
 
-/** Binding-free mirror for one selected environment record. */
-export const svoEnvironmentLightingWGSL = /* wgsl */ `
-${svoEnvironmentCloudsWGSL}
+}
+export const svoEnvironmentCloudsWGSL = environmentCloudShader();
+
+/** The derived irradiance builder only reads the diffuse sky coefficients. */
+export function environmentLightingShader(captureUniform?: string) {
+  return /* wgsl */ `
+${environmentCloudShader(captureUniform)}
 struct SvoEnvironmentLightingRecord{lowerDiffuse:vec4f,upperSpecular:vec4f,accentPower:vec4f,keyColorIntensity:vec4f,keyDirectionSharpness:vec4f,identity:vec4u}
 fn svoEnvironmentDiffuseIrradiance(lighting:SvoEnvironmentLightingRecord,worldNormalIn:vec3f)->vec3f{let worldNormal=normalize(worldNormalIn);let average=mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,.5);let gradient=(lighting.upperSpecular.xyz-lighting.lowerDiffuse.xyz)*(worldNormal.y/3.0);let horizon=lighting.accentPower.xyz*(.13*(1.0-abs(worldNormal.y)));return max(vec3f(0.0),(average+gradient+horizon)*(3.141592653589793*lighting.lowerDiffuse.w));}
 fn svoEnvironmentPrefilteredSpecular(lighting:SvoEnvironmentLightingRecord,worldDirectionIn:vec3f,roughnessIn:f32)->vec3f{let worldDirection=normalize(worldDirectionIn);let roughness=clamp(roughnessIn,0.0,1.0);let r2=roughness*roughness;let vertical=clamp(worldDirection.y*.5+.5,0.0,1.0);let average=mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,.5);let sky=mix(mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,vertical),average,r2);let cosine=max(0.0,dot(worldDirection,normalize(lighting.keyDirectionSharpness.xyz)));let sharpExponent=mix(lighting.keyDirectionSharpness.w,1.0,r2);let broadExponent=mix(15.0,1.0,r2);let sharpEnergy=(sharpExponent+2.0)/(lighting.keyDirectionSharpness.w+2.0);let broadEnergy=(broadExponent+2.0)/17.0;let sun=lighting.keyColorIntensity.xyz*(lighting.keyColorIntensity.w*pow(cosine,sharpExponent)*sharpEnergy+.22*(lighting.keyColorIntensity.w/2.5)*pow(cosine,broadExponent)*broadEnergy);let accentExponent=mix(lighting.accentPower.w,1.0,r2);let accent=lighting.accentPower.xyz*(.13*pow(1.0-abs(worldDirection.y),accentExponent));return max(vec3f(0.0),svoEnvironmentCloudRadiance(sky+sun+accent,worldDirection,roughness,bitcast<f32>(lighting.identity.w),lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,lighting.keyColorIntensity.xyz*lighting.keyColorIntensity.w,normalize(lighting.keyDirectionSharpness.xyz))*lighting.upperSpecular.w);}
 `;
+}
+export const svoEnvironmentLightingWGSL = environmentLightingShader();

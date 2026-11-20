@@ -146,7 +146,7 @@ export const createDiagnosticsStore = () => create<DiagnosticsStore>((set) => ({
     if ("gpuInfo" in patch || "effectiveRendererStatus" in patch) {
       resourceReadiness = reduceGPUResourceEvidence(
         resourceReadiness,
-        patch.gpuInfo ?? state.gpuInfo,
+        "gpuInfo" in patch ? patch.gpuInfo : state.gpuInfo,
         patch.effectiveRendererStatus ?? state.effectiveRendererStatus,
       );
     }

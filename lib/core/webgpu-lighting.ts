@@ -72,6 +72,8 @@ export interface WaterOpticsAuthoring {
   readonly fresnelF0?: number;
   /** Perceptual roughness for the surface highlight and reflection footprint, independent of mesh pitch. */
   readonly roughness?: number;
+  /** RMS slope of centimetre-scale breeze ripples on exposed water. */
+  readonly windRippleSlope?: number;
   /**
    * How much of the refracted caustic modulation reaches the receiver, in
    * [0, 1]. Zero skips the caustic pass entirely for this scene.
@@ -178,6 +180,7 @@ export interface WaterEnvironmentRadiance {
   readonly specularScale: number;
   readonly accentPower: number;
   readonly cloudCoverage?: number;
+  readonly skyCapture?: "kloofendal";
   readonly keyLightColorLinear?: LinearRgb;
   readonly keyLightDirection?: LinearRgb;
   readonly sunIntensity?: number;
@@ -213,7 +216,7 @@ export function packWaterSceneOptics(
     // gains as authored. Widening the block would have moved every lane offset
     // in two shaders for one float.
     grade.exposure, SCENE_TONE_CURVE_CODES[grade.toneCurve], grade.whiteBalance[0], grade.whiteBalance[2],
-    optics.roughness, environment?.cloudCoverage ?? 0, 0, 0,
+    optics.roughness, environment?.skyCapture ? -1 - (environment.cloudCoverage ?? 0) : environment?.cloudCoverage ?? 0, 0, 0,
     ...(environment?.lowerRadianceLinear ?? [0, 0, 0]), environment ? 1 : 0,
     ...(environment?.upperRadianceLinear ?? [0, 0, 0]), environment?.specularScale ?? 1,
     ...(environment?.accentRadianceLinear ?? [0, 0, 0]), environment?.accentPower ?? 3,
@@ -233,7 +236,7 @@ export function packWaterSceneOptics(
  * bilinear on that lattice — so a caustic lands on the surface the renderer
  * actually draws rather than on a plane chosen to make the maths easy.
  */
-export function waterSceneOpticsShaderLibrary(group: number, opticsBinding: number, receiverBinding: number): string {
+export function waterSceneOpticsShaderLibrary(group: number, opticsBinding: number, receiverBinding: number, captureField = ""): string {
   return /* wgsl */ `
 struct WaterSceneOptics {
   absorptionIor: vec4f,
@@ -249,6 +252,7 @@ struct WaterSceneOptics {
   environmentAccentPower: vec4f,
   environmentKeyDirection: vec4f,
   environmentKeyRadiance: vec4f,
+  ${captureField}
 }
 @group(${group}) @binding(${opticsBinding}) var<uniform> waterScene: WaterSceneOptics;
 @group(${group}) @binding(${receiverBinding}) var waterReceiver: texture_2d<f32>;

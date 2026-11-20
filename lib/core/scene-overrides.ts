@@ -334,6 +334,7 @@ export function sceneOverrideClearPlan(
     switch (key) {
       case "fluidParticles": ui.fluidParticleDisplay = preset.renderProfile?.fluidParticleDisplay ?? initialUI.fluidParticleDisplay; break;
       case "fluidSurface": ui.fluidSurfaceRenderMode = preset.renderProfile?.fluidSurfaceRenderMode ?? initialUI.fluidSurfaceRenderMode; break;
+      case "svoResolution": svoRenderTuning.resolutionScale = sceneRenderTuning(preset.renderProfile).resolutionScale; break;
       case "svoRefinementDepth": svoRenderTuning.environmentRefinementDepth = sceneRenderTuning(preset.renderProfile).environmentRefinementDepth; break;
       case "overlay": ui.sceneOverlay = initialUI.sceneOverlay; break;
       case "grid": ui.gridOverlayAxis = initialUI.gridOverlayAxis; break;

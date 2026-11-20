@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { createBackyardPoolPartyScene } from "../lib/core/backyard-pool-party-scene";
+import { createBackyardPoolPartyScene, POOL_PARTY_INTERACTIVE_CELL_M } from "../lib/core/backyard-pool-party-scene";
 import { interactionScene } from "../lib/interaction/adapters/scene";
 import { SceneInteractionHost } from "../lib/interaction/runtime/host";
 import { createUniformSolver, withUniformDevice } from "../tests/helpers/uniform-geometric";
@@ -72,12 +72,14 @@ ${uniformMixedSolidWGSL(2, frame.solid.coarse?.count)}
 }
 
 paceDawnEventPolling();
-const output = "artifacts/svo-build-edit/pool-party-splash.json";
+const output = process.env.POOL_SPLASH_REPORT ?? "artifacts/svo-build-edit/pool-party-splash.json";
 const rows: Record<string, unknown>[] = [], gpuErrors: string[] = [];
 const began = performance.now();
+const scene = createBackyardPoolPartyScene(process.argv.includes("--interactive") ? POOL_PARTY_INTERACTIVE_CELL_M : undefined);
+const dt = scene.numerics.fixedDt_s, ticksPerSecond = Math.round(1 / dt), steps = 16 * ticksPerSecond;
 const report: Record<string, unknown> = {
   scene: "backyard-pool-party", harness: "authored Box3D + production NB-FLIP",
-  requestedSteps: 960, dt_s: 1 / 60, requestedTime_s: 16,
+  requestedSteps: steps, dt_s: dt, requestedTime_s: 16,
   completedSteps: 0, completedTime_s: 0, passed: false, rows, gpuErrors,
 };
 const save = () => {
@@ -88,7 +90,7 @@ save();
 try {
   await withUniformDevice("pool party splash", async device => {
     device.addEventListener("uncapturederror", event => { gpuErrors.push(event.error.message); });
-    const scene = createBackyardPoolPartyScene();
+    report.fluidCell_m = scene.voxelDomain.finestCellSize_m;
     console.log("Preparing authored pool solver");
     const manager = gpuCompilationManagerFor(device);
     const progress = setInterval(() => {
@@ -156,9 +158,9 @@ try {
       report.volumeInvariant = { minimumRetainedFraction: .8, initialVolume_m3: initialVolume, failures: volumeFailures };
       save();
       console.log("Pool solver ready");
-      for (let frame = 1; frame <= 960; frame++) {
+      for (let frame = 1; frame <= steps; frame++) {
         report.attemptedStep = frame;
-        await host.advance(1 / 60);
+        await host.advance(dt);
         const view = host.getView(), time = solver.info.completedTime_s;
         report.completedTime_s = time;
         report.readiness = view.readiness;
@@ -166,7 +168,7 @@ try {
         assert.equal(solver.info.simulationPipelineError, undefined, `step ${frame}: solver pipeline healthy`);
         assert.ok(typeof time === "number" && Number.isFinite(time) && time > previousTime,
           `step ${frame}: fluid clock must advance`);
-        assert.ok(Math.abs(time - frame / 60) < 1e-7, `step ${frame}: requested fluid interval completed`);
+        assert.ok(Math.abs(time - frame * dt) < 1e-7, `step ${frame}: requested fluid interval completed`);
         previousTime = time;
         assert.equal(view.readiness.state, "ready", `step ${frame}: interaction host remains ready`);
         assert.equal(view.snapshot?.tick, frame, `step ${frame}: Box3D clock agrees with fluid`);
@@ -191,7 +193,7 @@ try {
         report.completedSteps = frame;
         report.minY_m = minY;
         report.submerged = submerged;
-        if (frame === 1 || frame % 60 === 0) {
+        if (frame === 1 || frame % ticksPerSecond === 0) {
           const water = await measureWater(latestFluidPosition ?? ball.position_m);
           if (water.openShellSamples >= 8 && water.wetOpenShellSamples >= Math.ceil(.75 * water.openShellSamples)
             && (!latestExchange || latestExchange.displacedVolume_m3 <= 1e-8)) {
@@ -199,8 +201,8 @@ try {
           }
           if (water.retainedVolumeFraction < .8) volumeFailures.push(`step ${frame}: retained ${(100 * water.retainedVolumeFraction).toFixed(2)}% of initial water`);
           const row = { water, exchange: latestExchange, cumulativeFluidImpulse_N_s: { ...totalImpulse },
-            meanFluidForce_N: latestExchange ? Object.fromEntries(Object.entries(latestExchange.linearImpulse_N_s).map(([axis, impulse]) => [axis, impulse * 60])) : undefined,
-            frame, time_s: frame / 60, completedTime_s: time, tick: view.snapshot!.tick,
+            meanFluidForce_N: latestExchange ? Object.fromEntries(Object.entries(latestExchange.linearImpulse_N_s).map(([axis, impulse]) => [axis, impulse / dt])) : undefined,
+            frame, time_s: frame * dt, completedTime_s: time, tick: view.snapshot!.tick,
             readiness: view.readiness.state, position: { ...ball.position_m }, submerged: fraction,
             particles: particles?.particles, particleCapacity: particles?.capacity,
             pagePool: solver.pagePoolInfo ? { ...solver.pagePoolInfo } : undefined };
@@ -211,7 +213,7 @@ try {
       report.runtimePassed = true;
       assert.deepEqual(volumeFailures, [], "closed pool must not catastrophically lose represented water");
       assert.deepEqual(couplingAnomalies, [], "wet ball exterior must produce displaced-water exchange");
-      assert.equal(host.getView().snapshot!.tick, 960);
+      assert.equal(host.getView().snapshot!.tick, steps);
       assert.equal(host.getView().readiness.state, "ready");
       assert.ok(submerged, "the ball must enter the water");
       assert.ok(minY < 1.8, "the ball must pass through the waterline");

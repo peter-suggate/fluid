@@ -18,6 +18,24 @@ const presentation: ResourcePluginDefinition = {
 };
 const info = { initialSparseAuthorityReady: true, initialRasterSurfaceReady: true } as GPUEulerianInfo;
 
+test("reset waits for an attached solver on the new timeline despite a late worker report", () => {
+  const diagnostics = createDiagnosticsStore();
+  const publish = diagnostics.getState().set;
+  for (const resource of [platform, fluid, presentation])
+    publish({ gpuStatus: { state: "ready", adapter: "test", label: "Ready", resource } });
+  publish({ effectiveRendererStatus: { state: "active" }, gpuInfo: { ...info, simulationEpoch: 3 } });
+  let epoch = 3;
+  const driver = createInteractionFluidDriver(diagnostics, async () => [], () => epoch);
+  assert.equal(driver.isReady!(), true);
+  epoch++;
+  publish({ gpuInfo: null });
+  assert.equal(driver.isReady!(), false);
+  publish({ gpuInfo: { ...info, simulationEpoch: 3 } });
+  assert.equal(driver.isReady!(), false);
+  publish({ gpuInfo: { ...info, simulationEpoch: 4 } });
+  assert.equal(driver.isReady!(), true);
+});
+
 test("interactive play unlocks from published readiness after the last GPU status was progress", async () => {
   const diagnostics = createDiagnosticsStore();
   const scene = createInteractivePlayground(true);

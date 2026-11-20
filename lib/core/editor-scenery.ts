@@ -414,6 +414,13 @@ function intersectSculptedTarget(target: SceneryPickTarget, cuts: SceneryCutQuer
   const descriptor = target.descriptor!;
   const span = intersectBox(ray, target.aabb_m);
   if (!span) return undefined;
+  // A cut can remove the first source surface, never add material before it.
+  // Preserve the source intersection and shading normal outside the cut band.
+  // A ray starting inside the source may meet a cavity wall first.
+  if (span.near_m > 0 && descriptor.kind === "field-program" && descriptor.program?.sampledVolume) {
+    const source = intersectSvoPrimitive(descriptor, { origin_m: ray.origin, direction: ray.direction, tMax_m: maximumDistance_m });
+    if (source && cuts.distance(source.position_m) >= cuts.field.band * .99) return source;
+  }
   const end = Math.min(span.far_m, maximumDistance_m);
   let distance_m = Math.max(0, span.near_m);
   target.distance ??= prepareSvoPrimitiveDistance(descriptor);

@@ -90,7 +90,8 @@ function InteractionHold({ pane }: { readonly pane: InteractionPane }) {
  * Escape, a click outside, or the trigger again: an item never closes it,
  * because Import opens a file dialog whose input lives in here.
  */
-function TransportMenu({ viewPane, recordingControls }: {
+function TransportMenu({ viewPane, recordingControls, onCleanView }: {
+  readonly onCleanView: () => void;
   readonly viewPane: InteractionPane | undefined;
   readonly recordingControls: ReactNode;
 }) {
@@ -132,6 +133,7 @@ function TransportMenu({ viewPane, recordingControls }: {
         <small>Recording</small>
         {recordingControls}
       </div>
+      <button type="button" onClick={() => { setOpen(false); onCleanView(); }}>Hide scene controls</button>
       {viewPane && <InteractiveDocumentActions pane={viewPane} />}
     </div>}
   </span>;
@@ -183,7 +185,8 @@ function PaneWork({ session, tag }: { readonly session: PaneSession; readonly ta
  * the sculpt rail stands on the left edge only then — so a button restating it
  * was the card's widest control and its least used.
  */
-export function TransportBar({ hostBlockReason, viewSession, sessions }: {
+export function TransportBar({ hostBlockReason, viewSession, sessions, onCleanView }: {
+  readonly onCleanView: () => void;
   readonly hostBlockReason?: string;
   /** The focused pane: what the frame rate and the menu's entity items are about. */
   readonly viewSession: PaneSession;
@@ -311,7 +314,7 @@ export function TransportBar({ hostBlockReason, viewSession, sessions }: {
           aria-label="Stop simulation recording"
         >■ STOP</button>}
         {safeBringup && <button type="button" className="stop-gpu-button" onClick={requestManualGPUStop}>STOP GPU</button>}
-        <TransportMenu viewPane={viewPane} recordingControls={recordingControls} />
+        <TransportMenu onCleanView={onCleanView} viewPane={viewPane} recordingControls={recordingControls} />
       </div>
       <div className="transport-readouts">
         <output className="transport-time" aria-label="Simulation time in seconds">
