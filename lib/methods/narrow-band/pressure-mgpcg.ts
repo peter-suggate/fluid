@@ -201,10 +201,11 @@ export function mgLayout(L: BrickLayout) {
   // integers in append order: HBL the bricks with an h-owned tile (the h rows' bricks: tileRoots, rowsF, setupF and
   // finish run over it), HPL those with an h-owned tile in the brick or across its lower faces (an h face stored
   // there: projectF runs over it), ZLL the bricks off HB whose zero rows are not certified (pressureRowsZero), RLL
-  // those off HP whose FLAGS bits are not (pressureProjectRest), and RLN RL's count.
+  // those off HP whose FLAGS bits are not (pressureProjectRest), and RLN RL's count. DRY, a word an F slot:
+  // projectF's flag of an HP brick with a dry seam face (projectDry's work, pressure-composite.wgsl.ts).
   const STG = L1 + CH.N * 64 * F, RKU = STG + 81 * F, FC = RKU + 3 * BRICK_STRIDE * F, QSTG = SEAMN + C;
-  const HBL = FC + 7 * BRICK_STRIDE * F, HPL = HBL + F, ZLL = HPL + F, RLL = ZLL + F, RLN = RLL + F;
-  return { W0, W1, L1, STG, RKU, FC, HBL, HPL, ZLL, RLL, RLN, fWords: RLN + 1, L2, L3, L4, L5, PDELTA, PH, SEAMT, SEAML, SEAMF, SEAMN, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
+  const HBL = FC + 7 * BRICK_STRIDE * F, HPL = HBL + F, ZLL = HPL + F, RLL = ZLL + F, RLN = RLL + F, DRY = RLN + 1;
+  return { W0, W1, L1, STG, RKU, FC, HBL, HPL, ZLL, RLL, RLN, DRY, fWords: DRY + F, L2, L3, L4, L5, PDELTA, PH, SEAMT, SEAML, SEAMF, SEAMN, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
 }
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
@@ -1102,7 +1103,7 @@ fn pOwnerT(t:vec3i)->bool{
 }`);
   // The h rows' kernels over the lists (labels "operator" and "project", the F_ALL path's areas): rowsF and
   // tileRoots on HB, projectF on HP.
-  const KL = live ? pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN }, cuts }) : undefined;
+  const KL = live ? pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN, dry: M.DRY }, cuts }) : undefined;
 
   // A live F slot holds the brick of tile T (seen from page p), so setupF (over F_ALL) wrote T's L2 row.
   const LIQUID_TILE = /* wgsl */`
@@ -2233,7 +2234,7 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
     args: [{ kernel: listArgs, dispatch: { direct: [1, 1, 1] } }, { kernel: rowsZero, dispatch: { indirect: MG_GATE.ZL } }],
     tileRoots: [{ kernel: KL.tileRoots, dispatch: hb }],
     rows: [{ kernel: KL.rowsF, dispatch: hb }],
-    project: [{ kernel: KL.projectF, dispatch: { indirect: MG_GATE.HP } }],
+    project: [{ kernel: KL.projectF, dispatch: { indirect: MG_GATE.HP } }, { kernel: KL.projectDry!, dispatch: { indirect: MG_GATE.HP } }],
     rowsList,
   };
   const core = {

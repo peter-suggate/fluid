@@ -138,7 +138,7 @@ test("composite live lists (GPU): the rows, setup, finish and projection over HB
     const lv = poolMGPCG(L, mg), fa = poolMGPCG(L, { ...mg, live: false }), live = lv.live!;
     assert.ok(live && !fa.live, "live by default, F_ALL on request");
     const K = pressureCompositeKernels(L), KF = pressureCompositeKernels(L, {}, { faces: M.FC });
-    const KL = pressureCompositeKernels(L, {}, { faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN } });
+    const KL = pressureCompositeKernels(L, {}, { faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN, dry: M.DRY } });
     const fAll = { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 }, pages = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 };
     // Garbage in every channel the heads of the F_ALL path zero off the h rows (all but X, the warm starts), in the
     // L1 and L2 rows, and in the face cache, so a zero row the live path missed shows.

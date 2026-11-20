@@ -524,7 +524,7 @@ const headerWGSL = (L: BrickLayout, staged = false, tiered = true, cuts = false)
 
 /** The composite kernels. rowsF's label and entry are the engine's operator's when pressure-operator.wgsl.ts builds it.
  * `tiered: false` (the all-h engine) drops the absent-page guard: all-h, an absent page is air (brick-abi.md §2.5). */
-export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [string, string]; projectF?: [string, string] } = {}, opt: { readonly tiered?: boolean; readonly faces?: number; readonly live?: { readonly hb: number; readonly hp: number; readonly rl: number; readonly rln: number }; readonly cuts?: boolean } = {}) {
+export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [string, string]; projectF?: [string, string] } = {}, opt: { readonly tiered?: boolean; readonly faces?: number; readonly live?: { readonly hb: number; readonly hp: number; readonly rl: number; readonly rln: number; readonly dry: number }; readonly cuts?: boolean } = {}) {
   const tiered = opt.tiered !== false;
   // The cuts (opt.cuts, default off; M5 design §5): rowsF and projectF read the K slots' FRAC / AP / W (static and
   // body), so a brick with a cut no longer latches FAIL.UNSUPPORTED there. Off, their text is the cut-free rows'.
@@ -546,7 +546,7 @@ export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [strin
   // rowsF / projectF). Their zero rows are pressureRowsZero's, their FLAGS bits pressureProjectRest's.
   const live = opt.live;
   if (live && faces === undefined) throw new Error("Pressure composite: the live lists need the face cache (pmgF)");
-  const LIVE = live === undefined ? "" : `const PO_HBL:u32=${live.hb}u;const PO_HPL:u32=${live.hp}u;const PO_RLL:u32=${live.rl}u;const PO_RLN:u32=${live.rln}u;\n`;
+  const LIVE = live === undefined ? "" : `const PO_HBL:u32=${live.hb}u;const PO_HPL:u32=${live.hp}u;const PO_RLL:u32=${live.rl}u;const PO_RLN:u32=${live.rln}u;const PO_DRY:u32=${live.dry}u;\n`;
   const head = (list: "hb" | "hp", go: string, fill = "") => live === undefined
     ? `let g=nbGroup(wid);if(lid==0u){${fill}${go}=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}if(workgroupUniformLoad(&${go})==0u){return;}\n  let slot=nbListSlot(NB_LIST_F_ALL,g);`
     : `let g=nbGroup(wid);${fill ? `if(lid==0u){${fill}}` : ""}\n  let slot=u32(pmgF[${list === "hb" ? "PO_HBL" : "PO_HPL"}+g]);`;
@@ -834,9 +834,9 @@ ${L.staticTiles ? "  // With the static tiles an exact tile of a cut brick is a 
   // seam (q resident, its tile's root wet: npBandFace's native), so only a seam runs the formula; poAcross runs first
   // either way (its FAIL latch).
   const DRY = faces === undefined ? "" : /* wgsl */`
+fn poDrySeam(q:vec3i)->bool{return poAcross(q)==NP_ACROSS_RESIDENT&&poWet(poRootPhi(q>>vec3u(2u)),4.0);}
 fn poProjectDry(m:vec3i,own:f32,f:u32,us:f32,h:f32,separated:bool,q:vec3i)->f32{
-  if(poAcross(q)!=NP_ACROSS_RESIDENT){return us;}
-  if(!poWet(poRootPhi(q>>vec3u(2u)),4.0)){return us;}
+  if(!poDrySeam(q)){return us;}
   return poProjectFace(m,own,false,f,us,h,separated);
 }
 `;
@@ -844,7 +844,9 @@ fn poProjectDry(m:vec3i,own:f32,f:u32,us:f32,h:f32,separated:bool,q:vec3i)->f32{
 var<workgroup> wSpeed:atomic<u32>;
 // The brick's signed per-axis bound (BOUND_F's six words: a the largest -u_a, 3 + a the largest u_a).
 var<workgroup> wBound:array<atomic<u32>,6>;
-var<workgroup> poGo:u32;
+var<workgroup> poGo:u32;${live === undefined ? "" : `
+// A dry seam face here, left to projectDry (PO_DRY: this brick's flag).
+var<workgroup> wDry:atomic<u32>;`}
 @compute @workgroup_size(256) fn ${projectEntry}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   ${live === undefined ? `  let g=nbGroup(wid);
   if(lid==0u){atomicStore(&wSpeed,0u);for(var k=0u;k<6u;k++){atomicStore(&wBound[k],0u);}poGo=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}
@@ -861,7 +863,7 @@ var<workgroup> poGo:u32;
     for(var j=0u;j<2u;j++){let at=NB_STRIDE*slot+lid+256u*j;phi[NB_PHI_F_FLAGS+at]&=~(PO_WARM|PO_WALLS);}
     return;
   }
-` : `${head("hp", "poGo", "atomicStore(&wSpeed,0u);for(var k=0u;k<6u;k++){atomicStore(&wBound[k],0u);}")}
+` : `${head("hp", "poGo", "atomicStore(&wSpeed,0u);atomicStore(&wDry,0u);for(var k=0u;k<6u;k++){atomicStore(&wBound[k],0u);}")}
   let o=nbFOrigin(slot);
   workgroupBarrier();
 `}  ${faces === undefined ? "poStage(o,lid,256u);" : "poStageLight(o,lid);"}
@@ -902,8 +904,10 @@ var<workgroup> poGo:u32;
           if(kind==NP_K_WALL){word=1.0;separated=(flags&(PO_WALL0<<a))!=0u;}` : ""}
           u=poProjectFaceK(n,pn,true,2u*a+1u,us,h,separated,kind,select(word,poSeamRatio(),kind==NP_K_SEAM),select(0.0,word,kind==NP_K_SEAM));
         }
+${live === undefined ? `
         else if(hc&&!hn){u=poProjectDry(c,pc,2u*a,us,h,separated,n);}
-        else if(hn&&!hc){u=poProjectDry(n,pn,2u*a+1u,us,h,separated,c);}${cuts ? `
+        else if(hn&&!hc){u=poProjectDry(n,pn,2u*a+1u,us,h,separated,c);}` : `
+        else if(hc!=hn&&poDrySeam(select(c,n,hc))){atomicOr(&wDry,1u);continue;}`}${cuts ? `
         if(closed){u=wv;}` : ""}`}
 ${faces === undefined ? `
         else if(hc&&!hn){u=poProjectFace(c,pc,false,2u*a,us,h,separated);}
@@ -934,8 +938,58 @@ ${faces === undefined ? `
     for(var k=0u;k<6u;k++){let w=bitcast<u32>(bound[k]);if(w>atomicLoad(&wBound[k])){atomicMax(&wBound[k],w);}}
   }
   workgroupBarrier();
-  if(lid<6u){atomicMax(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*slot+lid],atomicLoad(&wBound[lid]));}
+  if(lid<6u){atomicMax(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*slot+lid],atomicLoad(&wBound[lid]));}${live === undefined ? "" : `
+  if(lid==0u){pmgF[PO_DRY+slot]=f32(atomicLoad(&wDry));}`}
 }`, projectEntry, projectB, true, cuts);
+
+  // projectDry (opt.live: right after projectF, over HP): the dry seam faces projectF left, a dry h side facing a
+  // resident wet 4h tile (poProjectDry's formula case). Rare, and poProjectFace's npBandFace held projectF to Metal's
+  // 448-thread register cap (one 256-lane workgroup a core; 768 without it): projectF 3.00 -> 1.55 ms on the pour
+  // (go/no-go, 2026-11-21). Their U, bound and release bits as projectF's: its FLAGS write keeps a cell's other bits,
+  // and a dry face's projection and release do not read the wall state it clears (separated: a liquid side's only).
+  // 64 lanes, so a brick without one (the flag) leaves at once.
+  const projectDry = live === undefined ? undefined : k(`${projectLabel}Dry`, FC + LIVE + PROJECT_WGSL + DRY + BRICK_SOURCE_RING_WGSL + /* wgsl */`
+var<workgroup> poGo:u32;
+@compute @workgroup_size(64) fn ${projectEntry}Dry(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  let g=nbGroup(wid);let slot=u32(pmgF[PO_HPL+g]);
+  if(lid==0u){poGo=u32(pmgF[PO_DRY+slot]);}
+  if(workgroupUniformLoad(&poGo)==0u){return;}
+  let o=nbFOrigin(slot);
+  poStageLight(o,lid);
+  let h=nbRingF(cfg.x,NB_RING_H);
+  var bound=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+  for(var j=0u;j<8u;j++){
+    let l=lid+64u*j;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
+    let hc=nbInWallBox(c)&&poOwnerH(c);
+    var pc=NB_PHI_AIR;if(hc){pc=pres[NB_PRES_F_PPHI+at];}
+    if(hc&&poWet(pc,1.0)){continue;}
+    var release=0u;
+    for(var a=0u;a<3u;a++){
+      if(!nbFaceInLattice(c,a)){continue;}
+      let n=c-poUnit(a);let hn=nbInWallBox(n)&&poOwnerH(n);
+      if(hc==hn){continue;}
+      var pn=NB_PHI_AIR;if(hn){pn=poPhiF(n);}
+      if(hn&&poWet(pn,1.0)){continue;}
+      if(!poDrySeam(select(c,n,hc))){continue;}
+      let fa=NB_STRIDE*(slot+a*NB_FCAP)+l;let us=vel[NB_VEL_F_US0+fa];
+      let wall=c[a]==0||c[a]==NB_WALL_BOX[a];
+      var u=poProjectFace(select(n,c,hc),select(pn,pc,hc),false,2u*a+select(1u,0u,hc),us,h,false);${cuts ? `
+      let ap=poFaceAP(c,a);let wv=poFaceW(c,a);if(ap<=1e-6){u=wv;}` : ""}
+      if(nbInflowOn()&&c[a]!=0){u=nbInflowProjected(n,a,u);}
+      vel[NB_VEL_F_U0+fa]=u;bound[a]=max(bound[a],-u);bound[3u+a]=max(bound[3u+a],u);
+      if(wall){
+        let low=c[a]==0;let sign=select(1.0,-1.0,low);let m=select(n,c,low);
+        if(poRelease(select(pn,pc,low),0.0,sign,u,1.0,h)${cuts ? "&&poFrac(m)>1e-5&&ap>1e-6" : ""}){release|=PO_WALL0<<a;}
+      }${cuts ? `
+      else if(hn){
+        let openN=poFrac(n)>1e-5;
+        if(openN!=(poFrac(c)>1e-5)&&ap>1e-6&&select(1.0,-1.0,openN)*(u-wv)*nbRingF(cfg.x,NB_RING_DT)>1e-4*h){release|=PO_WALL0<<a;}
+      }` : ""}
+    }
+    if(release!=0u){phi[NB_PHI_F_FLAGS+at]|=release;}
+  }
+  for(var k=0u;k<6u;k++){let w=bitcast<u32>(bound[k]);if(w!=0u){atomicMax(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*slot+k],w);}}
+}`, `${projectEntry}Dry`, projectB, true, cuts);
 
   // projectC: a workgroup a page of C_ALL (G1), a lane two tiles, after the solve's finish.
   // - An h tile's C X becomes the mean X of its liquid h rows (083's band-tile mean): the tile's start next step.
@@ -1047,5 +1101,5 @@ fn pcProjectPage(cs:u32,lid:u32,still:bool){
   for(var j=0u;j<8u;j++){let at=NB_STRIDE*slot+lid+64u*j;phi[NB_PHI_F_FLAGS+at]&=~(PO_WARM|PO_WALLS);}
 }`, "pressureProjectRest", projectB);
 
-  return { tileRoots, rowsF, rowsC, projectF, projectC, projectRest };
+  return { tileRoots, rowsF, rowsC, projectF, projectDry, projectC, projectRest };
 }

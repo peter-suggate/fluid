@@ -309,6 +309,28 @@ Occupancy elasticity is about 0.6: +33% resident threads gave -17% to -23%. A re
 kernels is therefore worth perhaps 4–6 ms of 69, kernel by kernel, each an exact fission, and only where the
 split-off path is rare in every scene. The other 2x, instructions a cell, is the generality itself.
 
+**Granularity (2026-11-21).** A core holds whole workgroups, so a register cap pays only when it crosses a
+multiple of the workgroup size. uExtend's cap went 640 to 768 by moving its seed's coarse face read (foUFaceU)
+out of the seed loop, and the time didn't move (4.45 to 4.40 ms): a 512-lane workgroup needs 1024 for a second
+one a core. For 256-lane kernels the steps are 512, 768 and 1024. The candidates just under a step:
+
+- project at 448 (one workgroup a core);
+- lAdvect at 384;
+- uAdvect at 704.
+
+**project landed (exact).** Its peak was poProjectFace (npBandFace), reached only by a dry seam face: a dry h side
+facing a resident wet 4h tile. projectF now flags the brick and skips those faces, and projectDry (64 lanes, over
+HP, empty bricks leave at once) projects them with the same U, bound and release bits. The live-lists test checks
+it bit for bit against the unchanged F_ALL path; its fixture has 7 such bricks.
+
+- Pour kernel times: project 3.00 to 1.59 ms, projectDry 0.37 ms, GPU total 68.84 to 66.34 ms.
+- Pipelined timing slot, single runs:
+  - seep: 27.16 to 26.79 ms a step;
+  - pour: 54.05 to 55.09 ms (+1.9%, inside single-run noise, against the kernel times).
+- Gates:
+  - seep 300: drift +0.21% (HEAD) against +0.33% and +0.40% (two runs);
+  - letters 120: drift +0.48% against +0.46% and +0.43%.
+
 ## 6. Process
 
 Single agent (memory: single-agent-only). Commit verified milestones with
