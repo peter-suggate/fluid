@@ -1182,9 +1182,22 @@ const FACE_SL_WGSL = /* wgsl */ `
  *  (velU: velocitySampler over U); slSegs keeps the unclamped segment count. RK2 midpoint segments, one velocity
  *  evaluation site: even half-steps locate the midpoint from k1, odd ones advance with k2. */
 var<private> slSegs: f32;
+/** velU at the centre of face (a, c), with its zero-weight corners skipped: component a is the face itself (every
+ *  weight 0), a component b != a the mean of four faces (weight 1/2 along a and b, 0 along the third axis), mixed in
+ *  velUComp's order (the lower axis first). Bit-identical to velU(pos): mix(x, y, 0) is x. */
+fn velUAtFace(a: u32, c: vec3i) -> vec3f {
+  var u = vec3f(0.0);
+  let lo = c - unitAxis(a);
+  for (var b = 0u; b < 3u; b++) {
+    if (b == a) { u[b] = velUFace(a, c); continue; }
+    let ei = unitAxis(min(a, b)); let ej = unitAxis(max(a, b));
+    u[b] = mix(mix(velUFace(b, lo), velUFace(b, lo + ei), 0.5), mix(velUFace(b, lo + ej), velUFace(b, lo + ei + ej), 0.5), 0.5);
+  }
+  return u;
+}
 fn fineFaceSL(a: u32, c: vec3i) -> f32 {
   let pos = vec3f(c) + vec3f(0.5) - 0.5 * vec3f(unitAxis(a));
-  let u0 = velU(pos);
+  let u0 = velUAtFace(a, c);
   slSegs = ceil(length(u0) * CFL);
   let n = clamp(slSegs, 1.0, MAXSEG);
   let tau = CFL / n;
