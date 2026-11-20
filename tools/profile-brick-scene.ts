@@ -69,7 +69,7 @@ try {
     buf.unmap(); buf.destroy(); return v;
   };
   const v0 = presented ? await volume() : NaN; if (presented) out.V0 = Math.round(v0);
-  const ms: number[] = [], curve: number[] = [], trace: number[][] = [];
+  const ms: number[] = [], all: [number, number][] = [], curve: number[] = [], trace: number[][] = [];
   const profSteps = Number(opt("profSteps") ?? 2), profAt = Number(opt("profAt") ?? Math.max(1, steps - profSteps + 1));
   let timedSteps = 0;
   for (let k = 1; k <= steps; k++) {
@@ -79,7 +79,7 @@ try {
     await solver.assertSimulationHealthy();
     // Every 5th step reads the volume, and that step is left out of the median; so are the split-pass steps.
     if (presented && k % 5 === 0) curve.push(+(100 * ((await volume()) / Math.max(v0, 1e-9) - 1)).toFixed(3));
-    else if (!timer.enabled) ms.push(performance.now() - a);
+    else if (!timer.enabled) { ms.push(performance.now() - a); all.push([k, performance.now() - a]); }
     if (k % 10 === 0 || k === steps) { const h = await e.read("set", 0, 256); trace.push([k, h[H.LIVE_F]!, h[H.LIVE_C]!, h[H.LIST_COUNT + 11]!, h[H.LIST_COUNT + 18]!]); }
   }
   timer.enabled = false;
@@ -91,7 +91,7 @@ try {
   }
   const prof = await timer.collect(), agg = new Map<string, number>();
   for (const [l, v] of prof.byLabel) { const k = l.replace(/step\d+\./, ""); agg.set(k, (agg.get(k) ?? 0) + v); }
-  out.prof = [...agg].sort((x, y) => y[1] - x[1]).slice(0, 40).map(([l, v]) => [l, +(v / Math.max(1, timedSteps)).toFixed(3)]);
+  out.prof = [...agg].sort((x, y) => y[1] - x[1]).slice(0, Number(opt("top") ?? 40)).map(([l, v]) => [l, +(v / Math.max(1, timedSteps)).toFixed(3)]);
   out.profTotal = +([...prof.byLabel.values()].reduce((a, b) => a + b, 0) / Math.max(1, timedSteps)).toFixed(2);
   out.trace = trace; out.traceColumns = "k LIVE_F LIVE_C C_ALL C_ACT";
   const h = await e.read("set", 0, 256);
@@ -100,6 +100,9 @@ try {
     out.curve = curve;
     if (out.refused === undefined) { const v1 = await volume(); out.V1 = Math.round(v1); out.drift = +((v1 - v0) / Math.max(v0, 1e-9)).toExponential(3); }
   }
+  // The step time by 25-step window (median), as a scene's cost moves with its liquid.
+  const byWin = new Map<number, number[]>(); for (const [k, v] of all) { const b = Math.floor((k - 1) / 25); byWin.set(b, [...(byWin.get(b) ?? []), v]); }
+  out.msByWindow = [...byWin].map(([b, v]) => { v.sort((x, y) => x - y); return [b * 25 + 1, +v[v.length >> 1]!.toFixed(1)]; });
   const w = ms.slice(Math.min(8, ms.length - 1)).sort((x, y) => x - y); out.median_ms = w.length ? +w[w.length >> 1]!.toFixed(2) : undefined;
   solver.destroy();
 } catch (err) { out.error = (err as Error).message.slice(0, 400); }
