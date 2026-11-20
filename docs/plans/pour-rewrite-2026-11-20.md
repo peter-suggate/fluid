@@ -23,7 +23,7 @@ A faster but divergent solver is not done; nor is a matching but slower one.
 | milestone | state |
 |---|---|
 | P0 harness (`tools/pour-bench.ts`) and brick reference runs (two, for the spread) | done 2026-11-20: `artifacts/pour-rewrite/runs/brick-ref-{a,b}` (625 steps, every 25) |
-| P1 correct uniform-h solver (`lib/methods/pour/`, method `pour-m1max`), gates G1–G7 | open |
+| P1 correct uniform-h solver (`lib/methods/pour/`, method `pour-m1max`), gates G1–G7 | in progress 2026-11-20: run `pour-p1-vc2` passes 18 of 19 (`tools/pour-compare.ts`). Fails G4 centroid @100 (y −4.4 against a tolerance of 4). Particles peak 1.32M (brick 789k). Median 21.0 ms |
 | P2 at most 16.7 ms median, gates held | open |
 | P3 per-stage comparison table, brick against pour-m1max on the pour (feeds the brick tuning) | open |
 
@@ -139,6 +139,12 @@ noise floor for each observable.
 
 Gates are not loosened after the fact. A gate found to measure an artefact is
 corrected in a dated §4.1 note with both definitions kept in the report.
+
+### 4.1 Notes
+
+- 2026-11-20: the bench samples every 25 steps, so the gates at step 315 read the
+  sample at 325 (`tools/pour-compare.ts` takes the first sample at or after the
+  gate step). G6 compares the first sample with floorV > 1.
 
 ## 5. Performance gate
 
