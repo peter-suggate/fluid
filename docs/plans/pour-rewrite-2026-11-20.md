@@ -25,7 +25,7 @@ A faster but divergent solver is not done; nor is a matching but slower one.
 | P0 harness (`tools/pour-bench.ts`) and brick reference runs (two, for the spread) | done 2026-11-20: `artifacts/pour-rewrite/runs/brick-ref-{a,b}` (625 steps, every 25) |
 | P1 correct uniform-h solver (`lib/methods/pour/`, method `pour-m1max`), gates G1–G7 | in progress 2026-11-21: run `pour-p1-seed` passes 17 of 19. Fails G1 @100 (drift −6.25% against a limit of 6.15) and G2 pool @325 (66.2 against 69.6, tolerance 2.3; the bore is 0.7% low and its surface flatter just after the inflow stops). Ported since `pour-p1-vc2`: the mass rules (retire, merge, split); the buried vertex hold and smoothing guard (wall interiors are air); the seed's first move taking the grid's velocity (nbSeedFirst: plug seeds had kept the stale zero, the stream's first liquid fell off the nozzle's lip, landed short of the far wall and ran up it, and the film spilt over the rim: outside 17165 at 625, now 3163); the extension closing every face not between two open cells. MAX_CYCLES 16. Median 21.2 ms |
 | P2 at most 16.7 ms median, gates held | **met 2026-11-21** (HEAD 33569b6a). Timing slot, fenced (`pour-p2j-timing`): median 14.09 ms, p95 15.99, worst 25-step window 16.11 (301–325), worst single step 16.87; pipelined (`pour-p2j-timing-pipe`) 12.65 ms a step. Check slot (`pour-p2j`): median 13.91, worst window 16.18; gates 18 of 19 (G2 pool @325 fails as in P1; G1 @100 drift sits on its tolerance edge, passing or failing by run-to-run noise). Landed: P2a weighted coarse corrections (10 cycles a step to 6); P2b one red-black sweep a fine smoothing pass; P2c the brick engine's support rule in P2G and G2P; P2d the active set as the liquid's reach (median 18.1 to 16.2); P2e velocityTrace's face-centre sample from 9 loads; P2f coarseSolve as 512 threads (0.865 to 0.22 ms); P2g the velocity samplers gather from U textures (velocityTrace 2.26 to 0.80, advectPhi 1.51 to 0.60, G2P 1.08 to 0.73); P2h the step in five submits (Dawn translates at submit: worst window 18.2 to 16.6); P2i the extension in one 12 KB tile, skipping bricks it cannot change (1.29 to 0.88); P2j plain reads for single-owner accumulators, fill's whole-cell answers (velocity 1.19 to 1.04). See §5.1 |
-| P3 per-stage comparison table, brick against pour-m1max on the pour (feeds the brick tuning) | open |
+| P3 per-stage comparison table, brick against pour-m1max on the pour (feeds the brick tuning) | **table done 2026-11-21** (§5.2); the direct transfers measured there gain at most 0.13 ms each on brick; the brick tuning needs counter attribution next (§5.2) |
 
 ## 1. The scene (lib/core/nbflip-paper-scenes.ts, createNbflipPour)
 
@@ -202,6 +202,56 @@ memory.
   every trilinear U sample (2.7 ms a step); several submits a step instead of one (1.4 ms fenced); the coarse
   solve's thread layout (0.65 ms); extension tiles at 12 KB and skipping bricks with nothing to extend (0.4 ms);
   RMW-free reads of single-owner accumulators (0.13 ms); whole-cell fill answers (0.06 ms).
+
+### 5.2 P3: brick against pour-m1max, stage by stage (2026-11-21)
+
+Kernel timer, steps 301–325, check slot, HEAD 096dd641 (runs `brick-prof-head`, `pour-prof-fill`).
+Brick: 289 dispatches, 68.8 ms GPU a step (fenced wall 70.5 over 276–300). Pour: 252
+dispatches, 15.8 ms.
+
+| Stage | brick ms (kernels) | pour-m1max ms (kernels) | ratio |
+|---|---|---|---|
+| pressure (operator, project, MGPCG) | 19.2 (42) | 6.9 (19) | 2.8x |
+| level set | 16.1 (20) | 3.3 (7) | 4.8x |
+| momentum (advect, P2G, transfer, uCache) | 10.3 (4) | 2.9 (3) | 3.6x |
+| particles (G2P, move, seed, rebin) | 9.9 (10) | 1.5 (4) | 6.5x |
+| velocity extension | 5.8 (3) | 1.0 (2) | 5.5x |
+| residency, census, lists | 6.5 (40) | 0.1 (3) | - |
+| present | 1.1 (2) | 0 | - |
+
+**The work is the same size.** At step 300 brick holds F_ALL 3855 bricks (F_LIQ 1267, F_SURF
+1044; 184 C pages), pour's active list 4035 (liquid 1633). Particles: 644k against 637k at 300,
+773k against 879k at 200. PCG: brick about 6 iterations a step (cap 8, none capped over 295–305),
+as pour's 6 cycles. So brick is about 4–5x slower *per element* in nearly every stage. pMove takes
+4.3 ns a particle against pour's g2p at 1.2. It is not a larger work set, a slower solver or more
+particles.
+
+**The pour's lessons, applied directly to brick (each A/B'd, then reverted):**
+
+| Lesson | On brick | Result |
+|---|---|---|
+| several submits a step (P2h) | parts in chunks of 8, 24, 48, then 64 | none (72.5/73.5 against 72.4/71.8 ms, interleaved): brick is GPU-bound, the translation is hidden |
+| skip bricks with nothing to extend (P2i) | uExtend: a brick whose cells are all liquid takes US = U, UP = U - UP directly | -0.11 ms: tiered, the deep pool is 4h, so few F bricks are wholly liquid |
+| two workgroups a core (P2i) | lDistance's pair list packed two a word (16.7 to 12.7 KB) | -0.03 ms |
+| one fine sweep (P2b) | MGPCG fineSweeps 3 to 1 | none (19.2 to 19.9 ms); iterations unchanged |
+| gathers from textures (P2g) | uCache's UNIT as an r32float atlas, fsFine two gathers a component (patch kept in fluid-scratch/brick-tune/unit-texture.patch) | uAdvect -0.13 ms, the rest within noise. Doubling fsFine's loads had cost +2.5 ms, so the loads' latency is mostly hidden |
+| (diagnostic) Dawn robustness off | not shippable, a bound only | -2.5 ms (4%) |
+
+**What this says.** Pour's wins were in its bottlenecks: idle GPU between submits, sampler-bound
+traces, one workgroup a core. Brick's time is not in those. It is spread over about 130 kernels,
+each paying for the general engine's per-element machinery:
+
+- owner and tier tests;
+- slot and directory lookups;
+- cut, wall and seam paths;
+- solid walks for the 2326 F_SOLID bricks.
+
+The next step for the brick tuning is attribution, not more transfers: hardware counters
+(occupancy, limiter, ALU) per brick kernel against its pour counterpart, from the counter
+profiler (`tools/profile-mini-dam-xctrace.ts --counters`) pointed at the pour scene. That decides
+between a common cause (register pressure capping occupancy, divergence) and per-path costs. For
+per-path costs the remedy is lean variants for bricks the general paths cannot touch, exact by
+construction.
 
 ## 6. Process
 

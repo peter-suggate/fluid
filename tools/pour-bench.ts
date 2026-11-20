@@ -126,7 +126,9 @@ try {
         const { byLabel, dispatches } = await timer.collect();
         const n = profWindow[1]!, total = [...byLabel.values()].reduce((a, b) => a + b, 0);
         log({ kind: "prof", from: profWindow[0], steps: n, dispatchesPerStep: dispatches / n, gpuMsPerStep: total / n,
-          byLabel: Object.fromEntries([...byLabel].sort((a, b) => b[1] - a[1]).map(([l, v]) => [l.replace(/step\d+\./, ""), +(v / n).toFixed(4)])) });
+          // Per-step labels (the brick engine's "stepN.") fold onto one key before averaging.
+          byLabel: Object.fromEntries([...[...byLabel].reduce((m, [l, v]) => { const k = l.replace(/step\d+\./g, ""); return m.set(k, (m.get(k) ?? 0) + v); }, new Map<string, number>())]
+            .sort((a, b) => b[1] - a[1]).map(([l, v]) => [l, +(v / n).toFixed(4)])) });
       }
       if (s.info.simulationPipelineError) throw new Error(String(s.info.simulationPipelineError));
       const isSample = step % every === 0 || step === steps;
