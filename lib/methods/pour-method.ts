@@ -1,6 +1,7 @@
 /** Pour · M1 Max: the pour rewrite's single-scene reference solver (docs/plans/pour-rewrite-2026-11-20.md), the
  * brick engine's NB-FLIP physics on nbflip-figure-7-pour with every stage built for that scene. It refuses any other
- * scene, and any change to the pour's geometry or nozzle. Opened with ?scene=nbflip-figure-7-pour&method=pour-m1max. */
+ * scene, and any change to the pour's geometry or nozzle. Picked from the toolstrip's "Fluid solver" select on the pour
+ * scene (or ?scene=nbflip-figure-7-pour&method=pour-m1max). */
 import type { GPUInitializationPhase } from "../core/gpu-initialization";
 import type { GPUInitializationReporter, SimulationMethod } from "../core/method-contract";
 import { NBFLIP_POUR_SCENE_ID } from "../core/nbflip-paper-scenes";

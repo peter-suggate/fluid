@@ -3,7 +3,8 @@
  * It is built for reservoir-seep alone and refuses any other scene by name:
  * it has no rigid coupling, no scheduled drops, no live solid edits and no
  * sources, so a scene that needs any of them must not open under it.
- * Opened with ?scene=reservoir-seep&method=seep-m1max; NB-FLIP stays the default. */
+ * Picked from the toolstrip's "Fluid solver" select on the seep scene (or ?scene=reservoir-seep&method=seep-m1max);
+ * NB-FLIP stays the default. */
 import type { GPUInitializationPhase } from "../core/gpu-initialization";
 import type { GPUInitializationReporter, SimulationMethod } from "../core/method-contract";
 import { composeFeatures } from "../framework/composition";
