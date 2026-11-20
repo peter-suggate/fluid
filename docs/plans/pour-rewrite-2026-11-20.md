@@ -23,7 +23,7 @@ A faster but divergent solver is not done; nor is a matching but slower one.
 | milestone | state |
 |---|---|
 | P0 harness (`tools/pour-bench.ts`) and brick reference runs (two, for the spread) | done 2026-11-20: `artifacts/pour-rewrite/runs/brick-ref-{a,b}` (625 steps, every 25) |
-| P1 correct uniform-h solver (`lib/methods/pour/`, method `pour-m1max`), gates G1–G7 | in progress 2026-11-20: run `pour-p1-vc2` passes 18 of 19 (`tools/pour-compare.ts`). Fails G4 centroid @100 (y −4.4 against a tolerance of 4). Particles peak 1.32M (brick 789k). Median 21.0 ms |
+| P1 correct uniform-h solver (`lib/methods/pour/`, method `pour-m1max`), gates G1–G7 | in progress 2026-11-21: run `pour-p1-seed` passes 17 of 19. Fails G1 @100 (drift −6.25% against a limit of 6.15) and G2 pool @325 (66.2 against 69.6, tolerance 2.3; the bore is 0.7% low and its surface flatter just after the inflow stops). Ported since `pour-p1-vc2`: the mass rules (retire, merge, split); the buried vertex hold and smoothing guard (wall interiors are air); the seed's first move taking the grid's velocity (nbSeedFirst: plug seeds had kept the stale zero, the stream's first liquid fell off the nozzle's lip, landed short of the far wall and ran up it, and the film spilt over the rim: outside 17165 at 625, now 3163); the extension closing every face not between two open cells. MAX_CYCLES 16. Median 21.2 ms |
 | P2 at most 16.7 ms median, gates held | open |
 | P3 per-stage comparison table, brick against pour-m1max on the pour (feeds the brick tuning) | open |
 

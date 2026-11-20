@@ -91,7 +91,7 @@ export class PourSolver implements GPUSolverInstance {
     buffer("bulk", 16, S);
     buffer("parts", 2 * PARTICLE_CAPACITY * 2 * 16, S);
     buffer("pcell", PARTICLE_CAPACITY * 4, S);
-    buffer("pgrid", 2 * CELLS * 4, S);
+    buffer("pgrid", 3 * CELLS * 4, S);
     buffer("keys", CELLS * 4, S);
     buffer("acc", 6 * CELLS * 4, S);
     buffer("vsum", BRICKS * 4, S);
@@ -202,7 +202,7 @@ export class PourSolver implements GPUSolverInstance {
     for (const parity of [0, 1] as const) {
       const p = [parity, 0, 0, 0];
       const list: Dispatch[] = [
-        d(K.classify, undefined, { direct: [Math.ceil(BRICKS / 64)] }),
+        d(K.classify, p, { direct: [Math.ceil(BRICKS / 64)] }),
         d(K.clear, undefined, { indirect: W(C.ARG_CLEAR) }),
         d(K.advectPhi, undefined, { indirect: W(C.ARG_SURF) }),
         d(K.count, p, { direct: [capGroups] }),

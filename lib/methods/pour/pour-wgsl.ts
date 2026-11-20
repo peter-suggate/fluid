@@ -26,8 +26,10 @@ export const PRESSURE_TOLERANCE = 0.05 * CELL_M;
 /** Multigrid cycle cap per step. With the staggered L0 partition the largest count over the 1200-step seep is 7
  *  (3.33 a step on average; it was 12 with bricks alone), so 9 leaves two cycles of margin and no step is capped.
  *  A capped step (the residual still above tolerance at the cap) leaves an unconverged pressure: it latches
- *  FAIL.PRESSURE_CAP and capHits counts it. Every cycle slot costs its gated dispatches even when empty. */
-export const MAX_CYCLES = 12;
+ *  FAIL.PRESSURE_CAP and capHits counts it. Every cycle slot costs its gated dispatches even when empty.
+ *  The pour after its inflow takes 10-12 cycles a step (steps 300-377 of pour-p1-mass, 2026-11-20; step 377 capped
+ *  at 12), so 16. */
+export const MAX_CYCLES = 16;
 /** Aggregation over-correction: A_c = R A P / OC (Braess 1995; piecewise-constant aggregation). A
  *  preconditioner parameter only (the converged solution is the same). Measured on the seep at
  *  1200 steps: OC 1.8 takes 7.6 cycles a step and OC 1.6 takes 6.7. The chamber's free-surface rows
@@ -75,6 +77,9 @@ export const C = {
    *  of [low, high] words, cells in 2^-20 units), the budget (cells, f32 bits), and the last rate (1/s) and filled
    *  volume (cells), f32 bits, for diagnostics. */
   VOL_SUM: 76, VOL_BUDGET: 80, RATE: 81, FILLED: 82,
+  /** G2P's split records appended past the dst count (classify adds them to the count), and the records the crowding
+   *  merge absorbed (cumulative). */
+  SPLIT: 83, MERGED: 84,
   RED: 256,
   /** In the args buffer: gated arguments per PCG iteration k, records of 4 words: U2, U1, U0, P, X(k+1); slot 5 the shifted fine blocks. */
   MG_ARGS: 64,
@@ -146,6 +151,8 @@ const GDT: f32 = ${f(GRAVITY * DT)};
 const PHI_MAX: f32 = ${f(PHI_MAX)};
 const UNKNOWN_PHI: f32 = ${f(PHI_MAX + 1)};
 const PN: u32 = ${CELLS}u;
+/** pgrid's third region: each cell's record count as the operator found it (the pre-move runs G2P's mass rules read). */
+const PN2: u32 = ${2 * CELLS}u;
 const CAP: u32 = ${PARTICLE_CAPACITY}u;
 const BAND: f32 = ${f(BAND)};
 const RCOMB: f32 = ${f(COMBINE_BAND)};
@@ -162,6 +169,7 @@ const C_N_LIQ: u32 = ${C.N_LIQ}u; const C_LIQ_COUNT: u32 = ${C.LIQ_COUNT}u; cons
 const C_EMITTED: u32 = ${C.EMITTED}u;
 const C_VOL_SUM: u32 = ${C.VOL_SUM}u; const C_VOL_BUDGET: u32 = ${C.VOL_BUDGET}u; const C_RATE: u32 = ${C.RATE}u; const C_FILLED: u32 = ${C.FILLED}u;
 const VOL_UNIT: f32 = 1048576.0;
+const C_SPLIT: u32 = ${C.SPLIT}u; const C_MERGED: u32 = ${C.MERGED}u;
 const B_INFLOW: u32 = ${B.INFLOW * BRICKS}u; const B_INNOW: u32 = ${B.INFLOW_NOW * BRICKS}u;
 const C_ARG_L4: u32 = ${C.ARG_L4}u; const C_ARG_L4U: u32 = ${C.ARG_L4U}u; const B_L4FLAG: u32 = ${B.L4_FLAG * BRICKS}u; const B_L4LIST: u32 = ${B.L4_LIST * BRICKS}u; const C_ARG_LIQ: u32 = ${C.ARG_LIQ}u; const C_ARG_LIQB: u32 = ${C.ARG_LIQB}u; const C_ARG_LIQBB: u32 = ${C.ARG_LIQBB}u;
 const B_SFLAG: u32 = ${B.SHIFT_FLAG * BRICKS}u; const B_LSHIFT: u32 = ${B.LIST_SHIFT * BRICKS}u; const C_SHIFT_COUNT: u32 = ${C.SHIFT_COUNT}u; const C_N_SHIFT: u32 = ${C.N_SHIFT}u; const C_ARG_SHIFT: u32 = ${C.ARG_SHIFT}u; const C_ARG_TRACE: u32 = ${C.ARG_TRACE}u; const TRACE_SLABS: u32 = ${TRACE_SLABS}u;

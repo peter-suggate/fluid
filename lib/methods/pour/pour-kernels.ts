@@ -192,7 +192,7 @@ function kernel(label: string, bindings: BindingSpec[], body: string, extra = ""
 // 1. Brick classification and list compaction (dense over the 8192 bricks). The step counter and this step's
 //    inflow words were published by the last step's G2P (the upload, for step 1).
 // ---------------------------------------------------------------------------
-const classifyKernel = (n: PourInflow) => kernel("pour.classify", [ctrlRW, bricksRW, argsRW], /* wgsl */ `
+const classifyKernel = (n: PourInflow) => kernel("pour.classify", [ctrlRW, bricksRW, argsRW, cfgU], /* wgsl */ `
 ${inflowWGSL(n, true)}
 fn liquidish(n: vec3i) -> bool {
   if (!brickInBox(n)) { return false; }
@@ -205,6 +205,9 @@ fn liquidish(n: vec3i) -> bool {
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) g: vec3u) {
   let b = g.x;
   if (b == 0u) {
+    // The last G2P's split records sit past the live count (cfg.a's pool): they join it.
+    let split = atomicExchange(&ctrl[C_SPLIT], 0u);
+    if (split != 0u) { atomicStore(&ctrl[C_PCOUNT + cfg.a], min(atomicLoad(&ctrl[C_PCOUNT + cfg.a]) + split, CAP)); }
     atomicStore(&ctrl[C_CONV], 0u); atomicStore(&ctrl[C_CYCLES], 0u);
     atomicStore(&ctrl[C_RES], 0u);
     atomicStore(&args[C_ARG_ACTIVE + 1u], 1u); atomicStore(&args[C_ARG_ACTIVE + 2u], 1u);
@@ -301,17 +304,16 @@ ${phiSampler("phiT", "phis", "PHIT_OFF")}
   let i = g.x;
   let n = min(atomicLoad(&ctrl[C_PCOUNT + cfg.a]), CAP);
   if (i >= n) { return; }
-  let p = parts[cfg.a * CAP * 2u + i].xyz;
+  let rec = parts[cfg.a * CAP * 2u + i];
+  let p = rec.xyz;
   let c = vec3i(floor(p));
+  // A record G2P retired (the cell-mass cut, absorbed by the crowding merge) has mass 0.
+  if (rec.w <= 0.0) { pcell[i] = DEAD_PARTICLE; return; }
   if (!cellOpen(c)) { pcell[i] = DEAD_PARTICLE; atomicAdd(&ctrl[C_DELETED], 1u); atomicAdd(&ctrl[C_DEL_OUT], 1u); return; }
   if (phiTTri(p) < -BAND) { pcell[i] = DEAD_PARTICLE; atomicAdd(&ctrl[C_DELETED], 1u); atomicAdd(&ctrl[C_DEL_DEEP], 1u); return; }
   let pc = pidx(c);
-  let f = p - floor(p);
-  let o = select(0u, 1u, f.x >= 0.5) | select(0u, 2u, f.y >= 0.5) | select(0u, 4u, f.z >= 0.5);
-  // No crowding cap: a crowded cell's excess shows in the surface (combine's
-  // unclipped mass bound), where the pressure it implies spreads it.
-  let old = atomicAdd(&pgrid[pc], 1u);
-  if ((old & (1u << (16u + o))) == 0u) { atomicOr(&pgrid[pc], 1u << (16u + o)); }
+  // The cell's record count (bits 0..15) and its mass (bits 16..31, the seeding's held mass).
+  atomicAdd(&pgrid[pc], 1u + (u32(rec.w) << 16u));
   pcell[i] = pc;
 }
 `);
@@ -414,57 +416,55 @@ fn uncovered(c: vec3i) -> bool {
   }
   return true;
 }
+// The brick engine's graded seeds (nbSeedTarget, nbSeedSiteIndex, nbfSeedMass): eight unit records, or four of
+// mass two at sites 0, 3, 5, 6 in a cell whose centre is 1.5 cells deep or more.
+fn seedTarget(d: f32) -> u32 { return select(8u, 4u, d <= -1.5); }
+fn seedSite(j: u32, d: f32) -> u32 { if (seedTarget(d) == 8u) { return j; } return array<u32, 4>(0u, 3u, 5u, 6u)[j & 3u]; }
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = bricks[B_LPART + wg.x];
   let c = brickCoord(b) * 8 + localCoord(l);
   if (!cellOpen(c)) { return; }
-  let centre = phiTTri(vec3f(c) + vec3f(0.5));
-  if (centre > 0.9 || centre < -BAND - 0.5) { return; }
+  // pSeedCellMask: the cell gate on the centre's depth (nbfSeedCellDepthOk), then sites j from the cell's record
+  // count n0 to the goal, none once the held mass and the new records reach a cell's mass, 8.
+  let d = phiTTri(vec3f(c) + vec3f(0.5));
+  if (d > 0.9 || d < -BAND - 0.5) { return; }
   let pc = cidx(c);
   let w = atomicLoad(&pgrid[pc]);
-  var n = w & 0xffffu;
-  let occ = (w >> 16u) & 255u;
-  var liq = 0u; var site = array<f32, 8>();
-  for (var o = 0u; o < 8u; o++) {
-    let d = phiTTri(vec3f(c) + vec3f(0.25) + 0.5 * octOffset(o)); site[o] = d;
-    if (d < 0.0 && d >= -BAND) { liq |= 1u << o; }
+  let n0 = w & 0xffffu;
+  let held = f32(w >> 16u);
+  let goal = seedTarget(d); let mass = f32(8u / goal);
+  if (n0 >= goal || held >= 8.0) { return; }
+  let step = atomicLoad(&ctrl[C_STEP]);
+  var known = false; var uncov = true;
+  var mask = 0u;
+  for (var j = n0; j < goal; j++) {
+    if (held + f32(j - n0) * mass >= 8.0) { continue; }
+    let k = seedSite(j, d);
+    let site = vec3f(c) + 0.5 * octOffset(k) + 0.5 * vec3f(hashUnit(step, pc, k), hashUnit(step, pc, k + 8u), hashUnit(step, pc, k + 16u));
+    let distance = phiTTri(site);
+    if (!known && (distance > -1.0 || d > -1.5)) { uncov = n0 == 0u && uncovered(c); known = true; }
+    // nbfSeedSiteOk (the reseed, an h owner): a site in this step's drop is exempt from the inner-band rule.
+    if (distance > 0.0 || distance < -BAND) { continue; }
+    if ((distance > -1.0 || d > -1.5) && inPhi(site, 1.0) >= 0.0 && !uncov) { continue; }
+    mask |= 1u << j;
   }
-  let want = countOneBits(liq);
-  // The brick engine's reseed (nbfSeedSiteOk): a shallow site (distance over -1 or centre over -1.5) is left to
-  // the particles already there unless it lies in this step's plug (the liquid the nozzle makes) or no particle is
-  // in the 27 cells about the cell (uncovered); a particle is an eighth of a cell of liquid here, so a surface
-  // reseed would make liquid.
-  var known = false; var open27 = false;
-  var seeds = 0u;
-  for (var o = 0u; o < 8u; o++) {
-    if (((liq >> o) & 1u) == 0u || ((occ >> o) & 1u) != 0u || n >= want) { continue; }
-    if (site[o] > -1.0 || centre > -1.5) {
-      let x = vec3f(c) + vec3f(0.25) + 0.5 * octOffset(o);
-      if (inPhi(x, 1.0) >= 0.0) {
-        if (!known) { open27 = n == 0u && uncovered(c); known = true; }
-        if (!open27) { continue; }
-      }
-    }
-    seeds |= 1u << o; n++;
-  }
-  if (seeds == 0u) { return; }
-  let ns = countOneBits(seeds);
+  if (mask == 0u) { return; }
+  let ns = countOneBits(mask);
   let k0 = atomicAdd(&ctrl[C_PCOUNT + cfg.a], ns);
   let base = cfg.a * CAP * 2u;
-  let step = atomicLoad(&ctrl[C_STEP]);
-  var j = 0u;
-  for (var o = 0u; o < 8u; o++) {
-    if (((seeds >> o) & 1u) == 0u) { continue; }
-    let k = k0 + j; j++;
-    if (k >= CAP) { atomicOr(&ctrl[C_FAIL], FAIL_POOL); atomicAdd(&ctrl[C_OVERFLOW], 1u); continue; }
-    let jit = 0.2 * (vec3f(hashUnit(step, pc, o), hashUnit(step, pc, o + 8u), hashUnit(step, pc, o + 16u)) - vec3f(0.5));
-    let x = vec3f(c) + vec3f(0.25) + 0.5 * octOffset(o) + jit;
-    parts[base + k] = vec4f(x, 0.0);
-    parts[base + CAP + k] = vec4f(velU(x), 0.0);
-    pcell[k] = pc;
+  var r = 0u;
+  for (var j = n0; j < goal; j++) {
+    if (((mask >> j) & 1u) == 0u) { continue; }
+    let at = k0 + r; r++;
+    if (at >= CAP) { atomicOr(&ctrl[C_FAIL], FAIL_POOL); atomicAdd(&ctrl[C_OVERFLOW], 1u); continue; }
+    let k = seedSite(j, d);
+    let site = vec3f(c) + 0.5 * octOffset(k) + 0.5 * vec3f(hashUnit(step, pc, k), hashUnit(step, pc, k + 8u), hashUnit(step, pc, k + 16u));
+    parts[base + at] = vec4f(site, mass);
+    // nbSeedFirst: velocity.w 1 marks a seed until its first G2P, which takes the grid's (PIC).
+    parts[base + CAP + at] = vec4f(velU(site), 1.0);
+    pcell[at] = pc;
   }
-  atomicAdd(&pgrid[pc], ns);
-  atomicOr(&pgrid[pc], seeds << 16u);
+  atomicAdd(&pgrid[pc], ns + (u32(mass * f32(ns)) << 16u));
   atomicAdd(&ctrl[C_EMITTED], ns);
 }
 `);
@@ -503,7 +503,7 @@ var<workgroup> sBase: u32;
   workgroupBarrier();
   atomicStore(&pgrid[PN + pc], sBase + incl - w);
   // Keep the census's octant occupancy (bits 16..23) for seeding; the count restarts for the scatter.
-  atomicStore(&pgrid[pc], atomicLoad(&pgrid[pc]) & 0x00ff0000u);
+  atomicStore(&pgrid[pc], atomicLoad(&pgrid[pc]) & 0xffff0000u);
 }
 `);
 
@@ -586,7 +586,8 @@ ${phiSampler("phi", "phis", "PHI_OFF")}
     let gl = length(gr);
     if (gl > 1e-6) { let nn = gr / gl; d -= dot(d, nn) * nn; }
   }
-  parts[cfg.a * CAP * 2u + i] = vec4f(d, 0.0);
+  // w: the record's pre-move mass, for G2P's mass rules (they read the run's masses while records are rewritten).
+  parts[cfg.a * CAP * 2u + i] = vec4f(d, parts[base + i].w);
 }
 `);
 
@@ -602,11 +603,19 @@ ${velocitySampler("velU", "vel", "U_OFF")}
 ${inflowWGSL(n, false)}
 fn heldF(x: vec3f) -> vec3f { return clamp(x, vec3f(0.0), vec3f(f32(NX - 1), f32(NY - 1), f32(NZ - 1))); }
 fn heldI(v: vec3i) -> vec3i { return clamp(v, vec3i(0), vec3i(NX - 1, NY - 1, NZ - 1)); }
+// umVertexBuried (the brick engine's psBuried): none of the vertex's eight cells is open.
+fn buried(w: vec3i) -> bool {
+  for (var k = 0u; k < 8u; k++) { if (cellOpen(w - vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u)))) { return false; } }
+  return true;
+}
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = bricks[B_LSURF + wg.x];
   let v = brickCoord(b) * 8 + localCoord(l);
   let p = vec3f(v);
   let c = phiAt(v);
+  // A buried vertex (inside the glass) keeps its value: no trace, no source (lAdvect's lVertexIn(v) && !psBuried(v)).
+  // Advected, the wall's interior took the bore's liquid and passed it to the outer face.
+  if (buried(v)) { phis[PHIT_OFF + ((b << 9u) | l)] = c; return; }
   // The brick engine's lAdvected. The foot (umVertexFoot): within two cells of the surface, the vertex's closest
   // point on the zero set (central-difference gradient, the offset capped at two cells) is traced and the vertex
   // carried rigidly with it, so the surface moves with the velocity at the surface, not the extension's in air.
@@ -639,7 +648,9 @@ fn heldI(v: vec3i) -> vec3i { return clamp(v, vec3i(0), vec3i(NX - 1, NY - 1, NZ
       var sum = 0.0; var crossing = false;
       for (var a = 0u; a < 3u; a += 2u) {
         if (v[a] < 2 || v[a] > i32(select(NZ, NX, a == 0u)) - 2) { continue; }
-        var part = 6.0 * c; var valid = true; var different = false;
+        // psSmoothOpen: no buried vertex on the axis's stencil.
+        let e = unitAxis(a);
+        var part = 6.0 * c; var valid = !buried(v - e) && !buried(v + e) && !buried(v - 2 * e) && !buried(v + 2 * e); var different = false;
         for (var k = 0u; k < 4u; k++) {
           let s = t[select(2u * a + k, 6u + a + k - 2u, k > 1u)]; let span = select(1.0, 2.0, k > 1u);
           if (abs(s - c) > 1.5 * span) { valid = false; }
@@ -975,16 +986,6 @@ var<workgroup> tOpen: array<u32, 1000>;
 ${cutTest("tOpen")}
 var<workgroup> sMixed: atomic<u32>;
 var<workgroup> sMixedU: u32;
-/** Sign of the neighbour nearest the interface (extension into solid-interior vertices). */
-fn nearSign(t: ptr<workgroup, array<f32, 1000>>, ti: u32) -> f32 {
-  var m = abs((*t)[ti - 1u]); var s = (*t)[ti - 1u];
-  for (var k = 1u; k < 6u; k++) {
-    let o = select(select(100u, 10u, k < 4u), 1u, k < 2u);
-    let j = select(ti - o, ti + o, (k & 1u) == 1u);
-    if (abs((*t)[j]) < m) { m = abs((*t)[j]); s = (*t)[j]; }
-  }
-  return select(1.0, -1.0, s < 0.0);
-}
 fn eik(a0: f32, b0: f32, c0: f32) -> f32 {
   var a = min(a0, min(b0, c0)); var c = max(a0, max(b0, c0)); var b = a0 + b0 + c0 - a - c;
   var d = a + 1.0;
@@ -1031,6 +1032,9 @@ fn eik(a0: f32, b0: f32, c0: f32) -> f32 {
   // open neighbour.
   let open = tOpen[ti] != 0u;
   let frozen = open && cutAt(ti, tOpen[ti]);
+  // Every vertex keeps its sign. A buried vertex (redistInit's UNKNOWN_PHI) is air, as the brick engine's corners past
+  // the wall ("an air marker", lClear): given the nearest neighbour's sign, the glass's interior took the bore's
+  // liquid and the foot's rigid shift carried it to the outer face.
   let sgn = select(1.0, -1.0, neg);
   for (var s = 0u; s < 8u; s++) {
     if (!frozen) {
@@ -1038,12 +1042,12 @@ fn eik(a0: f32, b0: f32, c0: f32) -> f32 {
         let ax = min(abs(tA[ti - 1u]), abs(tA[ti + 1u]));
         let ay = min(abs(tA[ti - 10u]), abs(tA[ti + 10u]));
         let az = min(abs(tA[ti - 100u]), abs(tA[ti + 100u]));
-        tB[ti] = select(nearSign(&tA, ti), sgn, open) * min(abs(tA[ti]), eik(ax, ay, az));
+        tB[ti] = sgn * min(abs(tA[ti]), eik(ax, ay, az));
       } else {
         let ax = min(abs(tB[ti - 1u]), abs(tB[ti + 1u]));
         let ay = min(abs(tB[ti - 10u]), abs(tB[ti + 10u]));
         let az = min(abs(tB[ti - 100u]), abs(tB[ti + 100u]));
-        tA[ti] = select(nearSign(&tB, ti), sgn, open) * min(abs(tB[ti]), eik(ax, ay, az));
+        tA[ti] = sgn * min(abs(tB[ti]), eik(ax, ay, az));
       }
     }
     workgroupBarrier();
@@ -1079,14 +1083,14 @@ fn bspline(f: f32) -> vec3f { return vec3f(0.5 * (1.5 - f) * (1.5 - f), 0.75 - (
   // their shared atomics (one stencil per cell and half) seldom hit one address together.
   let tl = (l & 31u) * 8u + (l >> 5u);
   for (var k = start + tl; k < start + num; k += 256u) {
-    let xp = parts[base + k].xyz; let vp = parts[base + CAP + k].xyz;
+    let rp = parts[base + k]; let xp = rp.xyz; let vp = parts[base + CAP + k].xyz; let mp = rp.w;
     for (var a = 0u; a < 3u; a++) {
       let q = xp - vec3f(0.5) + 0.5 * vec3f(unitAxis(a));
       let bi = vec3i(floor(q - vec3f(0.5)));
       let fr = q - vec3f(bi);
       let wx = bspline(fr.x); let wy = bspline(fr.y); let wz = bspline(fr.z);
       for (var dz = 0; dz < 3; dz++) { for (var dy = 0; dy < 3; dy++) { for (var dx = 0; dx < 3; dx++) {
-        let w = wx[dx] * wy[dy] * wz[dz];
+        let w = wx[dx] * wy[dy] * wz[dz] * mp;
         let r = regionIndex(a, bi + vec3i(dx, dy, dz) - o);
         atomicAdd(&sMom[r], i32(round(w * vp[a] * SM)));
         atomicAdd(&sW[r], i32(round(w * SW)));
@@ -1389,7 +1393,8 @@ fn bulkOperator(j: u32) {
   workgroupBarrier();
   let c = brickCoord(b) * 8 + localCoord(l);
   let i = (b << 9u) | l;
-  atomicStore(&pgrid[pidx(c)], 0u);
+  // The count resets for the next step; G2P's mass rules read it from the third region.
+  atomicStore(&pgrid[PN2 + pidx(c)], atomicExchange(&pgrid[pidx(c)], 0u) & 0xffffu);
   let pc = phis[PHIC_OFF + i];
   let liquid = cellOpen(c) && pc < 0.0;
   if (liquid) { atomicStore(&anyLiquid, 1u); }
@@ -2612,9 +2617,9 @@ fn bulkProject(j: u32) {
 `);
 
 // ---------------------------------------------------------------------------
-// 17. Velocity extension into air and solid-interior faces: layered averaging
-//     of known neighbours (Bridson 2015 §4.3), 8 sweeps per launch on a staged
-//     brick + halo, per component. Closed faces stay zero and are not sources.
+// 17. Velocity extension into air: layered averaging of known neighbours
+//     (Bridson 2015 §4.3), 8 sweeps per launch on a staged brick + halo, per
+//     component. Faces not between two open cells stay zero and are not sources.
 //     cfg.a = in velocity offset, cfg.b = out offset, cfg.c = in known shift,
 //     cfg.d = out known shift. DEEP neighbours (never extended) are read from U.
 // ---------------------------------------------------------------------------
@@ -2657,7 +2662,10 @@ fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
     }
     for (var a = 0u; a < 3u; a++) {
       var v = SHUT;
-      if (inside && !faceClosed(q, a)) {
+      // fgFaceOpen: a face is extended, or a source, only between two open cells (the brick engine's uExtend seed
+      // code 3: a wall face and a face inside the glass are SHUT, zero and never a source). Extended into the
+      // glass, the film's velocity reached every sample within half a cell of the wall, and films climbed it.
+      if (inside && faceOpen(q, a)) {
         let k = (info >> select(cfg.c + a, a, deep)) & 1u;
         v = select(UNK, vel[select(cfg.a, U_OFF, deep) + a * N + qi], k == 1u);
         anyKnown = anyKnown || k == 1u;
@@ -2701,7 +2709,7 @@ fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
 //     list counters, advances the step counter and publishes the next step's
 //     inflow words (row s - 1 of the schedule for step s; off past its end).
 // ---------------------------------------------------------------------------
-const g2pKernel = (n: PourInflow) => kernel("pour.g2p", [ctrlRW, bricksRW, partsRW, velRO, cfgU, argsRW, phisRO, bitsRO], /* wgsl */ `
+const g2pKernel = (n: PourInflow) => kernel("pour.g2p", [ctrlRW, bricksRW, partsRW, velRO, cfgU, argsRW, phisRO, bitsRO, pgridRO], /* wgsl */ `
 const IN_STEPS: u32 = ${n.steps}u;
 const IN_FLOW: f32 = ${n.flow};
 ${velocitySampler("velU", "vel", "U_OFF")}
@@ -2728,6 +2736,22 @@ fn deltaComp(a: u32, p: vec3f) -> f32 {
 }
 fn flipDelta(p: vec3f) -> vec3f { return vec3f(deltaComp(0u, p), deltaComp(1u, p), deltaComp(2u, p)); }
 ${PARTICLE_MOVE_WGSL}
+// The brick engine's mass rules (pMove, crowdedCells "merge", Ferstl et al. 2016 §3.3), on the pre-move runs: a
+// cell deeper than one cell retires the records past its mass bound (8 past 1.5 cells deep, else 16), and one whose
+// run still holds more than the cap (6 past 1.5, else 20) merges rank r's later strided records into rank r < cap
+// up to mass 8; a merged record that ends shallow, or in a cell holding fewer records than its seed target, splits
+// in two a quarter cell apart (nbfSplitWanted, nbfSplitAlong/A/B).
+const MASS_MAX: f32 = 8.0;
+fn cellDepth(c: vec3i) -> f32 { return phis[PHIC_OFF + cidx(clampV(c))]; }
+fn splitAlong(q: vec3f) -> vec3f {
+  let bits = bitcast<vec3u>(q); let hash = (bits.x * 73856093u) ^ (bits.y * 19349663u) ^ (bits.z * 83492791u);
+  return normalize(vec3f(f32(hash & 255u), f32((hash >> 8u) & 255u), f32((hash >> 16u) & 255u)) - 127.5);
+}
+fn markBrick(x: vec3f, v: vec3f) {
+  let pb = brickOfCell(vec3i(floor(x)));
+  if (atomicLoad(&bricks[B_PCOUNT + pb]) == 0u) { atomicStore(&bricks[B_PCOUNT + pb], 1u); }
+  let fb = fastBits(v); if (fb != 0u && (atomicLoad(&bricks[B_FAST + pb]) & fb) != fb) { atomicOr(&bricks[B_FAST + pb], fb); }
+}
 @compute @workgroup_size(256) fn main(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x;
   if (i == 0u) {
@@ -2749,8 +2773,49 @@ ${PARTICLE_MOVE_WGSL}
   let n = min(atomicLoad(&ctrl[C_PCOUNT + 1u - cfg.a]), CAP);
   if (i >= n) { return; }
   let base = (1u - cfg.a) * CAP * 2u;
-  var x = parts[base + i].xyz;
+  let sb = cfg.a * CAP * 2u;
+  let x0 = parts[base + i].xyz;
+  var x = x0;
   var v = parts[base + CAP + i].xyz;
+  // A seed's first move takes the grid's velocity (nbfG2P's first: PIC). Its own is the last step's field at the
+  // site, and the FLIP delta is measured against this step's transfer, which already holds what moved it: a plug
+  // seed kept the stale zero of the field before the nozzle ran, and the stream's first liquid fell off the lip.
+  let first = parts[base + CAP + i].w > 0.5;
+  // The run masses come from the separation's copies (sb, w): records are rewritten here. A retired record keeps its
+  // position (a gatherer may read it) with mass 0.
+  var m = parts[sb + i].w;
+  {
+    let cc = vec3i(floor(x0)); let pc0 = pidx(cc);
+    let start = pgrid[PN + pc0]; let cnt = pgrid[PN2 + pc0];
+    let deep = cellDepth(cc);
+    if (deep < -1.0 && i >= start && i < start + cnt) {
+      var end = start + cnt;
+      var held = 0.0; let bound = select(16.0, 8.0, deep <= -1.5);
+      for (var j = start; j < start + cnt; j++) {
+        let mj = parts[sb + j].w;
+        if (held > 0.0 && held + mj > bound) { end = j; break; }
+        held += mj;
+      }
+      if (i >= end) { parts[base + i] = vec4f(x0, 0.0); atomicAdd(&ctrl[C_DEL_CAP], 1u); return; }
+      let cap = select(20u, 6u, deep <= -1.5);
+      if (end - start > cap) {
+        if (i - start < cap) {
+          var sm = m; var sx = m * x; var sv = m * v;
+          for (var j = i + cap; j < end; j += cap) {
+            let mj = parts[sb + j].w;
+            if (sm + mj > MASS_MAX) { continue; }
+            sm += mj; sx += mj * parts[base + j].xyz; sv += mj * parts[base + CAP + j].xyz;
+          }
+          x = sx / sm; v = sv / sm; m = sm;
+        } else {
+          let k = start + (i - start) % cap;
+          var mm = parts[sb + k].w;
+          for (var j = k + cap; j < i; j += cap) { let mj = parts[sb + j].w; if (mm + mj <= MASS_MAX) { mm += mj; } }
+          if (mm + m <= MASS_MAX) { parts[base + i] = vec4f(x0, 0.0); atomicAdd(&ctrl[C_MERGED], 1u); return; }
+        }
+      }
+    }
+  }
   // Supported: a liquid cell among the 2x2x2 whose centres enclose x (the
   // cells the interpolation reads). Unsupported particles (spray, a film away
   // from any liquid cell) have no pressure acting on them and move
@@ -2766,9 +2831,10 @@ ${PARTICLE_MOVE_WGSL}
   }
   if (supported) {
     let un = velU(x);
-    v = FLIP * (v + flipDelta(x)) + (1.0 - FLIP) * un;
+    v = select(FLIP * (v + flipDelta(x)) + (1.0 - FLIP) * un, un, first);
     moveParticle(&x, &v, un);
   } else {
+    if (first) { v = velU(x); }
     let v1 = v - vec3f(0.0, GDT, 0.0);
     let xn = x + 0.5 * CFL * (v + v1);
     v = v1;
@@ -2777,14 +2843,32 @@ ${PARTICLE_MOVE_WGSL}
   // The separation shift, walked as a move (it never crosses the glass, but a shift into it would be pushed out
   // along the shortest axis).
   var vs = v;
-  x = moveEnd(x, x + parts[cfg.a * CAP * 2u + i].xyz, &vs);
-  parts[base + i] = vec4f(x, 0.0);
+  x = moveEnd(x, x + parts[sb + i].xyz, &vs);
+  // The split (nbFinish): the endpoint cell's pre-move run against its seed target.
+  if (m > 1.0 && supported) {
+    let ec = vec3i(floor(x));
+    if (inBox(ec)) {
+      let heldN = pgrid[PN2 + pidx(ec)];
+      let seeded = select(8u, 4u, cellDepth(ec) <= -1.5);
+      if (heldN < seeded && m * f32(seeded) > 8.0) {
+        let along = splitAlong(x); let kept = ceil(0.5 * m); let moved = m - kept;
+        let xa = x + 0.25 * (moved / m) * along; let xb = x - 0.25 * (kept / m) * along;
+        if (cellOpen(vec3i(floor(xa))) && cellOpen(vec3i(floor(xb)))) {
+          let slot = n + atomicAdd(&ctrl[C_SPLIT], 1u);
+          if (slot < CAP) {
+            parts[base + slot] = vec4f(xb, moved); parts[base + CAP + slot] = vec4f(v, 0.0);
+            markBrick(xb, v);
+            x = xa; m = kept;
+          } else { atomicOr(&ctrl[C_FAIL], FAIL_POOL); atomicAdd(&ctrl[C_OVERFLOW], 1u); }
+        }
+      }
+    }
+  }
+  parts[base + i] = vec4f(x, m);
   parts[base + CAP + i] = vec4f(v, 0.0);
-  let pb = brickOfCell(vec3i(floor(x)));
   // B_PCOUNT is read only as nonzero (classify, combine): set it once rather than counting every particle on one
   // contended word; likewise OR fast bits only when one is missing.
-  if (atomicLoad(&bricks[B_PCOUNT + pb]) == 0u) { atomicStore(&bricks[B_PCOUNT + pb], 1u); }
-  let fb = fastBits(v); if (fb != 0u && (atomicLoad(&bricks[B_FAST + pb]) & fb) != fb) { atomicOr(&bricks[B_FAST + pb], fb); }
+  markBrick(x, v);
 }
 `);
 
