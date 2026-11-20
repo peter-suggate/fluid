@@ -199,8 +199,8 @@ fn liquidish(n: vec3i) -> bool {
   let b = brickIdOf(n);
   let cls = atomicLoad(&bricks[B_CLASS + b]);
   if ((cls & CLASS_DEAD) != 0u) { return false; }
-  return (cls & CLASS_DEEP) != 0u || bitcast<f32>(atomicLoad(&bricks[B_MINPHI + b])) < 0.0
-    || atomicLoad(&bricks[B_PCOUNT + b]) > 0u;
+  if ((cls & CLASS_DEEP) != 0u || atomicLoad(&bricks[B_LIQCELL + b]) != 0u) { return true; }
+  return (cls & CLASS_BULK) != 0u && (bitcast<f32>(atomicLoad(&bricks[B_MINPHI + b])) < 0.0 || atomicLoad(&bricks[B_PCOUNT + b]) > 0u);
 }
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) g: vec3u) {
   let b = g.x;
@@ -229,16 +229,26 @@ fn liquidish(n: vec3i) -> bool {
   let bc = brickCoord(b);
   // Activation reach, the CFL band of a narrow-band method (the active set
   // holds everything the step's motion reaches: Bridson 2015 §6.3 narrow
-  // bands; Ferstl 2016 §3), per axis: one brick along an axis from liquid
-  // moving at most FAST_CELLS a step along it (6 cells: a particle leaving the
-  // brick lands inside the next one with its 1.5h P2G support), two along the
-  // axes G2P marked fast in a brick (the falling stream and its splash).
+  // bands; Ferstl 2016 §3). It is the reach of the liquid: from a brick that
+  // held a liquid cell at the last operator (B_LIQCELL), one brick along an
+  // axis, two along the axes G2P marked fast there (over FAST_CELLS a step).
+  // Liquid moves only where the extension put velocity, which spans 8 cells
+  // from liquid cells and is written in active bricks alone: a front at v cells
+  // a step crosses a brick in 8 / v steps, and the brick after next must hold
+  // the extension a step ahead, so one brick holds v <= 4 and two v <= 8 (the
+  // extension's own limit). A brick with particles or a negative vertex but
+  // no liquid cell (spray, a grazing surface, a sub-cell film) is active
+  // itself and reaches nothing: unsupported records deposit nothing and see no
+  // grid, the film's velocity is the extension's, and a record leaving lands
+  // in a brick the next classify activates. 2026-11-21: 6400 active bricks to
+  // 4000 at step 190, gates unchanged.
   // The nozzle's plug box is active while it runs (the brick engine's pinned source box).
   let r = 2;
-  var act = inOn() && all(bc >= IN_BRICK_LO) && all(bc <= IN_BRICK_HI);
+  var act = (inOn() && all(bc >= IN_BRICK_LO) && all(bc <= IN_BRICK_HI)) || atomicLoad(&bricks[B_PCOUNT + b]) > 0u
+    || bitcast<f32>(atomicLoad(&bricks[B_MINPHI + b])) < 0.0;
   for (var dz = -r; dz <= r; dz++) { for (var dy = -r; dy <= r; dy++) { for (var dx = -r; dx <= r; dx++) {
     let n = bc + vec3i(dx, dy, dz);
-    // Axes along which this neighbour lies two bricks away; its particles must move fast along each.
+    // Axes along which this neighbour lies two bricks away; its records must move fast along each.
     let far2 = select(0u, 1u, abs(dx) == 2) | select(0u, 2u, abs(dy) == 2) | select(0u, 4u, abs(dz) == 2);
     if (liquidish(n) && (far2 == 0u || (atomicLoad(&bricks[B_FAST + brickIdOf(n)]) & far2) == far2)) { act = true; }
   } } }
@@ -274,7 +284,7 @@ ${SURF_WGSL}
   for (var k = 0u; k < 6u; k++) { pres[k * N + i] = 0.0; }
   textureStore(vol, c, vec4f(0.0));
   publishSurf(c, PHI_MAX);
-  if (l == 0u) { atomicStore(&bricks[B_MINPHI + b], bitcast<u32>(PHI_MAX)); }
+  if (l == 0u) { atomicStore(&bricks[B_MINPHI + b], bitcast<u32>(PHI_MAX)); atomicStore(&bricks[B_LIQCELL + b], 0u); }
   if (l < 64u) {
     let q = lidx(1u, bc * 4 + vec3i(i32(l & 3u), i32((l >> 2u) & 3u), i32(l >> 4u)));
     coarse[COP + 4u * q] = 0.0; coarse[COP + 4u * q + 1u] = 0.0; coarse[COP + 4u * q + 2u] = 0.0; coarse[COP + 4u * q + 3u] = 0.0;
@@ -718,6 +728,8 @@ var<workgroup> wKey: array<atomic<u32>, 1331>;
     if (key == 0u) { continue; }
     let v = lo + vec3i(i32(j % 11u), i32((j / 11u) % 11u), i32(j / 121u));
     if (any(v < vec3i(0)) || any(v >= vec3i(NX, NY, NZ))) { continue; }
+    // Only into an active brick: combine clears the keys of active bricks alone.
+    if ((bricks[B_FLAGS + brickOfCell(v)] & 1u) == 0u) { continue; }
     atomicMax(&keys[cidx(v)], key);
   }
 }
@@ -1338,7 +1350,7 @@ var<workgroup> sFar: u32;
 //      traces run, and every warp runs full. Same values (each face's trace and
 //      store are independent of the others).
 // ---------------------------------------------------------------------------
-export const velocityTraceKernel = kernel("pour.velocityTrace", [ctrlRW, bricksRW, velRW, bitsRO], /* wgsl */ `
+export const velocityTraceKernel = kernel("pour.velocityTrace", [ctrlRW, bricksRW, velRW, bitsRO, phisRO], /* wgsl */ `
 ${velocitySampler("velU", "vel", "U_OFF")}
 ${bulkWGSL(true)}
 ${FACE_SL_WGSL}
@@ -1349,7 +1361,20 @@ var<workgroup> sTracesU: u32;
 @compute @workgroup_size(64) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = atomicLoad(&bricks[B_LACT + wg.x]);
   let lc = wg.y * 64u + l;
-  let need = bits[KNOWN_OFF + ((b << 9u) | lc)] & 7u;
+  var need = bits[KNOWN_OFF + ((b << 9u) | lc)] & 7u;
+  // Only the faces projection reads (project: an open face with a liquid cell, PHIC < 0, on either side, or a
+  // face below a BULK cell): it sets every other face's U to zero before the extension rewrites it, and the FLIP
+  // delta, the rhs and the particles read US only where it projected. The rest were dead traces.
+  if (need != 0u) {
+    let c0 = brickCoord(b) * 8 + localCoord(lc);
+    let lb = cellOpen(c0) && phis[PHIC_OFF + ((b << 9u) | lc)] < 0.0;
+    for (var a = 0u; a < 3u; a++) {
+      if (((need >> a) & 1u) == 0u) { continue; }
+      let ca = c0 - unitAxis(a);
+      let read = faceOpen(c0, a) && (lb || cellBulk(ca) || phis[PHIC_OFF + cidx(ca)] < 0.0);
+      if (!read) { need &= ~(1u << a); vel[US_OFF + a * N + ((b << 9u) | lc)] = 0.0; }
+    }
+  }
   if (need != 0u) {
     var s = atomicAdd(&sTraces, countOneBits(need));
     for (var a = 0u; a < 3u; a++) { if (((need >> a) & 1u) != 0u) { sFaces[s] = lc | (a << 9u); s++; } }
@@ -1442,6 +1467,7 @@ fn bulkOperator(j: u32) {
   if (liquid) { atomicStore(&anyLiquid, 1u); }
   // The pressure solve visits the liquid bricks only (append once per brick).
   workgroupBarrier();
+  if (l == 0u) { atomicStore(&bricks[B_LIQCELL + b], atomicLoad(&anyLiquid)); }
   if (l == 0u && atomicLoad(&anyLiquid) != 0u) {
     let j = atomicAdd(&ctrl[C_LIQ_COUNT], 1u);
     atomicStore(&bricks[B_LLIQ + j], b);
@@ -1471,6 +1497,10 @@ fn bulkOperator(j: u32) {
     if (!inBox(n)) { continue; } else {
       if (!cellOpen(n)) { continue; }
       if (cellBulk(n)) { mask |= 1u << (k + 6u); diag += SUBC; continue; }
+      // A cell of a brick outside the active set bounds the step's domain: its face is neither traced nor projected
+      // (U stays zero there), so the operator closes it to match. The reach keeps liquid a brick from any such
+      // face; only liquid the union forms at the face of a particle brick meets one (none at steps 60-500).
+      if ((atomicLoad(&bricks[B_FLAGS + brickOfCell(n)]) & 1u) == 0u) { continue; }
       pn = phis[PHIC_OFF + cidx(n)];
     }
     if (pn < 0.0) { mask |= 1u << k; diag += 1.0; }

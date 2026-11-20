@@ -110,7 +110,9 @@ export const B = {
   SHIFT_FLAG: 15, LIST_SHIFT: 17,
   /** The inflow schedule (3 words a step: strength, sweep, flags), and this step's words (classify copies them). */
   INFLOW: 19, INFLOW_NOW: 20,
-  COUNT: 21,
+  /** Nonzero when the brick held a liquid cell (open, PHIC < 0) at this step's operator (cleared with the brick). */
+  LIQCELL: 21,
+  COUNT: 22,
 } as const;
 /** BULK work: 64 bricks (512 coarse cells) per 512-thread workgroup; these workgroups come first in the dispatches that include BULK. */
 export const BULK_WG = Math.ceil(NBULK / 64);
@@ -144,8 +146,8 @@ const BRICKS: u32 = ${BRICKS}u;
 const CFL: f32 = ${f(DT / CELL_M)};
 const DT_S: f32 = ${f(DT)};
 const CELL_H: f32 = ${f(CELL_M)};
-/** Particle speed (cells a step) along an axis beyond which a brick is marked fast along it (bricks FAST bit a): reach two. */
-const FAST_CELLS: f32 = 6.0;
+/** Particle speed (cells a step) along an axis beyond which a brick is marked fast along it (bricks FAST bit a): its liquid reaches two bricks (classify: a front faster than 4 cells a step outruns one). */
+const FAST_CELLS: f32 = 4.0;
 fn fastBits(v: vec3f) -> u32 { let f = abs(v) * CFL > vec3f(FAST_CELLS); return select(0u, 1u, f.x) | select(0u, 2u, f.y) | select(0u, 4u, f.z); }
 const GDT: f32 = ${f(GRAVITY * DT)};
 const PHI_MAX: f32 = ${f(PHI_MAX)};
@@ -181,7 +183,7 @@ fn clIndex(k: vec3i) -> u32 { return u32(k.x + CDIMS.x * (k.y + CDIMS.y * k.z));
 /** pres/op slot of coarse cell k: its BULK brick's first eight slots. */
 fn bulkSlot(k: vec3i) -> u32 { return (brickOfCell(k * 4) << 9u) | u32((k.x & 1) | ((k.y & 1) << 1u) | ((k.z & 1) << 2u)); }
 const B_CLASS: u32 = ${B.CLASS * BRICKS}u; const B_FLAGS: u32 = ${B.FLAGS * BRICKS}u; const B_MINPHI: u32 = ${B.MINPHI * BRICKS}u;
-const B_PCOUNT: u32 = ${B.PCOUNT * BRICKS}u; const B_FAST: u32 = ${B.FAST * BRICKS}u; const B_LACT: u32 = ${B.LIST_BULK * BRICKS + NBULK}u; const B_LSURF: u32 = ${B.LIST_SURF * BRICKS}u;
+const B_PCOUNT: u32 = ${B.PCOUNT * BRICKS}u; const B_LIQCELL: u32 = ${B.LIQCELL * BRICKS}u; const B_FAST: u32 = ${B.FAST * BRICKS}u; const B_LACT: u32 = ${B.LIST_BULK * BRICKS + NBULK}u; const B_LSURF: u32 = ${B.LIST_SURF * BRICKS}u;
 const B_LPART: u32 = ${B.LIST_PART * BRICKS}u; const B_LCLEAR: u32 = ${B.LIST_CLEAR * BRICKS}u;
 const B_PSTART: u32 = ${B.PSTART * BRICKS}u; const B_PNUM: u32 = ${B.PNUM * BRICKS}u;
 const C_ARG_ACTIVE: u32 = ${C.ARG_ACTIVE}u; const C_ARG_SURF: u32 = ${C.ARG_SURF}u; const C_ARG_PART: u32 = ${C.ARG_PART}u; const C_ARG_CLEAR: u32 = ${C.ARG_CLEAR}u;
