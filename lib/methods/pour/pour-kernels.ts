@@ -1315,13 +1315,19 @@ var<workgroup> sFar: u32;
     var v: array<f32, 8>;
     var s = 0.0;
     vmin = PHI_MAX;
+    var vmax = -PHI_MAX;
     for (var k = 0u; k < 8u; k++) {
       v[k] = ph(c + vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u)));
       s += v[k];
       vmin = min(vmin, v[k]);
+      vmax = max(vmax, v[k]);
     }
     phis[PHIC_OFF + i] = s * 0.125;
-    textureStore(vol, c, vec4f(select(0.0, fill(v), cellOpen(c)), 0.0, 0.0, 0.0));
+    // fill's own answer for a cell whose eight vertices are all outside (0: no negative) or all inside (1: all
+    // negative; a tetrahedron of four zeros counts as outside, so not "<= 0").
+    var f = 0.0;
+    if (cellOpen(c) && vmin < 0.0) { if (vmax < 0.0) { f = 1.0; } else { f = fill(v); } }
+    textureStore(vol, c, vec4f(f, 0.0, 0.0, 0.0));
     if (cellOpen(c) && vmin < 0.0) { atomicAdd(&wGauge, u32(round(nbfCellFill(v) * VOL_UNIT))); }
   } else if (cellOpen(c)) { atomicAdd(&wGauge, u32(VOL_UNIT)); }
   // The brick's minimum vertex phi (next classification) and, over the tile, its far test: a
@@ -1357,8 +1363,11 @@ var<workgroup> sFar: u32;
     var mom = 0; var wsum = 0;
     if (part) {
       let pc = pidx(c);
-      mom = atomicExchange(&acc[a * PN + pc], 0);
-      wsum = atomicExchange(&acc[(3u + a) * PN + pc], 0);
+      // Read and reset (P2G's sums are complete and only this thread touches the cell's words: no RMW needed).
+      mom = atomicLoad(&acc[a * PN + pc]);
+      wsum = atomicLoad(&acc[(3u + a) * PN + pc]);
+      if (mom != 0) { atomicStore(&acc[a * PN + pc], 0); }
+      if (wsum != 0) { atomicStore(&acc[(3u + a) * PN + pc], 0); }
     }
     if (!faceOpen(c, a)) { vel[US_OFF + a * N + i] = 0.0; continue; }
     // The nozzle's swept faces (the brick engine's applyInflowSweptVelocity after the body force): the low
@@ -1517,7 +1526,10 @@ fn bulkOperator(j: u32) {
   let c = brickCoord(b) * 8 + localCoord(l);
   let i = (b << 9u) | l;
   // The count resets for the next step; G2P's mass rules read it from the third region.
-  atomicStore(&pgrid[PN2 + pidx(c)], atomicExchange(&pgrid[pidx(c)], 0u) & 0xffffu);
+  // (Only this thread touches the cell's words here: a load and a store, not an RMW.)
+  let count = atomicLoad(&pgrid[pidx(c)]);
+  if (count != 0u) { atomicStore(&pgrid[pidx(c)], 0u); }
+  atomicStore(&pgrid[PN2 + pidx(c)], count & 0xffffu);
   let pc = phis[PHIC_OFF + i];
   let liquid = cellOpen(c) && pc < 0.0;
   if (liquid) { atomicStore(&anyLiquid, 1u); }
