@@ -342,6 +342,22 @@ it bit for bit against the unchanged F_ALL path; its fixture has 7 such bricks.
   - seep 300: drift +0.21% (HEAD) against +0.33% and +0.40% (two runs);
   - letters 120: drift +0.48% against +0.46% and +0.43%.
 
+**The level set, later on 2026-11-21.** One exact win and three no-gos.
+
+- **lClear landed (6f282eab):** 0.755 to 0.399 ms. Its crossing pass took lCleared at all eight corners of each
+  cell, 4096 calls a brick for 729 distinct corners. Each now takes it once into workgroup memory. Gates: seep
+  +0.376%, letters +0.509% (exact change, run-to-run spread).
+- **phiSolid's cost is the advection, not the walk.**
+  - Dropping its near bricks from step 300 takes it from 2.93 to 0.20 ms, so the far vertices lAdvect hands it
+    are worth about 0.2 ms. A walk-free path for far traces whose bricks beyond are clear gained nothing.
+  - An open fast path tried the reverse: a staged 16^3 closed-block window, with the plain text for each vertex
+    whose trace reads only open cells. It was equal to the walked text within 1e-6, but slower (2.79 to 6.03 ms).
+  - With the plain text on every vertex it still cost 2.83. The 2326 F_SOLID bricks hold most of the glass's
+    liquid, and their traces (foot, smoothing, velocity trace, cubic) cost what lAdvect's do.
+- **Residency at 128 lanes:** lAdvect and phiSolid at 128 lanes × 4 vertices (three groups a core under cap 384,
+  against one at 256 lanes) were slower: phiSolid +0.65, lAdvect +0.10 ms.
+- **lUnion's θ heats** staged once a brick (4096 tile reads to 125): 1.33 to 1.26 ms, inside noise; not kept.
+
 ## 6. Process
 
 Single agent (memory: single-agent-only). Commit verified milestones with
