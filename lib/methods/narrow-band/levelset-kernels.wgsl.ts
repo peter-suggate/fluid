@@ -590,6 +590,8 @@ fn dSource(t:vec3i,x:u32,y:u32,z:u32)->u32{
   const lClear = k("lClear", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], staged(9) + LS_SET_WGSL + /* wgsl */`
 var<workgroup> wMask:array<atomic<u32>,16>;
 var<workgroup> wCross:atomic<u32>;
+// lCleared at the brick's 9^3 corners o..o+8 (x fastest), each once: the crossings read a corner up to eight times.
+var<workgroup> wCleared:array<f32,729>;
 // nbAirProtected: an incident tile in the seeds (plane 0) or the collar (air distance ≤ 4, plane 3).
 fn lProtected(v:vec3i,seed:bool)->bool{
  for(var k=0u;k<8u;k++){
@@ -620,11 +622,21 @@ ${stagedHead(0)}
  // reseeds: rigid-float took 2035 records at frame 3 against its 1024 pool.
  let bodyBrick=(nbFRec(slot,NB_REC_CLASS)&(NB_CLASS_NEAR_BODY|NB_CLASS_BODY_WAS))!=0u;
  if(live){
+  // A corner of no cell in the wall box is not read (nor computed).
+  for(var i=lid;i<729u;i+=256u){
+   let d=vec3i(i32(i%9u),i32((i/9u)%9u),i32(i/81u));let v=o+d;
+   let lo=max(max(d-vec3i(1),vec3i(0))+o,vec3i(0));let hi=min(min(d,vec3i(7))+o,NB_WALL_BOX-vec3i(1));
+   if(all(lo<=hi)){wCleared[i]=lCleared(v,fgPhi(v));}
+  }
+ }
+ workgroupBarrier();
+ if(live){
   for(var r=0u;r<2u;r++){
    let l=lid+256u*r;let c=o+nbLocalCoord(l);
    if(!nbInWallBox(c)){continue;}
    var low=3e38;var high=-3e38;
-   for(var k=0u;k<8u;k++){let v=c+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));let x=lCleared(v,fgPhi(v));low=min(low,x);high=max(high,x);}
+   let e=c-o;let i0=u32(e.x+9*e.y+81*e.z);
+   for(var k=0u;k<8u;k++){let x=wCleared[i0+(k&1u)+9u*((k>>1u)&1u)+81u*(k>>2u)];low=min(low,x);high=max(high,x);}
    // arenaCross: exact zero belongs to either incident cell; flat plateaus and walls do not. A closed cell
    // (FLAGS.OPEN clear) is no crossing (umCellOpen > 1e-5): its corners past the wall hold an air marker, and as a
    // crossing it put a surface along every wall of a tank, its liquid vertices redistanced to it.
