@@ -488,6 +488,15 @@ fn psDepthVertex(v:vec3i)->f32{let r=vec3u(v-psO);if(psStaged&&all(r<vec3u(9u)))
 ` + PS_DEPTH_WGSL + /* wgsl */`
 fn psCoarse(c:vec3i)->bool{let t=vec3u((c>>vec3u(2u))-((psO>>vec3u(2u))-vec3i(1)));if(all(t<vec3u(4u))){return nbInWallBox(c)&&sCoarse[t.x+4u*(t.y+4u*t.z)]!=0u;}return fgCellCoarse(c);}
 fn psSeam(c:vec3i)->bool{
+ // A neighbour is coarse only in a staged coarse tile (psCoarse): the 27 lie in tiles (c - 1) >> 2..(c + 1) >> 2,
+ // inside the 4^3 stage for a cell of the brick. None coarse there, none of the 27 is (a cell outside the stage
+ // takes the loop).
+ let lo=((c-vec3i(1))>>vec3u(2u))-((psO>>vec3u(2u))-vec3i(1));let hi=((c+vec3i(1))>>vec3u(2u))-((psO>>vec3u(2u))-vec3i(1));
+ if(all(lo>=vec3i(0))&&all(hi<vec3i(4))){
+  var any=0u;
+  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){any|=sCoarse[u32(x+4*(y+4*z))];}}}
+  if(any==0u){return false;}
+ }
  for(var k=0u;k<27u;k++){let n=c+nbNeighbourOffset(k);if(psCoarse(n)&&psDepth(vec3f(n)+0.5)<=0.9){return true;}}
  return false;
 }
@@ -528,14 +537,22 @@ fn pSeedCellMask(c:vec3i,bank:u32,initial:bool)->u32{
  // The cell's own tile is h-owned (sTileOk): fgCellOwned(c).
  let fine=true;
  var mask=0u;
+ // A shallow cell (centre over -1.5) takes uncovered at its first site (the mass rule never skips it: held < 8).
+ // Taken first, a covered one passes only a site in this step's drop (nbfSeedSiteOk's second rule): none without a
+ // source (sourcePhi 1), and its sites' source test precedes their depth.
+ if(!known&&d>-1.5){uncovered=(n0==0u&&pUncovered(c))||psSeam(c);known=true;}
+ let covered=!initial&&d>-1.5&&!uncovered;
+ if(covered&&(cfg.w==2u||!nbSourceOn())){return 0u;}
  for(var j=n0;j<goal;j++){
   if(!initial&&held+f32(j-n0)*mass>=8.0){continue;}
-  let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);let distance=psSiteDistance(site,reentry);
-  if(!known&&(distance>-1.0||d>-1.5)){uncovered=(n0==0u&&pUncovered(c))||psSeam(c);known=true;}
+  let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);
   // seedSite's source test (nbSourcePhi(q, 1)): a site in this step's drop is exempt from the inner-band rule, so a
   // drop gets its whole band (Ferstl et al. 2016 §3.2: liquid made from a description). The old engine seeds after
   // the union (transfer): part 2's seed; part 1's re-entry (cfg.w = 2) runs before this step's drop is in φ.
   let sourcePhi=select(1.0,nbSourcePhi(site,1.0),cfg.w!=2u);
+  if(covered&&sourcePhi>=0.0){continue;}
+  let distance=psSiteDistance(site,reentry);
+  if(!known&&(distance>-1.0||d>-1.5)){uncovered=(n0==0u&&pUncovered(c))||psSeam(c);known=true;}
   if(!nbfSeedSiteOk(distance,false,initial,d,sourcePhi,uncovered,fine)){continue;}
   mask|=1u<<j;
  }
