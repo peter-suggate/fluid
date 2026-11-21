@@ -452,15 +452,13 @@ var<workgroup> sNear:u32;
 var<workgroup> wOwnH:array<u32,216>;
 fn ucOffset(k:u32)->vec3i{return vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1);}
 // The raw 4h cache (fsCacheRaw) of the tile planes the brick's taps read (tiles 2B-1..2B+2 on every axis, each
-// axis), staged once; fsTap4 reads it there and fsCacheRaw elsewhere.
+// axis), staged once; fsTap4 reads only it. Every tap a weight over 0 reads is there: a face c of the brick or its
+// apron (o .. o + 8) reads tiles (2c - 3) >> 3 .. + 1 = 2B - 1 .. 2B + 2 across, and 2c >> 3 = 2B .. 2B + 2 along,
+// whose + 1 corner at c = o + 8 has fraction 0. No fallback: fsCacheRaw's 16-face walk kept beside it cost the taps
+// half their time (pour, 2026-11-22).
 var<workgroup> wRaw:array<f32,192>;
 var<private> ucLow:vec3i;
-var<private> ucRawOn:bool=false;
-fn fsCacheRawStaged(T:vec3i,a:u32)->f32{
- let r=vec3u(T-ucLow);
- if(ucRawOn&&all(r<vec3u(4u))){return wRaw[64u*a+r.x+4u*(r.y+4u*r.z)];}
- return fsCacheRaw(T,a);
-}
+fn fsCacheRawStaged(T:vec3i,a:u32)->f32{let r=T-ucLow;return wRaw[64u*a+u32(r.x+4*(r.y+4*r.z))];}
 @compute @workgroup_size(256) fn uCache(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);atomicStore(&wNear,0u);}
  let split=workgroupUniformLoad(&sSplit);let e=nbGroup(wid);
@@ -493,7 +491,6 @@ fn fsCacheRawStaged(T:vec3i,a:u32)->f32{
  ucLow=2*b-vec3i(1);
  if(near&&lid<192u){let j=lid%64u;wRaw[lid]=fsCacheRaw(ucLow+vec3i(i32(j%4u),i32((j/4u)%4u),i32(j/16u)),lid/64u);}
  workgroupBarrier();
- ucRawOn=true;
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let c=o+nbLocalCoord(l);
   fcStoreF(FC_PHIU+512u*slot+l,fgPhi(c));
