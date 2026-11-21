@@ -321,7 +321,12 @@ measured 4.45 and 4.47 ms, twice. Its 22.7 KB of workgroup memory most likely ho
 whatever the registers. Packing uAdvect's 6 KB trace list two entries a word changed nothing either.
 
 The uAdvect change (fsCoarse: one C slot for its eight taps where they share a page, as fsFine) is exact and
-general, and lifts no other kernel's cap. The seep's GPU work is about 1.6 ms a step, so its pipelined step time
+general, and lifts no other kernel's cap. nbOperator (512 lanes, cap 384, so it spilled) reaches 512 with its cold start reading only the
+staged tile window: the window holds every tile the start reaches, and the scan that stages it now also covers the
+face halo's rows. Its global fallback, inline at each tap, had set the peak. nbOperator went 4.18 to 3.86 ms with no
+extra pass, where the earlier cold-start fission netted −0.2 ms. phiSolid and pMove are capped by their surface
+paths (the trace's foot, cubic and contact; the separation's surface shift); stripping all of phiSolid's still leaves
+it at 640, so those need restructuring, not a diet. The seep's GPU work is about 1.6 ms a step, so its pipelined step time
 (26.8–27.7 ms) is host-bound and these kernels cannot move it.
 
 **project landed (exact).** Its peak was poProjectFace (npBandFace), reached only by a dry seam face: a dry h side

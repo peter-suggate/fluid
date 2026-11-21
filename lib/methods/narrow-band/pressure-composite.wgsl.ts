@@ -100,6 +100,8 @@ fn poCentre(c:vec3i)->f32{return poCentreG(c);}
 fn poOwnerH(c:vec3i)->bool{return nbCellOwnerH(c);}
 fn poRootPhi(T:vec3i)->f32{return poRootPhiG(T);}
 fn poTileStart(T:vec3i)->f32{return poTileStartG(T);}
+fn poStartRoot(T:vec3i)->f32{return poRootPhiG(T);}
+fn poStartTile(T:vec3i)->f32{return poTileStartG(T);}
 fn poSlotOfCell(c:vec3i)->u32{return nbFSlotOfCell(c);}
 fn poGuardVertex(v:vec3i){poGuardVertexG(v);}
 fn poFacePlane(c:vec3i,a:u32)->f32{return nbFacePlane(c,a);}
@@ -117,14 +119,27 @@ fn poCoord(i:u32,n:u32)->vec3i{return vec3i(i32(i%n),i32((i/n)%n),i32(i/(n*n)));
 fn poVertex(v:vec3i)->f32{let d=v-poSO+vec3i(1);if(poVS&&all(d>=vec3i(0))&&all(d<vec3i(11))){return poSV[poIndex(d,11)];}return nbVertexPhi(v);}
 fn poCentre(c:vec3i)->f32{let d=c-poSO+vec3i(1);if(poVS&&all(d>=vec3i(0))&&all(d<vec3i(10))){return poSC[poIndex(d,10)];}return poCentreG(c);}
 fn poOwnerH(c:vec3i)->bool{let d=(c>>vec3u(2u))-(poSO>>vec3u(2u))+vec3i(1);if(all(d>=vec3i(0))&&all(d<vec3i(4))){return poST[poIndex(d,4)]!=0u;}return nbCellOwnerH(c);}
-// The tiles a cold row's start reads (poStart: 2B-1..2B+2, the carry's beyond 2B-2..2B+3 along y): their root φ
-// and start, staged only when the brick has a cold row (poTiles).
+// The tiles a cold row's start reads (poStart: 2B-1..2B+2, the carry's beyond 2B-2..2B+3 along y; a face halo
+// cell's taps too, poTileNear clamping only toward its own tile): their root φ and start, staged only when the brick
+// or its face halo has a cold row (poTiles).
 var<workgroup> poSR:array<f32,96>;
 var<workgroup> poSS:array<f32,96>;
 var<private> poRC:bool;
 fn poTileWindow(T:vec3i)->i32{let d=T-(poSO>>vec3u(2u))+vec3i(1,2,1);if(all(d>=vec3i(0))&&all(d<vec3i(4,6,4))){return d.x+4*(d.y+6*d.z);}return -1;}
 fn poRootPhi(T:vec3i)->f32{if(poRC){let i=poTileWindow(T);if(i>=0){return poSR[i];}}return poRootPhiG(T);}
 fn poTileStart(T:vec3i)->f32{if(poRC){let i=poTileWindow(T);if(i>=0){return poSS[i];}}return poTileStartG(T);}
+// The cold start's reads: the window alone. Inline at each of the start's taps, the global fallback set nbOperator's
+// register peak (Metal's cap 384 threads under its 512 lanes, so it spilled; 512 without). The window holds every
+// tile the start reaches, so a read outside it (or unstaged) is a defect and latches.
+fn poWindowAt(T:vec3i)->u32{let i=poTileWindow(T);if(i<0||!poRC){nbFail(NB_FAIL_UNSUPPORTED,0xa6000000u);return 0u;}return u32(i);}
+fn poStartRoot(T:vec3i)->f32{return poSR[poWindowAt(T)];}
+fn poStartTile(T:vec3i)->f32{return poSS[poWindowAt(T)];}
+// A face halo cell of the brick at origin o for lanes 0..383 (six faces of 64), as the window's 10^3 offset.
+fn poHaloD(lid:u32)->vec3i{
+  let side=lid/64u;let a=side/2u;let k=lid%64u;var d=vec3i(0);
+  d[(a+1u)%3u]=i32(k%8u)+1;d[(a+2u)%3u]=i32(k/8u)+1;d[a]=select(0,9,(side&1u)==1u);
+  return d;
+}
 // Called in uniform control flow (cold uniform) by every lane of the brick's workgroup, after poStage.
 fn poTiles(lid:u32,cold:bool){
   poRC=false;
@@ -323,12 +338,12 @@ fn poTileNear(page:vec3i,t:vec3i)->vec3i{
   return select(t,clamp(t,low,high),held);
 }
 fn poCoarse(t:vec3i)->vec3f{
-  let phi_=poRootPhi(t);
-  return select(vec3f(0.0),vec3f(poTileStart(t),phi_,1.0),poWet(phi_,4.0)&&poTileOpen(t));
+  let phi_=poStartRoot(t);
+  return select(vec3f(0.0),vec3f(poStartTile(t),phi_,1.0),poWet(phi_,4.0)&&poTileOpen(t));
 }
 fn poCoarseKind(t:vec3i)->vec3f{
-  let open=poTileOpen(t);let wet=poWet(poRootPhi(t),4.0);
-  return vec3f(select(0.0,poTileStart(t),open&&wet),f32(open&&wet),f32(open&&!wet));
+  let open=poTileOpen(t);let wet=poWet(poStartRoot(t),4.0);
+  return vec3f(select(0.0,poStartTile(t),open&&wet),f32(open&&wet),f32(open&&!wet));
 }
 struct PoCarry {rise:vec2f,height:vec2f,air:f32}
 fn poCoarseCarry(page:vec3i,b:vec3i,w:vec3f)->PoCarry{
@@ -638,6 +653,11 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
     let c=nbFOrigin(slot)+nbLocalCoord(lid+512u*j);
     if(nbInWallBox(c)&&poOwnerH(c)){if(${cuts ? "poRowWet(c,poCentre(c))" : "poWet(poCentre(c),1.0)"}&&(poFlagsF(c)&PO_WARM)==0u){atomicOr(&poCold,1u);}}
   }
+  // A cold face halo row's start reads the window too.
+  if(lid<384u){
+    let m=nbFOrigin(slot)-vec3i(1)+poHaloD(lid);
+    if(nbInWallBox(m)&&poOwnerH(m)){if(${cuts ? "poRowWet(m,poCentre(m))" : "poWet(poCentre(m),1.0)"}&&(poFlagsF(m)&PO_WARM)==0u){atomicOr(&poCold,1u);}}
+  }
   workgroupBarrier();
   if(lid==0u){poGo=atomicLoad(&poCold);}
   poTiles(lid,workgroupUniformLoad(&poGo)!=0u);
@@ -657,9 +677,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
   var start=0.0;if(liquid){start=poStart(c,own);}
   poSH[poIndex(nbLocalCoord(l)+vec3i(1),10)]=start;
   if(lid<384u){
-    let side=lid/64u;let a=side/2u;let k=lid%64u;var d=vec3i(0);
-    d[(a+1u)%3u]=i32(k%8u)+1;d[(a+2u)%3u]=i32(k/8u)+1;d[a]=select(0,9,(side&1u)==1u);
-    let m=o-vec3i(1)+d;var sm=0.0;
+    let d=poHaloD(lid);let m=o-vec3i(1)+d;var sm=0.0;
     if(nbInWallBox(m)&&poOwnerH(m)){let pm=poCentre(m);if(${cuts ? "poRowWet(m,pm)" : "poWet(pm,1.0)"}){sm=poStart(m,pm);}}
     poSH[poIndex(d,10)]=sm;
   }
