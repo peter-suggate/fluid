@@ -68,7 +68,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const ext4 = tiered ? [at(v.uExt4Seed, pagesAct), at(v.uExt4, pagesAct)] : [];
   // Tiered, the samplers' caches of this step's opening state (after the head's transfer, before pMove; at the kick,
   // after the extension, before the seeding).
-  const cache = v.uCache ? [at(v.uCache, both)] : [];
+  const cache = v.uCache ? [at(v.uCache, all), ...(v.uCache4 ? [at(v.uCache4, pages)] : [])] : [];
   // Tiered, lDilateC first: the round's sources and x and y passes at the tiles no F slot holds (DIL4).
   const dilate = (round: 1 | 2) => [...(l.lDilateC ? [at(l.lDilateC, pagesAct, 0, round)] : []), ...[0, 1, 2].map(pass => at(l.lDilate, all8, pass, round))];
   const near = [0, 1, 2].map(pass => at(l.lNear, all, pass));

@@ -728,7 +728,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     // caches are fcell words, so "fcell untouched" below is against fcell after it.
     const uCache = velocityKernels(L, F).uCache;
     assert.ok(uCache, "tiered velocity kernels define uCache");
-    await e.run([{ kernel: uCache, dispatch: { indirect: ARGS.FC_G1 } }]);
+    await e.run([{ kernel: uCache, dispatch: { indirect: ARGS.FC_G1 } }, { kernel: velocityKernels(L, F).uCache4!, dispatch: { indirect: 12 * LIST.C_ALL } }]);
     const fcellCached = new Uint32Array(await e.read("fcell"));
     console.log(`levelset-coarse: ${s0.bricks.size} F, ${s0.pages.size} C pages, ${lanes(W, slots).length} C vertices, COLD pages ${coldSlots.map(cs => brickKeyCoord(dir[L.dir.crec + 32 * cs + REC.KEY]!).join(",")).join(" ")}; poisoned ${poisonF} F and ${poisonC} C copies (${poisonCIn} of them lattice vertices F owns)`);
 

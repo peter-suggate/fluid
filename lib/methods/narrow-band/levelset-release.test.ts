@@ -402,7 +402,7 @@ test("levelset-release (GPU): reach words, wall reach, the readers and lcAdvect'
     }
     e.write("phi", 0, new Uint32Array(phiWords)); e.write("vel", 0, new Float32Array(vel));
     for (const cs of slots) e.write("set", L.set.airGate + CMASK_WORDS * cs, new Uint32Array(CMASK_WORDS).fill(0xffffffff));
-    await e.run([{ kernel: velocityKernels(L, F).uCache!, dispatch: { indirect: ARGS.FC_G1 } }]);
+    await e.run([{ kernel: velocityKernels(L, F).uCache!, dispatch: { indirect: ARGS.FC_G1 } }, { kernel: velocityKernels(L, F).uCache4!, dispatch: { indirect: ARGS.FC_G1 } }]);
     const fcell0 = await e.read("fcell"), dir0 = await e.read("dir"), phi0 = await e.read("phi"), vel0 = await e.read("vel");
     const W = new World(L, dir0, new Float32Array(vel0.buffer), phi0, await e.read("set"));
     console.log(`levelset-release: ${s0.bricks.size} F, ${s0.pages.size} C pages, ${releasedBits} release bits`);
