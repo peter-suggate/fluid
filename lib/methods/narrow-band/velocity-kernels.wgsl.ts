@@ -555,7 +555,7 @@ fn pdLiquidAt(c:vec3i)->bool{
 
   // uTransfer (transferProperties, then forces): a workgroup a brick, a lane two cells' three lower faces. Stages
   // the 125 tiles about the brick (the 27 about each face's home tile) and its 9^3 depth vertices.
-  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdep, ...(F.tiered ? [FB.partsRO] : [])], windowBase + FG_RING_WGSL(10) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + BRICK_SOURCE_RING_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
+  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdepPlain, ...(F.tiered ? [FB.partsRO] : [])], windowBase + FG_RING_WGSL(10) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + BRICK_SOURCE_RING_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
 var<workgroup> wHeat:array<f32,125>;
 var<workgroup> wHot:array<f32,125>;
 var<workgroup> wDepth:array<f32,729>;
@@ -569,7 +569,9 @@ fn nbxTransferHeat(tile:u32)->vec2f{
 var<private> tOrigin:vec3i;
 fn nbxTransferDepth(v:vec3u)->f32{let r=vec3i(v)-tOrigin;return wDepth[u32(r.x+9*(r.y+9*r.z))];}
 ` + nbfP2GWGSL + nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")) + nbfViscosityWGSL.slice(nbfViscosityWGSL.indexOf("// The kick")) + nbfTensionWGSL + V_TENSION_WGSL + /* wgsl */`
-fn tDepositWord(at:u32)->u32{return atomicExchange(&fdep[at],0u);}
+// Only this brick's workgroup reads or clears its deposit words here (pDeposit's adds are a dispatch before), so the
+// words bind plain (FB.fdepPlain): a load then a clear, in place of a returning exchange (11.8M on the pour).
+fn tDepositWord(at:u32)->u32{let w=fdep[at];fdep[at]=0u;return w;}
 ` + V_RING_WGSL + /* wgsl */`
 // The seam stage: per tile t of the 5^3 about the brick (tLow), bit 0 the tile's half of fgCellCoarse (tiered, not
 // h-owned, its low cell in the lattice), bit 1 vCoarseMass's fill test, and vOcc4 where bit 0. A cell c is coarse

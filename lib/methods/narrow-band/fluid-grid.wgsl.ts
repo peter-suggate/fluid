@@ -110,6 +110,8 @@ export const FB = {
   /** fcell where the kernel writes none of it (fluidKernel picks it). */
   fcellRO: { name: "fcell", kind: "ro", type: "array<u32>" },
   fdep: { name: "fdep", kind: "rw", type: "array<atomic<u32>>" },
+  // The deposit words as plain words: a kernel that alone touches each word (uTransfer's read and clear).
+  fdepPlain: { name: "fdep", kind: "rw", type: "array<u32>" },
   fpart: { name: "fpart", kind: "rw", type: "array<u32>" },
   fmoved: { name: "fmoved", kind: "rw", type: "array<Particle>" },
   fext4: { name: "fext4", kind: "rw", type: "array<f32>" },
