@@ -237,7 +237,8 @@ fn vcTransferPage(slot:u32,lid:u32){
    // The viscous term (uViscous left the departure's 4h Laplacian in C US) where the old owner O holds liquid.
    let occO=vOcc4(O,h.y);
    if(V_VISCOUS&&occO>0.0){value=nbfViscousKick(value,dt,V_MU,V_RHO,vel[vcAt(NB_VEL_C_US0,slot,a,j)]);}
-   if(nbfGravityFace(occO,occ,vCoarseMass(4*O)||vCoarseMass(4*T))){value=nbfGravityKick(value,dt,gravity[a]);kick|=NB_FLAG_KICK0<<a;}
+   // The coarse-mass test only where neither occupancy decides the rule (nbfGravityFace's order): two vFill4 a face.
+   if(nbfGravityFace(occO,occ,!(occO>1e-5||occ>1e-5)&&(vCoarseMass(4*O)||vCoarseMass(4*T)))){value=nbfGravityKick(value,dt,gravity[a]);kick|=NB_FLAG_KICK0<<a;}
    // Surface tension (umCapillary) on the 4h face between O and T.
    if(V_TENSION){value+=nbfCapillary(4*O,4*T,a,occO,occ,h.y,dt,V_SIGMA,V_RHO);}
    // The nozzle (umInflow): the swept source velocity averaged over the face's 16 fine texels, the cells below it.

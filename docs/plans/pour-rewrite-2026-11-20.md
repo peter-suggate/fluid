@@ -472,6 +472,28 @@ Attributed, not yet changed:
 | uTransfer | 3.4 | C pages 0.75; the staging is the rest, with no single hot path |
 | censusFine | 2.5 | ncSurfaceDisplacement 0.88 |
 
+Second round, the same method, all exact (0 words differ on the pour's and the seep's frozen states):
+
+| Commit | Change | Frozen-state result |
+|---|---|---|
+| 36654e70 | uAdvect stages the 27 coarse tiles' vLive4 (eight C corners and a centre), which the classification asked once a cell and once a face. | 3.44 to 3.15 ms |
+| 7582857d | The pressure's cut readers (poCutK, poStaticShut) take the staged bricks' K slot and class instead of nbFRec on every call, about ten a row. | operator 3.55 to 3.42 ms, project 1.63 to 1.52 |
+| 732a49a5 | uCache's HMASK reads the near test's staged owner bits instead of 27 serial lookups on 8 lanes. | 1.75 to 1.64 ms |
+| this commit | uTransfer's C pages test coarse mass only where neither occupancy decides the gravity rule. | 3.59 to 3.54 ms |
+
+- Pour profile 301–325: 64.21 to 62.64 ms GPU (the first three).
+- Gates: seep 300 +0.31% to +0.76% (spread: a repeat on the same code moved +0.76 to +0.31); letters 120 +0.43% to +0.54%.
+
+Tried with no gain, and reverted:
+- uExtend skipping the window cells the finish never reads (more than L1 2 from the brick): 4.52 against 4.48 ms, because idle lanes don't shorten the iteration.
+- lDistance's dedup over constant slots in place of a list indexed by its count: 2.22 against 2.22 ms.
+- uExt4Seed staging its 9³ tiles' liquid and support bits up front: 1.08 against 1.09 ms. A tile is asked 2–3 times on average, and the stage asks all 729.
+
+Attributed, nothing exact found:
+- operator: the liquid rows are 2.0 of its 3.5 ms, and each cut read was 0.15–0.25 ms before the stage;
+- censusFine's shaping: smooth 0.27, metric 0.19, Laplacian 0.27 and loop 0.30 ms;
+- lDistance: the pairs' cell distances, 0.61 ms of per-point Newton projections.
+
 uExtend's seed fill is inherent to the 12³ window that two sweeps need. Only the cells within L1 distance 2 of the brick are read, so about 20% of the seeds could be skipped.
 
 ## 6. Process
