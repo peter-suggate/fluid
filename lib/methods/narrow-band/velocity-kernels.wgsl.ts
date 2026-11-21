@@ -444,6 +444,8 @@ ${stagedHead("vcAdvectPageOf", -1, A_LANES)}
 var<workgroup> sSplit:u32;
 var<workgroup> wNear:atomic<u32>;
 var<workgroup> sNear:u32;
+// foTileOwnerH of the 6^3 tiles of the 27 bricks (2B-2..2B+3), staged by the near test for HMASK's 27 bits a tile.
+var<workgroup> wOwnH:array<u32,216>;
 fn ucOffset(k:u32)->vec3i{return vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1);}
 // The raw 4h cache (fsCacheRaw) of the tile planes the brick's taps read (tiles 2B-1..2B+2 on every axis, each
 // axis), staged once; fsTap4 reads it there and fsCacheRaw elsewhere.
@@ -471,13 +473,17 @@ fn fsCacheRawStaged(T:vec3i,a:u32)->f32{
  let slot=nbListSlot(NB_LIST_F_ALL,e);let o=nbFOrigin(slot);let b=o>>vec3u(3u);
  fgWindowStage(b,lid,256u);workgroupBarrier();
  // An h tile in the 27 bricks (8 tiles each, a lane a tile).
- if(lid<216u){let t=2*(b+ucOffset(lid/8u))+vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32((lid>>2u)&1u));if(foTileOwnerH(t)){atomicOr(&wNear,1u);}}
- if(lid<8u){
-  let t=(o>>vec3u(2u))+vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32(lid>>2u));var m=0u;
-  for(var k=0u;k<27u;k++){if(foTileOwnerH(t+ucOffset(k))){m|=1u<<k;}}
-  fcStore(FC_HMASK+8u*slot+lid,m);
+ if(lid<216u){
+  let t=2*(b+ucOffset(lid/8u))+vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32((lid>>2u)&1u));let own=foTileOwnerH(t);
+  let r=t-(2*b-vec3i(2));wOwnH[r.x+6*(r.y+6*r.z)]=select(0u,1u,own);
+  if(own){atomicOr(&wNear,1u);}
  }
  workgroupBarrier();
+ if(lid<8u){
+  let t=(o>>vec3u(2u))+vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32(lid>>2u));var m=0u;
+  for(var k=0u;k<27u;k++){let r=t+ucOffset(k)-(2*b-vec3i(2));if(wOwnH[r.x+6*(r.y+6*r.z)]!=0u){m|=1u<<k;}}
+  fcStore(FC_HMASK+8u*slot+lid,m);
+ }
  if(lid==0u){sNear=atomicLoad(&wNear);}
  let near=workgroupUniformLoad(&sNear)!=0u;
  ucLow=2*b-vec3i(1);
