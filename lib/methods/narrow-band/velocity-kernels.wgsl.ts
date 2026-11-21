@@ -95,6 +95,8 @@ fn vRingTile(t0:vec3i,k:u32)->vec3i{
 }
 var<workgroup> sRingOwned:atomic<u32>;
 fn vRingMark(o:vec3i,lid:u32,on:bool){if(FG_TIERED&&on&&lid<20u&&foTileOwnerH(vRingTile(o>>vec3u(2u),lid))){atomicOr(&sRingOwned,1u);}}
+// The same through the directory, before any window (uExtend's: its ring bricks leave before staging one).
+fn vRingMarkDir(o:vec3i,lid:u32,on:bool){if(FG_TIERED&&on&&lid<20u&&fgTileHDir(vRingTile(o>>vec3u(2u),lid))){atomicOr(&sRingOwned,1u);}}
 fn vRingOf(on:bool)->bool{return FG_TIERED&&on&&atomicLoad(&sRingOwned)==0u;}
 var<workgroup> sRing:u32;
 `;
@@ -312,17 +314,19 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
   if (!(sigma >= 0 && Number.isFinite(sigma))) throw new Error(`NB-FLIP brick engine: surface tension ${sigma} N/m is not a surface tension`);
   const physicsWGSL = `const V_VISCOUS:bool=${viscous};const V_MU:f32=${f32Bits(physics.viscosity_Pa_s)};const V_RHO:f32=${f32Bits(physics.density_kg_m3)};const V_CONTROL:f32=${f32Bits(control)};const V_TENSION:bool=${sigma > 0};const V_STATICS:bool=${physics.statics === true};const V_SIGMA:f32=${f32Bits(sigma)};`;
   const base = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, V_WGSL, physicsWGSL].join("\n");
-  // The window alone (uCache's F bricks): a lookup outside it latches WINDOW ("UC") and reads none. Every lookup
-  // follows the staging's barrier; the staging reads the directory itself.
+  // The window alone (uCache's F bricks, uExtend): a lookup outside it latches WINDOW (info: the kernel's tag, + 1 for
+  // a tile) and reads none. Every lookup follows the staging's barrier; the staging reads the directory itself, as
+  // does a test before it (vRingMarkDir). A kernel takes it where its every lookup lies in the 3^3 bricks about its
+  // brick: the fallback's code beside the window's costs the window's readers though it never runs.
   const strictSub = (code: string, from: string, to: string) => { if (!code.includes(from)) throw new Error(`velocity-kernels: the slot window has no ${from.slice(0, 40)}`); return code.replace(from, to); };
-  const FG_SLOT_WINDOW_STRICT_WGSL = [
+  const fgSlotWindowStrict = (tag: number) => [
     [`fn fgBrickSlot(b:vec3i)->u32{
  let r=vec3u(b-fgWinLow);
  if(fgWinOn&&all(r<vec3u(3u))){return fgWinSlot[r.x+3u*(r.y+3u*r.z)];}
  return fgBrickSlotOfDir(b);
 }`, `fn fgBrickSlot(b:vec3i)->u32{
  let r=vec3u(b-fgWinLow);
- if(!all(r<vec3u(3u))){nbFail(NB_FAIL_WINDOW,0x55430000u);return NB_NONE;}
+ if(!all(r<vec3u(3u))){nbFail(NB_FAIL_WINDOW,${tag}u);return NB_NONE;}
  return fgWinSlot[r.x+3u*(r.y+3u*r.z)];
 }`],
     [`fn fgTileCSlot(t:vec3i)->u32{
@@ -331,7 +335,7 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
 }
 fn fgTileH(t:vec3i)->bool{let i=fgWinTileAt(t);if(i==NB_NONE){return fgTileHDir(t);}return (fgWinTile[i]>>31u)!=0u;}`, `fn fgWinTileStrict(t:vec3i)->u32{
  let r=vec3u(t-2*fgWinLow);
- if(!all(r<vec3u(6u))){nbFail(NB_FAIL_WINDOW,0x55430001u);return 0u;}
+ if(!all(r<vec3u(6u))){nbFail(NB_FAIL_WINDOW,${tag + 1}u);return 0u;}
  return r.x+6u*(r.y+6u*r.z);
 }
 fn fgTileCSlot(t:vec3i)->u32{let w=fgWinTile[fgWinTileStrict(t)]&0x7fffffffu;return select(w,NB_NONE,w==0x7fffffffu);}
@@ -341,6 +345,7 @@ fn fgTileH(t:vec3i)->bool{return (fgWinTile[fgWinTileStrict(t)]>>31u)!=0u;}`],
   return nbTileH(cs,foTileIndex(t));`, `let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}
   return nbTileH(cs,foTileIndex(t));`],
   ].reduce((code, [from, to]) => strictSub(code, from!, to!), FG_SLOT_WINDOW_WGSL);
+  const FG_SLOT_WINDOW_STRICT_UC = fgSlotWindowStrict(0x55430000), FG_SLOT_WINDOW_STRICT_UX = fgSlotWindowStrict(0x55580000);
   const windowBase = [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, V_WGSL, physicsWGSL].join("\n");
   const fill = [levelSetFillWGSL, geometricPlaneBoxWGSL].join("\n");
   // uAdvect's lanes a brick (its 512 cells and its traced-face list). On the dam's frozen step 20 (tiered / all h,
@@ -475,7 +480,7 @@ ${stagedHead("vcAdvectPageOf", -1, A_LANES, `
   // owner-resolved tap or vertex costs one read.
   // An F brick's every lookup lies in its window (the 3^3 bricks about it): its taps' faces o - 1 .. o + 8 and the
   // tiles 2B - 1 .. 2B + 2 of its staged planes, whose 16 faces lie in bricks B - 1 .. B + 1. So uCache reads the window
-  // alone (FG_SLOT_WINDOW_STRICT_WGSL), without the directory's fallback, whose code beside the window's cost the
+  // alone (FG_SLOT_WINDOW_STRICT_UC), without the directory's fallback, whose code beside the window's cost the
   // pass 0.3 ms on the pour; the C pages, which stage no window, are uCache4's.
   const uCacheLibs = [FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, V_CADDR_WGSL];
   // uCache4 (tiered only): the C pages' CACHE4 (fsCacheRaw at each of a page's tiles' planes), a workgroup a C_ALL
@@ -489,7 +494,7 @@ ${stagedHead("vcAdvectPageOf", -1, A_LANES, `
   for(var a=0u;a<3u;a++){fcStoreF(FC_CACHE4+512u*(3u*cs+a)+j,fsCacheRaw(T,a));}
  }
 }`) : undefined;
-  const uCache = F.tiered ? k("uCache", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.fcell], [FG_SLOT_WINDOW_STRICT_WGSL, ...uCacheLibs].join("\n") + /* wgsl */`
+  const uCache = F.tiered ? k("uCache", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.fcell], [FG_SLOT_WINDOW_STRICT_UC, ...uCacheLibs].join("\n") + /* wgsl */`
 var<workgroup> sSplit:u32;
 var<workgroup> wNear:atomic<u32>;
 var<workgroup> sNear:u32;
@@ -870,7 +875,10 @@ ${stagedHead("vcViscousPage")}
   // uExtend (the extension pair at h): a workgroup a brick, 512 lanes, one axis at a time over the 12^3 window
   // (cells o-2..o+9). Seeds (ufxSeedCodeOf): 3 a closed face, 1 a source (liquid either side), 2 blocked (the
   // tile of the old texel, the cell below the face, lacks support: occupied distance over 3 tiles), 0 unreached.
-  const uExtend = k("uExtend", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, ...(F.tiered ? [FB.fext4] : [])], windowBase + V_LIQUID_WGSL + V_RING_WGSL + nbfExtensionWGSL + (F.tiered ? V_EXT4_WGSL : "fn x4Slot(T:vec3i)->u32{return NB_NONE;}fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{return vec3f(0.0,0.0,-1.0);}") + /* wgsl */`
+  // uExtend reads the window alone (fgSlotWindowStrict): its stencil (from xLow = o - 3), the tiles 2B - 1 .. 2B + 2 of
+  // its seam and support words and the 27 bricks' FC_LIQ words lie in the 3^3 bricks about it (a window probe saw no
+  // lookup outside it on the pour or the seep; one would latch WINDOW). 4.11 to 3.77 ms on the pour, exact.
+  const uExtend = k("uExtend", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, ...(F.tiered ? [FB.fext4] : [])], windowBase.replace(FG_SLOT_WINDOW_WGSL, FG_SLOT_WINDOW_STRICT_UX) + V_LIQUID_WGSL + V_RING_WGSL + nbfExtensionWGSL + (F.tiered ? V_EXT4_WGSL : "fn x4Slot(T:vec3i)->u32{return NB_NONE;}fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{return vec3f(0.0,0.0,-1.0);}") + /* wgsl */`
 var<workgroup> wV:array<f32,1728>;
 var<workgroup> wD:array<f32,1728>;
 // fgLiquidOwner of cells o-3..o+9 (13^3 bits, from FC_LIQ: vLiquidOwner), staged once for the three axes.
@@ -964,7 +972,7 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);}
  // A ring brick writes no face (the finish writes F's faces only), and a workgroup past the list holds no brick:
  // neither stages the window nor sweeps, so it leaves before the window stage.
- vRingMark(o,lid,live);workgroupBarrier();
+ vRingMarkDir(o,lid,live);workgroupBarrier();
  if(lid==0u){sRing=select(0u,1u,!live||vRingOf(live));}
  if(workgroupUniformLoad(&sRing)!=0u){return;}
  let h=vH();let l=lid;let c=o+nbLocalCoord(l);
