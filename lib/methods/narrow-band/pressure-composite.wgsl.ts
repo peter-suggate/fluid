@@ -103,6 +103,7 @@ fn poTileStart(T:vec3i)->f32{return poTileStartG(T);}
 fn poStartRoot(T:vec3i)->f32{return poRootPhiG(T);}
 fn poStartTile(T:vec3i)->f32{return poTileStartG(T);}
 fn poSlotOfCell(c:vec3i)->u32{return nbFSlotOfCell(c);}
+fn poSlotRec(c:vec3i,k:u32)->u32{let s=nbFSlotOfCell(c);if(s>=NB_SEAM){return NB_NONE;}return nbFRec(s,k);}
 fn poGuardVertex(v:vec3i){poGuardVertexG(v);}
 fn poFacePlane(c:vec3i,a:u32)->f32{return nbFacePlane(c,a);}
 `;
@@ -159,6 +160,10 @@ fn poTiles(lid:u32,cold:bool){
 var<workgroup> poSK:array<u32,125>;
 var<workgroup> poSQ:array<f32,216>;
 var<workgroup> poSB:array<u32,27>;
+// The staged bricks' K slots (NB_REC_CUT) and classes (NB_REC_CLASS), NB_NONE off a slot: the cuts' readers ask them
+// once a face of a row, about ten times a cell.
+var<workgroup> poSBK:array<u32,27>;
+var<workgroup> poSBC:array<u32,27>;
 fn poVertexS(v:vec3i,o:vec3i)->f32{
   if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_FAR;}
   let T0=o>>vec3u(2u);let tA=v>>vec3u(2u);let inside=(v-4*tA)!=vec3i(0);var T=vec3i(-1);
@@ -185,6 +190,12 @@ fn poSlotOfCell(c:vec3i)->u32{
   if(all(b>=vec3i(0))&&all(d>=vec3i(0))&&all(d<vec3i(3))){return poSB[poIndex(d,3)];}
   return nbFSlotOfCell(c);
 }
+// nbFRec(poSlotOfCell(c), k) for k NB_REC_CUT or NB_REC_CLASS from the staged bricks, NB_NONE off a slot.
+fn poSlotRec(c:vec3i,k:u32)->u32{
+  let b=c>>vec3u(3u);let d=b-(poSO>>vec3u(3u))+vec3i(1);
+  if(all(b>=vec3i(0))&&all(d>=vec3i(0))&&all(d<vec3i(3))){let i=poIndex(d,3);return select(poSBC[i],poSBK[i],k==NB_REC_CUT);}
+  let s=nbFSlotOfCell(c);if(s>=NB_SEAM){return NB_NONE;}return nbFRec(s,k);
+}
 // poGuardVertexG with the pages of the brick's vertices (o..o+9: pages o>>5 + {0,1}^3) staged.
 var<workgroup> poSP:array<u32,8>;
 fn poGuardVertex(v:vec3i){
@@ -210,7 +221,7 @@ fn poStage(o:vec3i,lid:u32,n:u32){
     let T0=o>>vec3u(2u);
     if(lid<125u){let t=T0-vec3i(2)+poCoord(lid,5u);poSK[lid]=u32(nbTileInLattice(t)&&nbCSlotOfPage(t>>vec3u(3u))!=NB_NONE&&!nbTileOwnerH(t));}
     if(lid<216u){poSQ[lid]=nbCVertex(T0-vec3i(2)+poCoord(lid,6u));}
-    if(lid<27u){let b=(o>>vec3u(3u))-vec3i(1)+poCoord(lid,3u);poSB[lid]=select(nbFSlotOfBrick(b),NB_NONE,any(b<vec3i(0)));}
+    if(lid<27u){let b=(o>>vec3u(3u))-vec3i(1)+poCoord(lid,3u);let s=select(nbFSlotOfBrick(b),NB_NONE,any(b<vec3i(0)));poSB[lid]=s;var k=NB_NONE;var cls=NB_NONE;if(s<NB_SEAM){k=nbFRec(s,NB_REC_CUT);cls=nbFRec(s,NB_REC_CLASS);}poSBK[lid]=k;poSBC[lid]=cls;}
     workgroupBarrier();
   }
   for(var i=lid;i<1331u;i+=n){poSV[i]=poVertexS(o-vec3i(1)+poCoord(i,11u),o);}
@@ -226,7 +237,7 @@ fn poStage(o:vec3i,lid:u32,n:u32){
 // The owners (poST) and F slots (poSB) only. Called in uniform control flow by every lane.
 fn poStageLight(o:vec3i,lid:u32){
   poSO=o;poVS=false;
-  if(lid<27u){let b=(o>>vec3u(3u))-vec3i(1)+poCoord(lid,3u);poSB[lid]=select(nbFSlotOfBrick(b),NB_NONE,any(b<vec3i(0)));}
+  if(lid<27u){let b=(o>>vec3u(3u))-vec3i(1)+poCoord(lid,3u);let s=select(nbFSlotOfBrick(b),NB_NONE,any(b<vec3i(0)));poSB[lid]=s;var k=NB_NONE;var cls=NB_NONE;if(s<NB_SEAM){k=nbFRec(s,NB_REC_CUT);cls=nbFRec(s,NB_REC_CLASS);}poSBK[lid]=k;poSBC[lid]=cls;}
   if(lid<64u){poST[lid]=u32(nbTileOwnerH((o>>vec3u(2u))-vec3i(1)+poCoord(lid,4u)));}
   workgroupBarrier();
 }
@@ -238,7 +249,7 @@ fn poStageLight(o:vec3i,lid:u32){
  * 0.5 (FRAC low + FRAC high) (umPressureFaceV, pbStampFace): stored at plane 0, formed here at plane N, where no
  * brick holds the face. */
 const CUTS_WGSL = /* wgsl */`
-fn poCutK(c:vec3i)->u32{if(!nbInWallBox(c)){return NB_NONE;}let s=poSlotOfCell(c);if(s>=NB_SEAM){return NB_NONE;}return nbFRec(s,NB_REC_CUT);}
+fn poCutK(c:vec3i)->u32{if(!nbInWallBox(c)){return NB_NONE;}return poSlotRec(c,NB_REC_CUT);}
 fn poFrac(c:vec3i)->f32{if(!nbInWallBox(c)){return 0.0;}let k=poCutK(c);if(k==NB_NONE){return 1.0;}return cut[NB_CUT_FRAC+NB_STRIDE*k+nbLocal(c)];}
 fn poCutAP(a:u32)->u32{return select(select(NB_CUT_AP2,NB_CUT_AP1,a==1u),NB_CUT_AP0,a==0u);}
 fn poCutW(a:u32)->u32{return select(select(NB_CUT_W2,NB_CUT_W1,a==1u),NB_CUT_W0,a==0u);}
@@ -258,7 +269,7 @@ fn poCutBmask(k:u32)->u32{if(k==NB_NONE){return 0u;}return bitcast<u32>(cut[NB_C
 // before 2026-11-18); with a body it tells the static cells from the body's, which stay the body's rows.
 fn poStaticShut(q:vec3i)->bool{
   let k=poCutK(q);if(k==NB_NONE){return false;}
-  if((nbFRec(poSlotOfCell(q),NB_REC_CLASS)&NB_CLASS_CUT_STATIC)==0u){return false;}
+  if((poSlotRec(q,NB_REC_CLASS)&NB_CLASS_CUT_STATIC)==0u){return false;}
   return (poFlagsF(q)&NB_FLAG_STATIC_SHUT)!=0u;
 }
 // The pressure's liquid test of an h cell with centre φ p: wet, and not a static solid cell.
