@@ -1060,12 +1060,14 @@ fn cfVolumeShift()->f32{
 var<workgroup> cfFaces:array<f32,240>;
 // The tile's 5^3 raw vertices (ncTileRaw) and its faces, each read once (ncLoadFine and nbFacePlane as the cells read
 // them): the cells' classify, bounds and extents and the surface displacement then read the same values from here.
+// Tile t is h-owned (censusFine's wgFlag), and every staged face has a cell of t on one side (plane p < 4: the cell
+// itself; p = 4: the cell below it), so nbFacePlane's owner test always takes F's face: read it directly.
 fn cfStage(t:vec3i,lane:u32){
   let origin=4*t;
   for(var i=lane;i<125u;i+=64u){ncTileRaw[i]=ncLoadFine(origin+vec3i(ncCorner(i,5u)));}
   for(var i=lane;i<240u;i+=64u){
     let a=i/80u;let r=i%80u;var q=origin;q[a]+=i32(r/16u);q[(a+1u)%3u]+=i32(r%4u);q[(a+2u)%3u]+=i32((r/4u)%4u);
-    cfFaces[i]=nbFacePlane(q,a);
+    var f=0.0;if(nbFaceInLattice(q,a)){f=nbFFace(q,a);}cfFaces[i]=f;
   }
 }
 // ncFace at the cell of local coordinate l with plane p along a (p = l[a] its low face, l[a] + 1 its high face).
