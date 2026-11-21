@@ -358,6 +358,41 @@ it bit for bit against the unchanged F_ALL path; its fixture has 7 such bricks.
   against one at 256 lanes) were slower: phiSolid +0.65, lAdvect +0.10 ms.
 - **lUnion's θ heats** staged once a brick (4096 tile reads to 125): 1.33 to 1.26 ms, inside noise; not kept.
 
+### 5.4 Solid handling, explored (2026-11-21)
+
+Census at step 300 (fluid-scratch/solid-explore: census.mts, leak.mts).
+
+- **Residency is solid-blind, but that costs almost nothing.**
+  - 1111 of 3745 F bricks are within 16 cells of liquid only through the glass. Through open cells only, 2442
+    remain. The seep has 122 of 1524 behind its dam, and letters has none.
+  - Nearly all of them are kept by the ring of an h tile.
+  - About 2700 h tiles behind the glass have φ of 2 to 8: the level set measures through the 2.6-cell wall. The
+    static need also crosses it (its one-tile reach, and a wet cut brick takes all 8 tiles).
+  - Diagnostics (pour-only analytic tests, reverted) removed this one cause at a time:
+    - ring bricks without an h or WANT tile beside them;
+    - the open-vertex wet test;
+    - no band outside the glass, after the deep keep as well;
+    - no static promotion outside the glass.
+
+    Only the last two together removed about 1000 behind-wall h tiles. F stayed at 3707, and the step was +1.6
+    to -0.8 ms, inside noise.
+  - The wall's cut bricks and their rings pin the residency, and dry bricks are cheap in every kernel. A
+    geodesic band and residency is a no-go on its ceiling.
+- **The NEAR_SOLID split is not the cost either.**
+  - 37% of particles go to pSolid, but only 11.6% are within 2 cells of the glass.
+  - pSolid runs about 7.7 ns a particle against pMove's 6.9. phiSolid's rate equals lAdvect's (§5.3).
+  - An exact per-brick clearance in place of ring 8 would gain about 0.2 ms.
+- **Compiling the solid paths out buys no registers.**
+  - Without the glass, the plain variant differs only in lAdvect, pMove, pSeed and project. Their caps are
+    384, 576, 576 and 704 (project 640 with the glass).
+  - uExtend, uAdvect, uTransfer and uCache are the same text either way.
+- **The one sizeable solid cost is the all-h cut brick.**
+  - 5520 of 11107 h tiles are in cut bricks. 1722 of them are air (every open vertex φ ≥ 4) and 489 deep liquid
+    (φ ≤ -4). Elsewhere only 219 air and 513 deep tiles are h.
+  - A composite operator that takes 4h tiles inside a wet cut brick would free about 2200 h tiles (20%). That
+    means cut faces with apertures at 4h, or the dry-row rule extended to wet bricks. It is a pressure
+    discretisation change.
+
 ## 6. Process
 
 Single agent (memory: single-agent-only). Commit verified milestones with
