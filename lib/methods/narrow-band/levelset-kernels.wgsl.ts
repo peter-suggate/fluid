@@ -663,17 +663,36 @@ ${stagedHead(0)}
   // cells of reach-1 tiles only (NONE elsewhere). Offsets are packed +8 in bytes. cfg.z is the y and z passes' loop
   // bound and a vector index: its range 0..2 is checked on the host (validateBrickStages), not clamped here.
   const lNearKernel = k("lNear", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, LS_WGSL.split("\n").filter(l => /lMaskBit|^ |^}/.test(l) || l.startsWith("fn lMaskBit")).join("\n")].join("\n") + /* wgsl */`
-fn lWord(region:u32,c:vec3i)->u32{if(!nbInWallBox(c)){return NB_NONE;}let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}return fcLoad(region+fgCell(s,c));}
+// A pass's taps (cell c + d along its axis, |d| <= 5, in the wall box) lie in the brick or a neighbour along the
+// axis: their three slots are staged once (lnSlot), as fgSlot gives them, in place of a directory walk a tap.
+var<workgroup> lnCount:u32;
+var<workgroup> lnSlot:array<u32,3>;
+var<private> lnAxis:u32;
+var<private> lnB:vec3i;
+fn lnSlotOf(c:vec3i)->u32{return lnSlot[u32((c[lnAxis]>>3u)-lnB[lnAxis]+1)];}
+fn lnMaskBit(c:vec3i)->bool{
+ if(!nbInWallBox(c)){return false;}
+ let s=lnSlotOf(c);if(s==NB_NONE){return false;}
+ let l=nbLocal(c);return ((fcLoad(FC_MASK+16u*s+(l>>5u))>>(l&31u))&1u)!=0u;
+}
+fn lWord(region:u32,c:vec3i)->u32{if(!nbInWallBox(c)){return NB_NONE;}let s=lnSlotOf(c);if(s==NB_NONE){return NB_NONE;}return fcLoad(region+fgCell(s,c));}
 fn lOff(w:u32,k:u32)->i32{return i32((w>>(8u*k))&255u)-8;}
-@compute @workgroup_size(256) fn lNear(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
+@compute @workgroup_size(256) fn lNear(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ let g=nbGroup(wid);
+ if(lid==0u){lnCount=nbListCount(NB_LIST_F_ALL);}
+ if(g>=workgroupUniformLoad(&lnCount)){return;}
+ let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
  let pz=cfg.z;
+ lnAxis=pz;lnB=o>>vec3u(3u);
+ if(lid<3u){var b=lnB;b[pz]+=i32(lid)-1;lnSlot[lid]=fgBrickSlot(b);}
+ workgroupBarrier();
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let c=o+nbLocalCoord(l);var out=NB_NONE;
   if(nbInWallBox(c)){
    if(pz==0u){
     for(var d=0;d<=5;d++){
-     if(lMaskBit(c-vec3i(d,0,0))){out=u32(8-d);break;}
-     if(lMaskBit(c+vec3i(d,0,0))){out=u32(8+d);break;}
+     if(lnMaskBit(c-vec3i(d,0,0))){out=u32(8-d);break;}
+     if(lnMaskBit(c+vec3i(d,0,0))){out=u32(8+d);break;}
     }
    }else{
     let a=pz;let fromW=select(FC_NEAR2,FC_NEAR,pz==1u);var best=0x7fffffff;
