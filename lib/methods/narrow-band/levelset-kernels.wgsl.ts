@@ -78,14 +78,15 @@ export function levelSetKernels(L: BrickLayout, F: FluidLayout, options: { reado
  let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_F_ALL)){return;}
  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);`;
   // The staged bases and head (seep S2c): the owner window (FG_SLOT_WINDOW_WGSL) and the vertex φ ring of n^3 from
-  // o + low (FG_RING_WGSL), staged once a brick before the formulas read them. Workgroup-uniform (sHead).
-  const staged = (n: number) => [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL(n), LS_WGSL, "var<workgroup> sHead:u32;"].join("\n");
-  const stagedHead = (low: number) => /* wgsl */`
+  // o + low (FG_RING_WGSL), staged once a brick before the formulas read them. Workgroup-uniform (sHead). With no ring
+  // (n = 0, low null) the taps read the resolved words directly (FG_PHI_RESOLVED; the module takes FG_NO_RING_WGSL).
+  const staged = (n: number) => [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, ...(n > 0 ? [FG_RING_WGSL(n)] : []), LS_WGSL, "var<workgroup> sHead:u32;"].join("\n");
+  const stagedHead = (low: number | null) => /* wgsl */`
  if(lid==0u){sHead=nbListCount(NB_LIST_F_ALL);}
  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&sHead)){return;}
  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
- fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();
- fgRingStage(o+vec3i(${low}),lid,256u);workgroupBarrier();`;
+ fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();${low === null ? "" : `
+ fgRingStage(o+vec3i(${low}),lid,256u);workgroupBarrier();`}`;
 
   const lInit = k("lInit", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], base + /* wgsl */`
 var<workgroup> sFresh:u32;
@@ -712,7 +713,7 @@ fn lOff(w:u32,k:u32)->i32{return i32((w>>(8u*k))&255u)-8;}
 }`);
 
   const lNear: BrickKernel = { ...lNearKernel, cfgZ: [0, 2] };
-  const lDistance = k("lDistance", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], [staged(12), nbfRedistanceWGSL].join("\n") + /* wgsl */`
+  const lDistance = k("lDistance", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], [staged(0), nbfRedistanceWGSL].join("\n") + /* wgsl */`
 // The (vertex, nearest crossing cell) pairs of a half brick (seep S2p's compaction): a lane lists its vertex's
 // distinct cells (lid | k << 8, k the first of the 8 cells about the vertex to name it), the lanes then run the
 // distances from the list into the vertex's minimum (atomicMin on the bits: every distance is a length, at least
@@ -727,7 +728,7 @@ fn dNear(c:vec3i)->u32{
  let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}
  return fcLoad(FC_NEAR+fgCell(s,c));
 }
-@compute @workgroup_size(256) fn lDistance(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${stagedHead(-2)}
+@compute @workgroup_size(256) fn lDistance(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${stagedHead(null)}
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let p=o+nbLocalCoord(l);
   let inReach=lVertexIn(p)&&fgReach2(lCellBelow(p));
