@@ -252,17 +252,27 @@ fn ncSmoothTile(lane:u32){
 }
 // umSurfaceDisplacement's corner Laplacian (uniform-mixed-dynamic.ts 907-916): a lane a (corner k, axis a) term, summed in axis order by
 // the corner's lane, so the sum and its rounding are the old loop's; 24 lanes instead of 8 lanes x 3 serial axes.
+// Its 48 neighbour corners (corner k, axis a, side) load first, one a lane (ncLapAt the vertex's φ, ncLapIn where
+// ncWidePresent holds), so no lane runs two of the dependent authority searches in series.
 var<workgroup> ncLapTerm:array<f32,24>;
 var<workgroup> ncLapUsed:array<u32,24>;
+var<workgroup> ncLapAt:array<f32,48>;
+var<workgroup> ncLapIn:array<u32,48>;
 fn ncCornerLaplacian(t:vec3i,lane:u32,held:array<f32,8>){
  let h=ncH();
+ if(lane<48u){
+  let k=lane/6u;let a=(lane/2u)%3u;var at=t+vec3i(ncCorner(k,2u));at[a]+=select(-1,1,(lane&1u)!=0u);
+  var value=0.0;var present=0u;
+  if(abs(held[k])<=2.0*h&&ncWidePresent(at)){value=ncLoadCorner(4*at);present=1u;}
+  ncLapAt[lane]=value;ncLapIn[lane]=present;
+ }
+ workgroupBarrier();
  if(lane<24u){
-  let k=lane/3u;let a=lane%3u;let kv=ncCorner(k,2u);let centre=held[k];
+  let k=lane/3u;let centre=held[k];
   var used=0u;var term=0.0;
   if(abs(centre)<=2.0*h){
-   var lo=t+vec3i(kv);lo[a]-=1;var hi=t+vec3i(kv);hi[a]+=1;
-   if(ncWidePresent(lo)&&ncWidePresent(hi)){
-    let below=ncLoadCorner(4*lo);let above=ncLoadCorner(4*hi);
+   let below=ncLapAt[2u*lane];let above=ncLapAt[2u*lane+1u];
+   if(ncLapIn[2u*lane]!=0u&&ncLapIn[2u*lane+1u]!=0u){
     if(!(abs(below-centre)>6.0*h||abs(above-centre)>6.0*h)){used=1u;term=above-2.0*centre+below;}
    }
   }
