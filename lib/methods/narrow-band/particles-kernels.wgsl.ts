@@ -227,6 +227,8 @@ fn pFile(i:u32,p:Particle,split:bool){
  if(!nbLive(p)){return;}
  if(cfg.z==1u){pFile(i,p,false);return;}
  var q=p.position.xyz;
+ // pSeparate's shift for this record (a merged record, whose position and mass change below, takes its own).
+ let sep=fmoved[i].position.xyz;var merged=false;
  // R1: a record whose tile was 4h-owned at the last two rebins (TILE_OCC bits 16 and 24 + tile, pScan) and is
  // 4h-owned at this head retires: its tile has had two 4h steps (the 4h transfer gathered it), and the 4h φ, not the
  // records, carries the tile's liquid. The two heads are the census hysteresis's window (coordinator 2026-11-16): a
@@ -252,7 +254,7 @@ fn pFile(i:u32,p:Particle,split:bool){
     if(i>=end){return;}
    }
    if(deep< -1.0&&end-start>cap){
-    if(i-start<cap){p=pMergeRun(src,p,i+cap,end,cap);q=p.position.xyz;}
+    if(i-start<cap){p=pMergeRun(src,p,i+cap,end,cap);q=p.position.xyz;merged=true;}
     else if(pMergeAbsorbed(src,start,i,cap)){return;}
    }
   }
@@ -282,7 +284,7 @@ fn pFile(i:u32,p:Particle,split:bool){
   let k1=nbfHeunK1(pic,h);let x1=nbfHeunStage1(q,k1,dt);
   let x2=nbfHeunStage2(q,fgSampleVel(x1,0u,3u),dt,h);
   end=nbfHeunEnd(q,k1,fgSampleVel(x2,0u,3u),dt,h);
-  end+=pSurfaceShift(q,pSeparation(src,i,q,m));
+  if(merged){end+=pSurfaceShift(q,pSeparation(src,i,q,m));}else{end+=sep;}
  }
  if(!nbfFinite(end,1e30)){pFatal(2u,i);return;}
  let endpoint=nbfBoxEndpoint(end,vec3f(0.0),vec3f(NB_WALL_BOX),nbSampleRadius(m));
@@ -301,6 +303,44 @@ fn pFile(i:u32,p:Particle,split:bool){
  }
  pFile(i,p,split);
 }`;
+  // pSeparate (pour's separate pass, fissioned from pMove): the separation and its surface shift of every live record
+  // the move takes through the Heun rule (mode 0, supported), at its pre-move position and mass, into fmoved[i]'s
+  // position (pMove files fmoved[i] last; pScatter reads only filed records). pSeparation's arithmetic in its order,
+  // in a lean kernel: inside pMove the 8 runs' neighbour scan ran at pMove's register cap (576, 18% occupancy) and
+  // was 1.8 of its 2.9 ms on the pour. A record merged in the move changes position and mass: it takes its own.
+  // Frozen pour state at step 300: pMove + pSolid 4.46 to 4.12 ms with pSeparate, every filed record bit for bit (the
+  // seep's too). Tried slower: the 8 runs read into a private array first (2.55 against 2.07 ms), and the 2^3 bricks'
+  // slots cached a lane in workgroup memory (2.5): the directory's reads already hit the cache.
+  const pMoveHelpers = pMoveCode.slice(0, pMoveCode.indexOf("@compute @workgroup_size(128) fn pMove("));
+  const pSeparate = k("pSeparate", pMoveBindings, pMoveHelpers + /* wgsl */`
+// pSeparation's sum in its order (cells in c order, a run's records in order), two records a pass with both loads in
+// flight.
+// nbParticleMass from the record's before.w alone (only its position and that word are read).
+fn sepMass(w:f32)->f32{return f32((bitcast<u32>(w)&7u)+1u);}
+fn sepSum(src:u32,i:u32,q:vec3f,m:f32)->vec3f{
+ let base=nbfSeparationBase(q);let far=nbfSeparationFar(m);var acc=vec4f(0.0);
+ for(var c=0u;c<8u;c++){
+  let r=fgRun(base+vec3i(i32(c&1u),i32((c>>1u)&1u),i32(c>>2u)));
+  var j=r.x;
+  for(;j+1u<r.y;j+=2u){
+   let ja=pAt(src,j);let jb=pAt(src,j+1u);let a=parts[ja].position;let b=parts[jb].position;
+   if(j!=i&&a.w>0.0){acc=nbfSeparationAdd(acc,q,m,far,a.xyz,sepMass(parts[ja].before.w));}
+   if(j+1u!=i&&b.w>0.0){acc=nbfSeparationAdd(acc,q,m,far,b.xyz,sepMass(parts[jb].before.w));}
+  }
+  if(j<r.y&&j!=i){let ja=pAt(src,j);let a=parts[ja].position;if(a.w>0.0){acc=nbfSeparationAdd(acc,q,m,far,a.xyz,sepMass(parts[ja].before.w));}}
+ }
+ return nbfSeparationFinish(acc);
+}
+@compute @workgroup_size(128) fn pSeparate(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ let src=pSrc();let i=nbGroup(wid)*128u+lid;
+ let n=min(atomicLoad(&nbSet[NB_H_PCOUNT0+src]),NB_PCAP);
+ if(i>=n||cfg.z==1u){return;}
+ let p=parts[pAt(src,i)];
+ if(!nbLive(p)||nbParticleMode(p)==1.0){return;}
+ let q=p.position.xyz;
+ if(!pSupported(q)){return;}
+ fmoved[i].position=vec4f(pSurfaceShift(q,sepSum(src,i,q,nbParticleMass(p))),0.0);
+}`);
   // Statics (lane E, brick-solid-walk.wgsl.ts): pMove defers a NEAR_SOLID brick's records to pSolid, which moves them
   // with pMove's text and the solid walk.
   const pMove = k("pMove", pMoveBindings, statics ? BRICK_SOLID_PARTICLE_WGSL + brickMoveDeferWGSL(pMoveCode) : pMoveCode);
@@ -688,5 +728,5 @@ fn pJoinTile(t:vec3i){
  args[${P_ARGS_RECORDS}u]=min(g,NB_FOLD);args[${P_ARGS_RECORDS + 1}u]=max((g+NB_FOLD-1u)/NB_FOLD,1u);args[${P_ARGS_RECORDS + 2}u]=1u;
 }`);
 
-  return { pLiquid, pMove, ...(pSolid ? { pSolid } : {}), pScan, pScatter, pTiles, pSeed, pDelta, pJoin, pArgs };
+  return { pLiquid, pSeparate, pMove, ...(pSolid ? { pSolid } : {}), pScan, pScatter, pTiles, pSeed, pDelta, pJoin, pArgs };
 }

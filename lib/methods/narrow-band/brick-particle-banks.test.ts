@@ -35,7 +35,10 @@ test("every move is preceded by its own arguments (pArgs, w even, the same z), w
     for (const list of [stages.move, stages.kick?.seed ?? []]) for (let i = 0; i < list.length; i++) {
       if (label(list[i]!) !== "pMove") continue;
       moves++;
-      const before = list[i - 1];
+      // The step's move reads pSeparate's shifts, dispatched over the same arguments just before it.
+      const sep = list[i - 1] && label(list[i - 1]!) === "pSeparate";
+      if (list === stages.move) assert.ok(sep, `tiered ${tiered}: the step's pMove follows pSeparate`);
+      const before = list[i - (sep ? 2 : 1)];
       assert.ok(before && label(before) === "pArgs", `tiered ${tiered}: pMove at ${i} follows ${before ? label(before) : "nothing"}, not pArgs`);
       assert.equal((before.w ?? 0) & 1, 0, `tiered ${tiered}: the move's pArgs is a move's arguments (w even)`);
       assert.equal(before.z ?? 0, list[i]!.z ?? 0, `tiered ${tiered}: the move's pArgs reads the move's banks`);
