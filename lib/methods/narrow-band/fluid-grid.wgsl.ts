@@ -212,10 +212,16 @@ const cutFunction = (code: string, name: string) => {
 const FO_WIN_COARSE = cutFunction(FO_TILE_RAW, "foVertexCoarse");
 if (!FO_WIN_COARSE.includes(FO_COARSE_RULE)) throw new Error("fluid-grid: brickOwnerWGSL's foVertexCoarse tile rule changed shape");
 const FO_WIN_PHI = cutFunction(FO_PHI_PART, "foVertexPhi");
-if (!FO_WIN_PHI.includes("foVertexCoarse(v)")) throw new Error("fluid-grid: brickOwnerWGSL's foVertexPhi changed shape");
+if (!FO_WIN_PHI.includes("fn foVertexPhi(v:vec3i)") || !FO_WIN_PHI.includes("let T=foVertexCoarse(v);")) throw new Error("fluid-grid: brickOwnerWGSL's foVertexPhi changed shape");
 const FG_WIN_VERTEX_WGSL = FO_WIN_COARSE.replace("fn foVertexCoarse", "fn fgWinVertexCoarse").replace(FO_COARSE_RULE, "if(fgWinCoarseBit(fgWinTileAt(t))!=0u){return t;}")
   + FO_WIN_PHI.replace("fn foVertexPhi", "fn fgWinVertexPhi").replace("foVertexCoarse(v)", "fgWinVertexCoarse(v)")
   + FO_WIN_PHI.replace("fn foVertexPhi", "fn fgWin1VertexPhi").replace("foVertexCoarse(v)", "fgWinVertexCoarse(v)").replace(/\bfo(CVertex|FVertex)\b/g, "fo1$1");
+/** fgWinVertexPhi with its authority T given (the caller's fgWinVertexCoarse: one walk serves the owner test and the
+ * read) and the C vertices read through lrCVertex, the caller's stage of them (lResolve): the same candidates, weights
+ * and sum as fgWinVertexPhi. */
+export const FG_WIN_VERTEX_PHI_AT_WGSL = FO_WIN_PHI.replace("fn foVertexPhi(v:vec3i)", "fn fgWinVertexPhiAt(v:vec3i,T:vec3i)")
+  .replace("let T=foVertexCoarse(v);", "").replace("foCVertex(", "lrCVertex(");
+if ((FG_WIN_VERTEX_PHI_AT_WGSL.match(/lrCVertex\(/g) ?? []).length !== 1 || FG_WIN_VERTEX_PHI_AT_WGSL.includes("foCVertex(")) throw new Error("fluid-grid: foVertexPhi's C reads changed shape");
 const foFaces = (prefix: string, ch: string) => ownerReads(cutOwner(brickOwnerWGSL({ phi: "phi", vel: "vel", prefix, faceF: `NB_VEL_F_${ch}0`, faceC: `NB_VEL_C_${ch}0`, box: BOX_TOKEN }), `fn ${prefix}CFace`)
   .replace(new RegExp(`\\b${prefix}(TileInLattice|TileIndex|TileOwnerH|CellOwnerH)\\b`, "g"), "fo$1"));
 const FO_VEL_WGSL = [foFaces("foU", "U"), foFaces("foP", "UP"), foFaces("foS", "US")].join("\n");

@@ -33,7 +33,7 @@
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
-import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
+import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, FG_WIN_VERTEX_PHI_AT_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 import { CENSUS } from "./brick-census.wgsl";
@@ -769,14 +769,36 @@ fn dNear(c:vec3i)->u32{
   // window's fgPhi through the owner (FG_PHI_OWNER_WGSL), in the slot's PHI word, so fgPhiWord reads them as plain
   // loads (fluid-grid.wgsl.ts FG_PHI_WGSL). A non-owned vertex reads only C vertices, which no lane writes here; the
   // stores follow every lane's reads. Placed after each writer of what the values depend on (brick-fluid-stages.ts).
-  const lResolve = F.tiered ? k("lResolve", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, LS_WGSL, "var<workgroup> sHead:u32;"].join("\n") + /* wgsl */`
+  // The C vertices a non-owned vertex of the brick at o = 8B reads: its authority lies in tiles 2B-1..2B+1, so their
+  // corners in 2B-1..2B+2 (4^3), staged once in place of eight reads a vertex (a 4h tile's 64 vertices read the same
+  // eight).
+  const LR_STAGE_WGSL = /* wgsl */`
+var<workgroup> lrCV:array<f32,64>;
+var<private> lrLow:vec3i;
+fn lrStage(o:vec3i,lid:u32){
+ lrLow=(o>>vec3u(2u))-vec3i(1);
+ if(lid<64u){lrCV[lid]=foCVertex(lrLow+vec3i(i32(lid&3u),i32((lid>>2u)&3u),i32(lid>>4u)));}
+ workgroupBarrier();
+}
+fn lrCVertex(T:vec3i)->f32{
+ let r=vec3u(T-lrLow);if(all(r<vec3u(4u))){return lrCV[r.x+4u*(r.y+4u*r.z)];}
+ return foCVertex(T);
+}
+` + FG_WIN_VERTEX_PHI_AT_WGSL;
+  const lResolve = F.tiered ? k("lResolve", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, LS_WGSL, "var<workgroup> sHead:u32;", LR_STAGE_WGSL].join("\n") + /* wgsl */`
 @compute @workgroup_size(256) fn lResolve(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  if(lid==0u){sHead=nbListCount(NB_LIST_F_ALL);}
  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&sHead)){return;}
  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
  fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();
  var x:array<f32,2>;var w:array<bool,2>;
- for(var r=0u;r<2u;r++){let v=o+nbLocalCoord(lid+256u*r);w[r]=all(v<=NB_LATTICE)&&!fgVertexOwned(v);if(w[r]){x[r]=fgPhi(v);}}
+ // A vertex of the brick lies in the window (fgWinCovers), so fgVertexOwned's walk is fgWinVertexCoarse's on the
+ // staged bits, and its tile T is the one fgPhi's fgWinVertexPhi finds: one walk serves both.
+ lrStage(o,lid);
+ for(var r=0u;r<2u;r++){
+  let v=o+nbLocalCoord(lid+256u*r);w[r]=false;
+  if(all(v<=NB_LATTICE)){let T=fgWinVertexCoarse(v);if(T.x>=0){w[r]=true;x[r]=fgWinVertexPhiAt(v,T);}}
+ }
  for(var r=0u;r<2u;r++){if(w[r]){phi[NB_PHI_F_PHI+NB_STRIDE*slot+lid+256u*r]=bitcast<u32>(x[r]);}}
 }`) : undefined;
   // lResolveD (tiered): lResolve after the analysis's clear, for the slots whose resolved words the clear can have
@@ -784,7 +806,7 @@ fn dNear(c:vec3i)->u32{
   // ownership, so a non-owned vertex's value changes only where lClear rewrote it (its slot's stamp) or lcClear one of
   // the C vertices it reads (the corners of a tile within one of its own, x in o-4..o+8: the stamps of at most 2^3
   // pages). Every other slot's words already hold their resolve, and it leaves before the window stage.
-  const lResolveD = F.tiered ? k("lResolveD", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, LS_WGSL, "var<workgroup> sHead:u32;\nvar<workgroup> sAny:atomic<u32>;\nvar<workgroup> sDirty:u32;"].join("\n") + /* wgsl */`
+  const lResolveD = F.tiered ? k("lResolveD", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, LS_WGSL, LR_STAGE_WGSL, "var<workgroup> sHead:u32;\nvar<workgroup> sAny:atomic<u32>;\nvar<workgroup> sDirty:u32;"].join("\n") + /* wgsl */`
 @compute @workgroup_size(256) fn lResolveD(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  if(lid==0u){sHead=nbListCount(NB_LIST_F_ALL);}
  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&sHead)){return;}
@@ -800,7 +822,13 @@ fn dNear(c:vec3i)->u32{
  if(workgroupUniformLoad(&sDirty)==0u){return;}
  fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();
  var x:array<f32,2>;var w:array<bool,2>;
- for(var r=0u;r<2u;r++){let v=o+nbLocalCoord(lid+256u*r);w[r]=all(v<=NB_LATTICE)&&!fgVertexOwned(v);if(w[r]){x[r]=fgPhi(v);}}
+ // A vertex of the brick lies in the window (fgWinCovers), so fgVertexOwned's walk is fgWinVertexCoarse's on the
+ // staged bits, and its tile T is the one fgPhi's fgWinVertexPhi finds: one walk serves both.
+ lrStage(o,lid);
+ for(var r=0u;r<2u;r++){
+  let v=o+nbLocalCoord(lid+256u*r);w[r]=false;
+  if(all(v<=NB_LATTICE)){let T=fgWinVertexCoarse(v);if(T.x>=0){w[r]=true;x[r]=fgWinVertexPhiAt(v,T);}}
+ }
  for(var r=0u;r<2u;r++){if(w[r]){phi[NB_PHI_F_PHI+NB_STRIDE*slot+lid+256u*r]=bitcast<u32>(x[r]);}}
 }`) : undefined;
   // lWall (BrickLayout.wallView: a scene with terrain or a procedural boundary): the grid's view of the liquid at the
