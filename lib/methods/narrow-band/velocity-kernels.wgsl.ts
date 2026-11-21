@@ -85,16 +85,17 @@ const V_RING_WGSL = /* wgsl */`
 // A ring brick (tiered): no face of the brick at o is F's (fgFaceOwned: an h-owned cell either side), since none of
 // its eight tiles and none of the tiles below its three lower planes is h-owned. Its F faces are never read (the
 // readers take the 4h interpolation where neither side is h-owned), so the velocity kernels do no face work there.
-fn vRingBrick(o:vec3i)->bool{
- if(!FG_TIERED){return false;}
- let t0=o>>vec3u(2u);
- for(var k=0u;k<8u;k++){if(foTileOwnerH(t0+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)))){return false;}}
- for(var a=0u;a<3u;a++){for(var k=0u;k<4u;k++){
-  var t=t0;let u=(a+1u)%3u;let w=(a+2u)%3u;t[a]-=1;t[u]+=i32(k&1u);t[w]+=i32(k>>1u);
-  if(foTileOwnerH(t)){return false;}
- }}
- return true;
+// The test runs across lanes (vRingMark: lane k < 20 the k-th of those twenty tiles, any h-owned one ORed into
+// sRingOwned), then, after a barrier, vRingOf reads it: lane 0 alone walked up to twenty dependent owner reads while
+// the workgroup waited (0.2 ms of uExtend's head on the pour).
+fn vRingTile(t0:vec3i,k:u32)->vec3i{
+ if(k<8u){return t0+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}
+ let a=(k-8u)/4u;let j=(k-8u)%4u;var t=t0;t[a]-=1;t[(a+1u)%3u]+=i32(j&1u);t[(a+2u)%3u]+=i32(j>>1u);
+ return t;
 }
+var<workgroup> sRingOwned:atomic<u32>;
+fn vRingMark(o:vec3i,lid:u32,on:bool){if(FG_TIERED&&on&&lid<20u&&foTileOwnerH(vRingTile(o>>vec3u(2u),lid))){atomicOr(&sRingOwned,1u);}}
+fn vRingOf(on:bool)->bool{return FG_TIERED&&on&&atomicLoad(&sRingOwned)==0u;}
 var<workgroup> sRing:u32;
 `;
 /** Surface tension's owners (nbfTensionWGSL's hooks; needs FG_PHI_WGSL and V_COARSE_WGSL): the old engine's owner
@@ -408,7 +409,8 @@ fn vLiveF(c:vec3i)->bool{
   }
  }
 ${stagedHead("vcAdvectPageOf", -1, A_LANES)}
- if(lid==0u){sRing=select(0u,1u,vRingBrick(o));}
+ vRingMark(o,lid,true);workgroupBarrier();
+ if(lid==0u){sRing=select(0u,1u,vRingOf(true));}
  if(workgroupUniformLoad(&sRing)!=0u&&g!=0u){return;}
  vLive4Low=(o>>vec3u(2u))-vec3i(1);
  if(FG_TIERED&&lid<27u){let T=vLive4Low+vec3i(i32(lid%3u),i32((lid/3u)%3u),i32(lid/9u));wLive4[lid]=select(0u,1u,!foCellOwnerH(4*T)&&vLive4(T));}
@@ -622,7 +624,8 @@ var<workgroup> sSplit:u32;
 ${stagedHead("vcTransferPage", -1)}
  let live=true;tOrigin=o;tLow=(tOrigin>>vec3u(2u))-vec3i(2);
  // A ring brick only clears its deposit (and stores its FC_LIQ words).
- if(lid==0u){sRing=select(0u,1u,vRingBrick(o));}
+ vRingMark(o,lid,true);workgroupBarrier();
+ if(lid==0u){sRing=select(0u,1u,vRingOf(true));}
  if(workgroupUniformLoad(&sRing)!=0u){
   vCentreStage(tOrigin,lid);workgroupBarrier();vLiquidStore(slot,o,lid);
   for(var j=lid;j<3072u;j+=256u){_=tDepositWord(6u*512u*slot+j);}
@@ -928,7 +931,8 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);}
  // A ring brick writes no face (the finish writes F's faces only), and a workgroup past the list holds no brick:
  // neither stages the window nor sweeps, so it leaves before the window stage.
- if(lid==0u){sRing=select(0u,1u,!live||vRingBrick(o));}
+ vRingMark(o,lid,live);workgroupBarrier();
+ if(lid==0u){sRing=select(0u,1u,!live||vRingOf(live));}
  if(workgroupUniformLoad(&sRing)!=0u){return;}
  let h=vH();let l=lid;let c=o+nbLocalCoord(l);
  xLow=o-vec3i(3);xBase4=o>>vec3u(2u);xBrick=o>>vec3u(3u);
