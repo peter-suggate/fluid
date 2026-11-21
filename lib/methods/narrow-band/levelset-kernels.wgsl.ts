@@ -296,8 +296,8 @@ fn lTileReach(t:vec3i)->u32{
  if(cs==NB_NONE||nbSetWord(NB_S_REACH_STEP+cs)!=nbRing(cfg.x,NB_RING_STEP)+1u){return 0x3fffffffu;}
  return nbSetWord(NB_S_REACH1+512u*cs+foTileIndex(t))&0x3fffffffu;
 }
-fn lUnionAt(v:vec3i,dt:f32,h:f32)->f32{
- let advected=lPhi1(v);
+// advected: v's PHI1 word, which is lPhi1(v) at an owned vertex (lUnion runs only those).
+fn lUnionAt(v:vec3i,dt:f32,h:f32,advected:f32)->f32{
  lHome=max(v-vec3i(1),vec3i(0))>>vec3u(2u);
  let theta=nbfCoupleTheta(v-4*lHome,false);
  if(theta<=0.0){return advected;}
@@ -341,9 +341,11 @@ fn lUnionAt(v:vec3i,dt:f32,h:f32)->f32{
  let dt=lDt();let h=nbRingF(cfg.x,NB_RING_H);
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let v=o+nbLocalCoord(l);
+  // Tiered, a vertex F does not own is not written (lSetPhi's rule), so it computes nothing.
+  if(FG_TIERED&&!fgVertexOwned(v)){continue;}
   var value=bitcast<f32>(phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]);
-  if(lVertexIn(v)){value=lUnionAt(v,dt,h);}
-  lSetPhi(NB_PHI_F_PHI,slot,l,value);
+  if(lVertexIn(v)){value=lUnionAt(v,dt,h,value);}
+  phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]=bitcast<u32>(value);
  }
 }`);
 
