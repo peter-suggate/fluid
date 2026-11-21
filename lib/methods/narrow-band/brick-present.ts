@@ -78,20 +78,25 @@ fn presentNear(b:vec3i)->bool{
 }
 `;
 
-const WGSL_VERTICES = (L: BrickLayout, cells: readonly number[]) => COMMON(L, cells) + brickOwnerWGSL({ phi: "phi", vel: "vel", box: boxWGSL(L) }) + /* wgsl */`
+const WGSL_VERTICES = (L: BrickLayout, cells: readonly number[], directF: boolean) => COMMON(L, cells) + brickOwnerWGSL({ phi: "phi", vel: "vel", box: boxWGSL(L) }) + /* wgsl */`
 @group(0) @binding(6) var vertexPhi:texture_storage_3d<r32float,write>;
 var<workgroup> presentState:u32;
+var<workgroup> presentSlot:u32;
 @compute @workgroup_size(64) fn presentVertices(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let b=vec3i(wid);let edge=any(b>=NB_PRESENT_BRICKS);
   // The extra layer past the upper faces holds only the vertex row N: always written (a 2D shell of workgroups).
-  if(lid==0u){presentState=select(select(0u,1u,presentNear(b))|select(0u,2u,shown[presentIndex(b)]!=0u),1u,edge);}
-  let state=workgroupUniformLoad(&presentState);let held=(state&1u)!=0u;
+  if(lid==0u){
+    presentState=select(select(0u,1u,presentNear(b))|select(0u,2u,shown[presentIndex(b)]!=0u),1u,edge);
+    // ${directF ? "A brick an F slot holds reads its PHI words: each is nbVertexPhi's value, the owned vertices F's own and the others lResolve's (the step's last PHI writer before it is lcPublish, and lResolve follows; brick-fluid-stages.ts)." : "Every vertex through nbVertexPhi."}
+    presentSlot=NB_NONE;${directF ? "if(!edge){let s=nbFSlotOfBrick(b);if(s<NB_SEAM){presentSlot=s;}}" : ""}
+  }
+  let state=workgroupUniformLoad(&presentState);let held=(state&1u)!=0u;let fs=workgroupUniformLoad(&presentSlot);
   if(state==0u){return;}
   for(var j=0u;j<8u;j++){
     let v=8*b+nbLocalCoord(lid+64u*j);
     if(any(v>NB_PRESENT_CELLS)){continue;}
     var p=params.far_m;
-    if(held){let q=nbVertexPhi(v);if(q<NB_PHI_AIR_C){p=q*params.h_m;}}
+    if(held){var q=0.0;if(fs!=NB_NONE){q=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*fs+nbLocal(v)]);}else{q=nbVertexPhi(v);}if(q<NB_PHI_AIR_C){p=q*params.h_m;}}
     textureStore(vertexPhi,v,vec4f(p,0.0,0.0,0.0));
   }
 }`;
@@ -169,7 +174,8 @@ export class BrickPresentation {
   }
 
   /** `cells`: the presented cells from the lattice's corner (default the lattice), at most the lattice an axis. */
-  static async create(engine: BrickEngine, far_m: number, cells: readonly number[] = engine.layout.lattice): Promise<BrickPresentation> {
+  /** `directF` false reads every vertex through nbVertexPhi (the reference the direct read is checked against). */
+  static async create(engine: BrickEngine, far_m: number, cells: readonly number[] = engine.layout.lattice, directF = true): Promise<BrickPresentation> {
     if (!(far_m >= PHI_AIR * engine.options.h_m)) throw new Error(`Brick presentation: far phi ${far_m} m must be at least the band's air value`);
     if (engine.layout.lattice.some(v => v % 8 !== 0)) throw new Error(`Brick presentation: the lattice ${engine.layout.lattice.join("x")} is not whole bricks`);
     if (cells.length !== 3 || cells.some((n, a) => !Number.isInteger(n) || n < 1 || n > engine.layout.lattice[a]!)) throw new Error(`Brick presentation: the presented cells ${cells.join("x")} are not within the lattice ${engine.layout.lattice.join("x")}`);
@@ -189,7 +195,7 @@ export class BrickPresentation {
     const layouts = [
       d.createBindGroupLayout({ label: "nb-brick.presentVertices", entries: [...shared, storage(6)] }),
       d.createBindGroupLayout({ label: "nb-brick.presentVolume", entries: [...shared, { binding: 6, visibility: B, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }, storage(7)] })] as const;
-    const [vertices, volume] = await Promise.all([compile("nb-brick.presentVertices", WGSL_VERTICES(engine.layout, cells)), compile("nb-brick.presentVolume", WGSL_VOLUME(engine.layout, cells))]);
+    const [vertices, volume] = await Promise.all([compile("nb-brick.presentVertices", WGSL_VERTICES(engine.layout, cells, directF)), compile("nb-brick.presentVolume", WGSL_VOLUME(engine.layout, cells))]);
     const pipelines = await Promise.all([
       d.createComputePipelineAsync({ label: "nb-brick.presentVertices", layout: d.createPipelineLayout({ bindGroupLayouts: [layouts[0]] }), compute: { module: vertices, entryPoint: "presentVertices" } }),
       d.createComputePipelineAsync({ label: "nb-brick.presentVolume", layout: d.createPipelineLayout({ bindGroupLayouts: [layouts[1]] }), compute: { module: volume, entryPoint: "presentVolume" } })]);
