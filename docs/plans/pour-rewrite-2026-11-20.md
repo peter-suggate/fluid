@@ -437,6 +437,43 @@ general kernel deferring the rest. Three tests bound it (fluid-scratch/solid-exp
   first barrier are therefore exposed latency. Any gain has to come from making those paths cheaper in every
   brick, not from skipping them in plain bricks.
 
+### 5.6 Fixed-state attribution, then exact skips (2026-11-21)
+
+The method:
+- A frozen state at pour step 300 is the baseline (fluid-scratch/solid-explore/fixstate.mts).
+- Inexact text variants each remove one path, which locates a kernel's hot work.
+- The exact change is checked on the pour's and the seep's frozen states, then the gates are run:
+  - fixsep.mts compares records bit for bit;
+  - fixseed.mts compares bank multisets and set words;
+  - fixeq.mts compares buffers word for word.
+
+Landed:
+
+| Commit | Change | Frozen-state result |
+|---|---|---|
+| 395a590b | pSeparate: the separation fissioned out of pMove. It was 1.8 of pMove's 2.9 ms: 64 neighbour reads per record, at pMove's 576 cap. | pMove + pSolid 4.46 to 4.12 ms. Profile: pMove 2.75 to 1.35 ms, pSolid 1.80 to 0.94, pSeparate 1.74. |
+| 1c23d844 | pSeed's site loop skips tests that cannot pass. psSeam takes a staged coarse-tile pre-test. A covered shallow cell tests the source first and seeds nothing without a source. | 3.08 to 2.49 ms (profile 2.88 to 2.12). |
+| 73df23a8 | uTransfer reads and clears its deposit words plain. The returning atomicExchange was 0.67 ms. Atomic load then store was slower, at 4.85 ms. | 3.65 to 3.40 ms. |
+
+- Pour profile 301–325: 66.27 to 64.21 ms GPU.
+- Gates:
+  - seep 300 drift +0.124% and +0.137%;
+  - letters 120 drift +0.49% and +0.44%.
+
+Tried and slower:
+- reading the separation's 8 runs into a private array first: 2.55 against 2.07 ms;
+- caching a lane's 2³ brick slots in workgroup memory: 2.5 ms, because the directory's reads already hit the cache.
+
+Attributed, not yet changed:
+
+| Kernel | Total (ms) | Attribution |
+|---|---|---|
+| uExtend | 4.3 | seed fill 1.56, Jacobi 0.7, S4 stage 0.47 |
+| uTransfer | 3.4 | C pages 0.75; the staging is the rest, with no single hot path |
+| censusFine | 2.5 | ncSurfaceDisplacement 0.88 |
+
+uExtend's seed fill is inherent to the 12³ window that two sweeps need. Only the cells within L1 distance 2 of the brick are read, so about 20% of the seeds could be skipped.
+
 ## 6. Process
 
 Single agent (memory: single-agent-only). Commit verified milestones with
