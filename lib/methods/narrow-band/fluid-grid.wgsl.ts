@@ -492,11 +492,23 @@ fn fsCacheOf(T:vec3i,a:u32,raw:bool)->f32{if(raw){return fsCacheRawStaged(T,a);}
 // Corner k of a trilinear has weight 0 where it lies on the far side of an axis whose fraction is 0: its tap is not
 // read. fsLerp8 then adds 0 * 0 where it added 0 * v (v finite), equal up to the sign of a zero sum.
 fn fsZeroWeight(z:vec3<bool>,k:u32)->bool{return any(z&(fsBit(k)==vec3i(1)));}
-// The coarse interpolant at p.
+// The coarse interpolant at p. Its taps' tiles (fsCache's, held) lie between the held b and b + 1; where those share
+// a page, one C slot serves all eight (fsFine's one lookup): eight lookups set uAdvect's register peak (Metal's cap
+// 704 threads, two 256-lane workgroups a core, against 768 with this).
 fn fsCoarse(p:vec3f,a:u32)->f32{
  var off=vec3f(0.5);off[a]=0.0;
  let q=p/4.0-off;let b=vec3i(floor(q));let f=q-vec3f(b);var v:array<f32,8>;let z=f==vec3f(0.0);
- for(var k=0u;k<8u;k++){if(fsZeroWeight(z,k)){v[k]=0.0;continue;}v[k]=fsCache(b+fsBit(k),a);}
+ var hi=(NB_WALL_BOX>>vec3u(2u))-vec3i(1);hi[a]+=1;
+ let t0=clamp(b,vec3i(0),hi);let t1=clamp(b+vec3i(1),vec3i(0),hi);
+ if(all((t0>>vec3u(3u))==(t1>>vec3u(3u)))){
+  let cs=fgTileCSlot(t0);
+  for(var k=0u;k<8u;k++){
+   if(fsZeroWeight(z,k)){v[k]=0.0;continue;}
+   let t=clamp(b+fsBit(k),vec3i(0),hi);
+   if(!fgFaceOpen(4*t,a)||cs==NB_NONE){v[k]=0.0;continue;}
+   v[k]=fcLoadF(FC_CACHE4+512u*(3u*cs+a)+foTileIndex(t));
+  }
+ }else{for(var k=0u;k<8u;k++){if(fsZeroWeight(z,k)){v[k]=0.0;continue;}v[k]=fsCache(b+fsBit(k),a);}}
  return fsLerp8(v,f);
 }
 // The 4h cache's trilinear at the h face (c, a): in eighths of a tile, 2c - 3 across and 2c along.

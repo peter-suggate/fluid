@@ -309,14 +309,20 @@ Occupancy elasticity is about 0.6: +33% resident threads gave -17% to -23%. A re
 kernels is therefore worth perhaps 4–6 ms of 69, kernel by kernel, each an exact fission, and only where the
 split-off path is rare in every scene. The other 2x, instructions a cell, is the generality itself.
 
-**Granularity (2026-11-21).** A core holds whole workgroups, so a register cap pays only when it crosses a
-multiple of the workgroup size. uExtend's cap went 640 to 768 by moving its seed's coarse face read (foUFaceU)
-out of the seed loop, and the time didn't move (4.45 to 4.40 ms): a 512-lane workgroup needs 1024 for a second
-one a core. For 256-lane kernels the steps are 512, 768 and 1024. The candidates just under a step:
+**What a cap buys (2026-11-21).** Caps are now measured on the kernels as built from source (brick-tune
+`dumpk.mts`: the engine's pipelines' WGSL, then `regcap.sh`), not on edited dumps. A higher cap paid off for
+256-lane kernels:
 
-- project at 448 (one workgroup a core);
-- lAdvect at 384;
-- uAdvect at 704.
+- project, 448 to 640: 3.00 to 1.59 ms, occupancy 13.9 to 19.7%;
+- uAdvect, 704 to 768: 3.57–3.64 to 3.32–3.36 ms, occupancy 20.1 to 20.6%.
+
+It paid nothing for uExtend at 512 lanes: 640 to 768 (moving its seed's coarse face read out of the seed loop)
+measured 4.45 and 4.47 ms, twice. Its 22.7 KB of workgroup memory most likely holds it to one workgroup a core
+whatever the registers. Packing uAdvect's 6 KB trace list two entries a word changed nothing either.
+
+The uAdvect change (fsCoarse: one C slot for its eight taps where they share a page, as fsFine) is exact and
+general, and lifts no other kernel's cap. The seep's GPU work is about 1.6 ms a step, so its pipelined step time
+(26.8–27.7 ms) is host-bound and these kernels cannot move it.
 
 **project landed (exact).** Its peak was poProjectFace (npBandFace), reached only by a dry seam face: a dry h side
 facing a resident wet 4h tile. projectF now flags the brick and skips those faces, and projectDry (64 lanes, over
