@@ -151,15 +151,21 @@ export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindi
   };
 }
 
-const FG_NO_RING_WGSL = "fn fgRingAt(v:vec3i)->u32{return NB_NONE;}\nfn fgRingPhi(i:u32)->f32{return 0.0;}";
+const FG_NO_RING_WGSL = "const FG_RING_STRICT:bool=false;\nfn fgRingAt(v:vec3i)->u32{return NB_NONE;}\nfn fgRingPhi(i:u32)->f32{return 0.0;}";
 
 /** A staged ring of vertex φ (seep S2c): the n^3 vertices from `low`, each fgPhi (through its owner, the window's
  * lookups) once, in workgroup memory; fgPhi inside the ring reads it, outside it the owner. The values are fgPhi's
  * own, so results are bit-identical while the kernel writes no PHI before its last ring read. Every lane calls
  * fgRingStage(low, lid, lanes) with the same low (after the window's barrier), then a barrier, before any read.
  * `store` names the storage (default a ring of its own): "slot(j)=x" and "slot(j)" forms for a kernel that lends
- * other workgroup memory before its own use of it. */
-export const FG_RING_WGSL = (n: number, store?: { readonly write: (j: string, x: string) => string; readonly read: (j: string) => string }) => /* wgsl */`
+ * other workgroup memory before its own use of it.
+ *
+ * Strict (the default): every PHI read of the kernel past the staging is inside the staged ring, so fgPhi reads the
+ * ring alone and a read outside it (or with the ring off) latches FAIL.WINDOW (info 0x52490000, "RI") and reads 0:
+ * no owner walk behind every ring read (lTiles 0.58 to 0.46 ms, pLiquid 0.52 to 0.43 on the pour, exact). The
+ * staging reads through fgPhiFull. A kernel with reads past its ring (uTransfer's C pages) passes strict false. */
+export const FG_RING_WGSL = (n: number, store?: { readonly write: (j: string, x: string) => string; readonly read: (j: string) => string } | null, strict = true) => /* wgsl */`
+const FG_RING_STRICT:bool=${strict};
 ${store ? "" : `var<workgroup> fgRing:array<f32,${n ** 3}>;`}
 var<private> fgRingLow:vec3i;
 var<private> fgRingOn:bool=false;
@@ -171,7 +177,7 @@ fn fgRingAt(v:vec3i)->u32{
 fn fgRingPhi(i:u32)->f32{return ${store ? store.read("i") : "fgRing[i]"};}
 fn fgRingStage(low:vec3i,lid:u32,lanes:u32){
  fgRingOn=false;fgRingLow=low;
- for(var j=lid;j<${n ** 3}u;j+=lanes){let v=low+vec3i(i32(j%${n}u),i32((j/${n}u)%${n}u),i32(j/${n * n}u));let i=fgPhiResolved(v);var x=0.0;if(i!=NB_NONE){x=bitcast<f32>(phi[i]);}else{x=fgPhi(v);}${store ? store.write("j", "x") : "fgRing[j]=x"};}
+ for(var j=lid;j<${n ** 3}u;j+=lanes){let v=low+vec3i(i32(j%${n}u),i32((j/${n}u)%${n}u),i32(j/${n * n}u));let i=fgPhiResolved(v);var x=0.0;if(i!=NB_NONE){x=bitcast<f32>(phi[i]);}else{x=fgPhiFull(v);}${store ? store.write("j", "x") : "fgRing[j]=x"};}
  fgRingOn=true;
 }
 // The ring's storage is lent back: later reads go to the owners.
@@ -377,11 +383,16 @@ fn fgPhiResolved(v:vec3i)->u32{
 // Tiered: PHI and PHI1 read through the vertex authority (foVertexPhi: F's vertex, or the 4h tile's interpolant),
 // PHI at a vertex an F slot holds as its resolved word.
 fn fgPhiWord(base:u32,v:vec3i)->f32{
- if(base==NB_PHI_F_PHI){let r=fgRingAt(v);if(r!=NB_NONE){return fgRingPhi(r);}}
+ if(base==NB_PHI_F_PHI){let r=fgRingAt(v);if(r!=NB_NONE){return fgRingPhi(r);}if(FG_RING_STRICT){nbFail(NB_FAIL_WINDOW,0x52490000u);return 0.0;}}
  if(FG_PHI_RESOLVED&&base==NB_PHI_F_PHI){let i=fgPhiResolved(v);if(i!=NB_NONE){return bitcast<f32>(phi[i]);}}
  if(FG_TIERED){let w=fgWinCovers(v);if(base==NB_PHI_F_PHI){if(w){return fgWinVertexPhi(v);}return foVertexPhi(v);}if(base==NB_PHI_F_PHI1){if(w){return fgWin1VertexPhi(v);}return fo1VertexPhi(v);}}
  let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_AIR_C;}return bitcast<f32>(phi[base+NB_STRIDE*s+nbLocal(v)]);}
 fn fgPhi(v:vec3i)->f32{return fgPhiWord(NB_PHI_F_PHI,v);}
+// fgPhi outside any ring: the ring's own staging reads (a strict ring's fgPhi reads the ring alone).
+fn fgPhiFull(v:vec3i)->f32{
+ if(FG_PHI_RESOLVED){let i=fgPhiResolved(v);if(i!=NB_NONE){return bitcast<f32>(phi[i]);}}
+ if(FG_TIERED){if(fgWinCovers(v)){return fgWinVertexPhi(v);}return foVertexPhi(v);}
+ let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_AIR_C;}return bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);}
 // The eight vertex φ of cell c in corner order x + 2y + 4z.
 fn fgCornersOf(base:u32,c:vec3i)->array<f32,8>{
  var v:array<f32,8>;
