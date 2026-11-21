@@ -667,9 +667,10 @@ fn nbxDelta(axis:u32,r:vec3u)->f32{
  var p=parts[pAt(bank,i)];if(!nbLive(p)){return;}
  let motion=p.velocity.xyz-p.before.xyz;pEnergy[i]=dot(motion,motion);
  let q=p.position.xyz;let run=fgRun(vec3i(floor(q)));
- if(i<run.x||i>=run.y){p.before=vec4f(vec3f(NB_DELTA_NONE),p.before.w);parts[pAt(bank,i)]=p;return;}
+ // Only before changes: the record's other words are not rewritten.
+ if(i<run.x||i>=run.y){parts[pAt(bank,i)].before=vec4f(vec3f(NB_DELTA_NONE),p.before.w);return;}
  if(nbParticleMode(p)==1.0){return;}
- p.before=vec4f(nbfDeltaSample(q),p.before.w);parts[pAt(bank,i)]=p;
+ parts[pAt(bank,i)].before=vec4f(nbfDeltaSample(q),p.before.w);
 }`);
 
   // pJoin (transferRefine's joins, NB-FLIP's join rule): a lane a live record of bank dst, after pDeposit's mode.

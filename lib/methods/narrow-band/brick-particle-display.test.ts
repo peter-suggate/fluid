@@ -37,7 +37,7 @@ test("pDelta stores the Motion energy before it overwrites the grid velocity, an
     const delta = stages.tail.find(p => p.kernel.label === "pDelta")!.kernel;
     assert.ok(delta.bindings.some(b => b.name === P_ENERGY_BUFFER && b.kind === "rw"));
     const code = delta.code, store = code.indexOf("pEnergy[i]=dot(motion,motion);");
-    assert.ok(store > 0 && store < code.indexOf("p.before=vec4f(nbfDeltaSample(q)") && store < code.indexOf("p.before=vec4f(vec3f(NB_DELTA_NONE)"), `tiered ${tiered}: the store precedes both writes of before`);
+    assert.ok(store > 0 && store < code.indexOf(".before=vec4f(nbfDeltaSample(q)") && store < code.indexOf(".before=vec4f(vec3f(NB_DELTA_NONE)"), `tiered ${tiered}: the store precedes both writes of before`);
   }
 });
 
