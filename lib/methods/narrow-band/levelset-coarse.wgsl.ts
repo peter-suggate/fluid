@@ -294,9 +294,17 @@ var<private> lcW:i32;
 var<workgroup> lcRing:array<f32,845>;
 var<private> lcRingLow:vec3i;
 var<private> lcRingOn:bool=false;
+// nbVertexPhi(v) at lcAdvect's place: after the move's lResolve and before the step's first C PHI writer (lcCouple;
+// fluid-staging.test.ts), with lInit reading PHI and lAdvect and the statics' φ pass writing PHI1, the PHI word of a vertex in a
+// brick an F slot holds is its value (F's own where F owns it, lResolve's elsewhere). Read it there; walk the owners
+// only where no F slot holds the brick.
+fn lcFResolved(v:vec3i)->f32{
+ if(all(v>=vec3i(0))&&all(v<NB_LATTICE)){let s=nbFSlotOfBrick(v>>vec3u(3u));if(s<NB_SEAM){return bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);}}
+ return nbVertexPhi(v);
+}
 fn lcPhiTap(v:vec3i)->f32{
  if(lcRingOn&&all((v&vec3i(3))==vec3i(0))){let r=vec3u((v>>vec3u(2u))-lcRingLow);if(all(r<vec3u(13u,13u,5u))){return lcRing[r.x+13u*(r.y+13u*r.z)];}}
- return nbVertexPhi(v);
+ return lcFResolved(v);
 }
 // umCubicPhi's taps: the departure cell's width-aligned vertices, held to the box (umVertexNearFromPage).
 fn nbxCubicTap(x:u32,y:u32,z:u32)->f32{return lcPhiTap(clamp(lcBase+(vec3i(i32(x),i32(y),i32(z))-vec3i(1))*lcW,vec3i(0),NB_WALL_BOX));}
@@ -390,21 +398,21 @@ fn lcCheckBulk(slot:u32,live:bool,lid:u32){
  }
  if(bulk){nbFail(NB_FAIL_UNSUPPORTED,0x4c430003u);}
 }
-// The page body: C slot slot (live: the workgroup's liveness), φ → PHI1 at its C vertices. No barrier.
+// The page body: C slot slot (live: the workgroup's liveness), φ → PHI1 at its C vertices. One C vertex a lane, the
+// plane's 64: exits 1 to 4 store at once; the full path (exit 5) alone reads the ring (lcPhiTap from
+// lcFullAdvected), so the plane stages it only when one of its lanes takes that path, then traces.
 var<workgroup> sRingLive:u32;
+var<workgroup> sRingFull:atomic<u32>;
 fn lcAdvectPage(slot:u32,live:bool,lid:u32){
  lcCheckLattice(lid);lcCheckBulk(slot,live,lid);
- if(lid==0u){sRingLive=select(0u,1u,live);}
+ if(lid==0u){sRingLive=select(0u,1u,live);atomicStore(&sRingFull,0u);}
  if(workgroupUniformLoad(&sRingLive)==0u){return;}
  let dt=lcDt();let hm=lcHm();let o=nbCOrigin(slot);
- lcRingLow=(o>>vec3u(2u))+vec3i(-2,-2,i32(lcPart)-2);
- for(var j=lid;j<845u;j+=64u){lcRing[j]=nbVertexPhi(4*(lcRingLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u))));}
- workgroupBarrier();lcRingOn=true;
- // One C vertex a lane, the plane's 64 (a single pass: its continues are the exits).
+ let l=lid+64u*lcPart;let v=o+4*nbLocalCoord(l);
+ var full=false;var c=0.0;
  for(var r=0u;r<1u;r++){
-  let l=lid+64u*lcPart;let v=o+4*nbLocalCoord(l);
   if(!lcCOwned(v)){continue;}
-  let c=lcPhiC(NB_PHI_C_PHI,slot,l);
+  c=lcPhiC(NB_PHI_C_PHI,slot,l);
   // Exits 1 and 2: the COLD hold (umHoldCold → umStoreCold: the vertex's own φ).
   if(lcTierCold(v)){lcSetC(NB_PHI_C_PHI1,slot,l,c);continue;}
   // umAirSource (deviation 9): a vertex this step's drop changes keeps no air; it takes the full path.
@@ -413,9 +421,17 @@ fn lcAdvectPage(slot:u32,live:bool,lid:u32){
   if(!sourced&&c>=16.0&&!lcGate(lcCellOf(v)>>vec3u(2u))){lcSetC(NB_PHI_C_PHI1,slot,l,c);continue;}
   // Exit 4: off the wall planes (umAdvectStore's deep = !wall), kept deep air (umDeepAirKept at width 4).
   if(!sourced&&!(dt>0.0&&lcOnWall(v))){let d=nbrDeepAirKept(v,4u,c);if(d>=0.0){lcSetC(NB_PHI_C_PHI1,slot,l,d);continue;}}
-  // Exit 5: the full path.
-  lcSetC(NB_PHI_C_PHI1,slot,l,lcFullAdvected(v,c,dt,hm));
+  full=true;
  }
+ if(full){atomicOr(&sRingFull,1u);}
+ workgroupBarrier();
+ if(lid==0u){sRingLive=atomicLoad(&sRingFull);}
+ if(workgroupUniformLoad(&sRingLive)==0u){return;}
+ lcRingLow=(o>>vec3u(2u))+vec3i(-2,-2,i32(lcPart)-2);
+ for(var j=lid;j<845u;j+=64u){lcRing[j]=lcFResolved(4*(lcRingLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u))));}
+ workgroupBarrier();lcRingOn=true;
+ // Exit 5: the full path.
+ if(full){lcSetC(NB_PHI_C_PHI1,slot,l,lcFullAdvected(v,c,dt,hm));}
 }
 `;
 

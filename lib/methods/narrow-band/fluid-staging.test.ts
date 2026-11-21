@@ -129,7 +129,9 @@ test("FC_UNIT: every reader runs after uCache, with no US writer between", () =>
 test("resolved φ: no resolved read before the schedule's lResolve or after a C PHI write without one", () => {
   const L = new BrickLayout({ lattice: [128, 128, 128], f: 600, c: 40, b: 0, k: 0, particles: 1 << 16 });
   type K = { label: string; code: string };
-  const resolved = (k: K) => k.code.includes("const FG_PHI_RESOLVED:bool=true;") || /\bfgRingStage\(/.test(k.code.replace(/fn fgRingStage\(/g, ""));
+  // lcAdvect's taps read F's PHI words (lcFResolved); the C kernels share one module text, so it counts by entry.
+  const resolved = (k: K) => k.code.includes("const FG_PHI_RESOLVED:bool=true;") || /\bfgRingStage\(/.test(k.code.replace(/fn fgRingStage\(/g, ""))
+    || (k.label === "lcAdvect" && k.code.includes("fn lcFResolved("));
   // Lane E's C kernels share one module text, so their writes are classified by entry (levelset-coarse.wgsl.ts):
   // C PHI by lcCouple, lcClear and lcPublish; PHI1 only by lcAdvect and lcRetire. Any other C writer fails here.
   const C_PHI = new Set(["lcCouple", "lcClear", "lcPublish"]), C_PHI1 = new Set(["lcAdvect", "lcRetire"]);
