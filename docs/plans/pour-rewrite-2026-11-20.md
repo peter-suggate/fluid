@@ -393,6 +393,50 @@ Census at step 300 (fluid-scratch/solid-explore: census.mts, leak.mts).
     means cut faces with apertures at 4h, or the dry-row rule extended to wet bricks. It is a pressure
     discretisation change.
 
+### 5.5 Lean kernels for plain elements, tried (2026-11-21)
+
+The idea: pour-style lean code, exact by construction, for elements whose stencil is all h and uncut, with the
+general kernel deferring the rest. Three tests bound it (fluid-scratch/solid-explore: plain.mts, fixstate.mts).
+
+- **The tier code is the whole register difference.**
+  - The tiered kernel text, with `FG_TIERED` folded to false, gives exactly the all-h build's caps: lAdvect 576,
+    lDistance 1024, pSeed 704, phiSolid 512, uExtend 896, uTransfer 640.
+  - The particle kernels pMove, pDeposit and pSolid have the same caps either way, so a lean particle variant
+    buys no residency.
+- **Ceiling at the real workload.** This is a fixed-state A/B at pour step 300: the frozen state, 12 dispatches
+  batched, medians of 5. The folded text is inexact at seams, so this measures timing only.
+
+  | Kernel | Text (ms) | Folded (ms) |
+  |---|---|---|
+  | uExtend | 4.42 | 3.17 |
+  | uTransfer | 3.79 | 2.82 |
+  | lDistance | 2.21 | 1.69 |
+  | phiSolid | 2.90 | 5.02 |
+  | lAdvect | 0.98 | 2.17 |
+  | pSeed | 3.16 | 3.82 |
+
+  - The best case is about 2.7 ms of the 66 ms step. The level-set kernels and pSeed get slower when folded,
+    because their tier paths are shortcuts: a coarse tile answers from its 4h state in place of the h walk.
+  - The tier code is not the pour gap. The all-h build is 83.5 ms against 66.3 ms tiered.
+- **Almost no brick qualifies.**
+  - uExtend's 12³ window and uTransfer's 5³ tiles reach the 4³ tiles about a brick. A brick qualifies only if
+    none of those tiles is 4h.
+  - Bricks that qualify: pour 15 of 3844, seep 3 of 2574, letters 60 of 3795.
+  - The h band is a few tiles thick, so every band brick borders the 4h tier. An exact per-brick lean variant
+    therefore recovers about 0–3% of a 2.7 ms ceiling.
+  - Per-particle plain support (§5.4 census: 50% of the pour's particles at ±2) only helps kernels whose caps do
+    not move.
+- **Verdict:** a no-go for per-element lean kernels. The tested reasons are that the qualifying fraction is
+  about 0 for the brick kernels, there is no cap change for the particle kernels, and the ceiling is small.
+- **Where the ceiling is, within uExtend** (inexact variants, same A/B; 4.48 ms text):
+  - the 4h state stage and its reach bits, 0.47 ms;
+  - xProlong, 0.28 ms;
+  - the swept bits, 0.15 ms.
+
+  uExtend runs one workgroup a core: 640-thread cap and 22.7 KB of workgroup memory. Its stages before the
+  first barrier are therefore exposed latency. Any gain has to come from making those paths cheaper in every
+  brick, not from skipping them in plain bricks.
+
 ## 6. Process
 
 Single agent (memory: single-agent-only). Commit verified milestones with
