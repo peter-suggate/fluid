@@ -323,12 +323,13 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
   // The staged head (seep S2c): a C page of an FC pass runs page and returns; an F brick stages its owner window
   // (FG_SLOT_WINDOW_WGSL) and, with ring, the vertex φ ring from o + ring (FG_RING_WGSL), then barriers. Every
   // branch is workgroup-uniform (the split and the C count by workgroupUniformLoad), so a page may barrier.
-  const stagedHead = (page: string, ring?: number, lanes = 256) => /* wgsl */`
+  // gate: code between the window and the ring (uAdvect's ring-brick exit, so a ring brick stages no ring).
+  const stagedHead = (page: string, ring?: number, lanes = 256, gate = "") => /* wgsl */`
  if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);}
  let split=workgroupUniformLoad(&sSplit);let g=nbGroup(wid);
  if(g>=split){${page ? `if(FG_TIERED){if(lid==0u){sSplit=nbListCount(NB_LIST_C_ACT);}if(g-split<workgroupUniformLoad(&sSplit)){${page}(nbListSlot(NB_LIST_C_ACT,g-split),lid);}}` : ""}return;}
  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
- fgWindowStage(o>>vec3u(3u),lid,${lanes}u);workgroupBarrier();${ring === undefined ? "" : `
+ fgWindowStage(o>>vec3u(3u),lid,${lanes}u);workgroupBarrier();${gate}${ring === undefined ? "" : `
  fgRingStage(o+vec3i(${ring}),lid,${lanes}u);workgroupBarrier();`}`;
 
   // uAdvect: a workgroup a brick, a lane two cells' three lower faces.
@@ -408,10 +409,10 @@ fn vLiveF(c:vec3i)->bool{
    atomicStore(&nbSet[FH_VOL_BUDGET+1u],atomicLoad(&nbSet[FH_VOL_BUDGET+1u])+u32(units)+select(0u,1u,sum<lo));
   }
  }
-${stagedHead("vcAdvectPageOf", -1, A_LANES)}
+${stagedHead("vcAdvectPageOf", -1, A_LANES, `
  vRingMark(o,lid,true);workgroupBarrier();
  if(lid==0u){sRing=select(0u,1u,vRingOf(true));}
- if(workgroupUniformLoad(&sRing)!=0u&&g!=0u){return;}
+ if(workgroupUniformLoad(&sRing)!=0u&&g!=0u){return;}`)}
  vLive4Low=(o>>vec3u(2u))-vec3i(1);
  if(FG_TIERED&&lid<27u){let T=vLive4Low+vec3i(i32(lid%3u),i32((lid/3u)%3u),i32(lid/9u));wLive4[lid]=select(0u,1u,!foCellOwnerH(4*T)&&vLive4(T));}
  workgroupBarrier();
