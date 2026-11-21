@@ -376,6 +376,18 @@ fn vcAdvectPage(slot:u32,lid:u32,dt:f32,h:vec3f){
 }
 var<workgroup> sSplit:u32;
 fn vcAdvectPageOf(slot:u32,lid:u32){vcAdvectPage(slot,lid,vDt(),vH());}
+// vLive of an F brick's cells and their face neighbours: a coarse cell's is its tile's vLive4 (eight C corners and
+// the centre), staged once for the 27 tiles about the brick in place of once a cell and once a face.
+var<workgroup> wLive4:array<u32,27>;
+var<private> vLive4Low:vec3i;
+fn vLiveF(c:vec3i)->bool{
+ if(fgCellCoarse(c)){
+  let r=(c>>vec3u(2u))-vLive4Low;
+  if(all(r>=vec3i(0))&&all(r<vec3i(3))){return wLive4[u32(r.x+3*(r.y+3*r.z))]!=0u;}
+  return vLive4(c>>vec3u(2u));
+ }
+ return nbInLattice(c)&&fgCentrePhi(c)<0.0;
+}
 ` + V_RING_WGSL + /* wgsl */`
 @compute @workgroup_size(${A_LANES}) fn uAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let dt=vDt();let h=vH();
@@ -397,15 +409,18 @@ fn vcAdvectPageOf(slot:u32,lid:u32){vcAdvectPage(slot,lid,vDt(),vH());}
 ${stagedHead("vcAdvectPageOf", -1, A_LANES)}
  if(lid==0u){sRing=select(0u,1u,vRingBrick(o));}
  if(workgroupUniformLoad(&sRing)!=0u&&g!=0u){return;}
+ vLive4Low=(o>>vec3u(2u))-vec3i(1);
+ if(FG_TIERED&&lid<27u){let T=vLive4Low+vec3i(i32(lid%3u),i32((lid/3u)%3u),i32(lid/9u));wLive4[lid]=select(0u,1u,!foCellOwnerH(4*T)&&vLive4(T));}
+ workgroupBarrier();
  for(var r=0u;r<512u/A_LANES;r++){
   let l=lid+A_LANES*r;let c=o+nbLocalCoord(l);
-  let live=vLive(c);
+  let live=vLiveF(c);
   for(var a=0u;a<3u;a++){
    if(!fgFaceOwned(c,a)){continue;}
    // A closed face holds 0; a face between two dead cells is culled (umCullAir); a face within its width of this
    // step's drop holds 0, the drop's liquid arriving at rest (umDropFace); the rest are traced from the list.
    var centre=vec3f(c)+vec3f(0.5);centre[a]=f32(c[a]);
-   if(fgFaceOpen(c,a)&&(live||vLive(c-fgUnit(a)))&&!nbDropFace(centre,1.0)){vTraceAdd(l|(a<<9u));continue;}
+   if(fgFaceOpen(c,a)&&(live||vLiveF(c-fgUnit(a)))&&!nbDropFace(centre,1.0)){vTraceAdd(l|(a<<9u));continue;}
    vel[vAt(NB_VEL_F_UP0,slot,a,l)]=0.0;
   }
  }
