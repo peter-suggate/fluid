@@ -6,10 +6,8 @@ import { LiquidDropRow as SharedLiquidDropRow } from "../lib/features/liquid-dro
 import { useState } from "react";
 import { RegionRow as SharedRegionRow } from "../lib/features/refinement-region/ui";
 import { ToolstripMenuButton, ToolstripMenuItem, useToolstripSection } from "./toolstrip";
-import { useEditorHost } from "../lib/core/session/host-context";
-import { patchCommitter } from "./EntityOptions";
 import type { SceneDescription } from "../lib/core/model";
-import { DETAIL_DEFAULT_BUDGET } from "../lib/methods/narrow-band/brick-detail-regions";
+import { AUTOMATIC_DETAIL_BUDGETS, AUTOMATIC_DETAIL_CHOICES, useAutomaticDetail } from "./automatic-detail";
 import { studioRegionSpaceForMethod } from "../lib/core/editor-refinement-region";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { voxelToolGroups } from "../lib/core/editor-voxel-tool-actions";
@@ -67,31 +65,17 @@ export function RegionRow() {
   />;
 }
 
-/** The automatic detail factors on offer: none, h / 2 and h / 4. */
-const AUTOMATIC_DETAIL_CHOICES = [
-  { factor: undefined, label: "Off", hint: "Only the boxes drawn as Detail tiers run the fine engine." },
-  { factor: 2, label: "Detail \u00d72", hint: "The fastest-deforming surface (a splash's crown, a breaking sheet) runs again at half the cell size, within the budget." },
-  { factor: 4, label: "Detail \u00d74", hint: "The fastest-deforming surface runs again at a quarter of the cell size, within the budget: each tile costs eight times \u00d72's." },
-] as const;
-/** The budgets on offer (parent 4h tiles a step; the default, DETAIL_DEFAULT_BUDGET, is the second). */
-const AUTOMATIC_DETAIL_BUDGETS = [64, DETAIL_DEFAULT_BUDGET, 256, 512, 1024] as const;
-
 /**
  * Whether the brick engine runs automatic detail (`fluid.automaticDetail`, brick-detail-regions.ts): every step the
  * parent's 4h tiles whose surface deforms fastest, at most the budget's, run again at h / factor. A scene setting
  * rather than a box, so it rides beside the region chooser and commits (and undoes) as one scene edit, which rebuilds
- * the solve.
+ * the solve (useAutomaticDetail, the Tune card's writer too).
  */
 function AutomaticDetailMenu({ scene }: { scene: SceneDescription }) {
-  const commit = patchCommitter(useEditorHost<SceneDescription, Partial<SceneDescription>>());
   const [open, setOpen] = useState(false);
   const { claim } = useToolstripSection("automatic-detail", () => setOpen(false));
   const raise = (next: boolean) => { claim(next); setOpen(next); };
-  const current = scene.fluid.automaticDetail?.factor, budget = scene.fluid.automaticDetail?.budget ?? DETAIL_DEFAULT_BUDGET;
-  const set = (label: string, next: { factor: 2 | 4; budget?: number } | undefined) => {
-    const { automaticDetail: _previous, ...fluid } = scene.fluid;
-    commit(`Automatic detail ${label}`, { fluid: next ? { ...fluid, automaticDetail: next } : fluid }, { reseed: true });
-  };
+  const detail = useAutomaticDetail(scene), current = detail.factor, budget = detail.budget;
   const label = AUTOMATIC_DETAIL_CHOICES.find((choice) => choice.factor === current)?.label ?? "Off";
   return <ToolstripMenuButton
     label={`Automatic detail: ${label}${current ? `, ${budget} tiles` : ""}`}
@@ -108,8 +92,7 @@ function AutomaticDetailMenu({ scene }: { scene: SceneDescription }) {
       testId={`automatic-detail-${choice.factor ?? "off"}`}
       onClick={() => {
         raise(false);
-        if (choice.factor === current) return;
-        set(choice.label, choice.factor ? { factor: choice.factor, ...(budget !== DETAIL_DEFAULT_BUDGET ? { budget } : {}) } : undefined);
+        detail.setFactor(choice.factor);
       }}
     />)}
     {current ? AUTOMATIC_DETAIL_BUDGETS.map((n) => <ToolstripMenuItem
@@ -120,8 +103,7 @@ function AutomaticDetailMenu({ scene }: { scene: SceneDescription }) {
       testId={`automatic-detail-budget-${n}`}
       onClick={() => {
         raise(false);
-        if (n === budget) return;
-        set(`budget ${n}`, { factor: current, ...(n !== DETAIL_DEFAULT_BUDGET ? { budget: n } : {}) });
+        detail.setBudget(n);
       }}
     />) : null}
   </ToolstripMenuButton>;

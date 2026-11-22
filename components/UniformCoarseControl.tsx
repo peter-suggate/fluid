@@ -13,6 +13,7 @@ import { uniformDetailRequestKey } from "../lib/methods/uniform/uniform-detail-r
 import { NARROW_BAND_ACTIVITY_CONTROLS, NARROW_BAND_PARTICLE_CAP_CONTROL as CAP, NARROW_BAND_SPARSE_CONTROL, NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL, NARROW_BAND_SURFACE_ADVECTION as ADVECTION, NARROW_BAND_TUNE_CONTROLS, narrowBandControlValues, narrowBandSurfaceAdvection, type NarrowBandSurfaceAdvection } from "../lib/methods/uniform/uniform-narrow-band-controls";
 import { NARROW_BAND_TUNE_DIALS, narrowBandTunePosition, narrowBandTuneValues, type NarrowBandTuneDial } from "../lib/methods/uniform/uniform-narrow-band-tuning";
 import { RailChoice, RailLink, RailRange, RailReadout, RailRule } from "./rail";
+import { AutomaticDetailTune } from "./automatic-detail";
 import { ChoiceField, Facts, Field, FieldList, NumberInput, RangeField, Swatch, Switch, SwitchField } from "./ui";
 
 const SHAPE_DISPLACEMENT_HINT = "Shape measures how far the surface moves at 4h, not the error in phi beside it. Off: value error.";
@@ -179,6 +180,7 @@ function UniformDetailControls({ onClose }: { onClose: () => void }) {
 export function UniformTunePanel() {
   const session = useSession();
   const method = session.method();
+  const scene = session.scene(state => state.scene);
   const fine = session.diagnostics(state => state.gpuInfo?.uniformMixedFineTiles);
   const coarse = session.diagnostics(state => state.gpuInfo?.uniformMixedCoarseTiles);
   const [everything, setEverything] = useState(false);
@@ -202,6 +204,8 @@ export function UniformTunePanel() {
       options={[{ value: "flip", label: "FLIP" }, { value: "apic", label: "APIC" }]}
       hint="How particles and grid exchange velocity. FLIP (95%) carries the particles' residual velocity; APIC (experimental) replaces it with quadratic affine transfers (Sato 2018). Restarts the solver."
       testId="scene-detail-particle-transfer" onChange={value => set("particleTransfer", value)} />
+    <RailRule />
+    <AutomaticDetailTune scene={scene} />
     <RailRule />
     <RailLink label="All controls…" hint="Every detail control on its own, grouped as the solver reads them. Changes apply live."
       testId="scene-detail-all-controls" onClick={() => setEverything(true)} />
