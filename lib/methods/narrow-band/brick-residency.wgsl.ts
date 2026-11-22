@@ -378,44 +378,57 @@ fn rmFlowSide(s:u32,a:u32,side:u32)->f32{
   // so the shell holds storage for the liquid the relaxation brings in and a fresh tile for the parent's state it
   // starts from. Tiered it keeps or claims their pages alone (pass 0): the parent's liquid is 4h storage until the
   // census refines it, as a page source's is; all-h, the tile's bricks and the layer past its + sides (its upper
-  // faces and vertices, nbDtlBrickKeep), both passes as resSource's, so setMark's 1-ring holds. A workgroup
-  // strides the active tiles (META.ACTIVE of src's keys); a core tile is the engine's own residency's.
+  // faces and vertices, nbDtlBrickKeep), both passes as resSource's, so setMark's 1-ring holds. A workgroup an active
+  // tile (META.ACTIVE of src's keys, resDetailGroups: the budget's); a core tile is the engine's own residency's.
   const d = L.detail;
   const resDetail = d ? censusKernel(L, "resDetail", [CFG, setRW, dirRW, BRICK_SOURCE_BINDING], brickDetailWGSL(L) + RQ_WGSL + /* wgsl */`
-@compute @workgroup_size(64) fn resDetail(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) nw:vec3u){
+var<workgroup> wReach:array<atomic<u32>,6>;
+var<workgroup> wTile:u32;
+fn rdTile(i:u32)->vec3i{return vec3i(i32(i%u32(NB_DTL_TILES.x)),i32((i/u32(NB_DTL_TILES.x))%u32(NB_DTL_TILES.y)),i32(i/u32(NB_DTL_TILES.x*NB_DTL_TILES.y)));}
+@compute @workgroup_size(64) fn resDetail(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   let rpass=cfg.z;${tiered ? "if(rpass!=0u){return;}" : ""}
-  let n=min(nbDtlWord(NB_DTL_META),NB_DTL_BUDGET);
-  for(var j=wid.x*64u+lane;j<n;j+=64u*nw.x){
-    let i=nbDtlWord(NB_DTL_KEYS+j);let T=vec3i(i32(i%u32(NB_DTL_TILES.x)),i32((i/u32(NB_DTL_TILES.x))%u32(NB_DTL_TILES.y)),i32(i/u32(NB_DTL_TILES.x*NB_DTL_TILES.y)));
-    if(nbDtlBit(2u,T)){continue;}
-    let lo=NB_DTL_U*vec3f(T);
-    if(nbDtlPhi(lo+vec3f(0.5*NB_DTL_U))>NB_DTL_REACH+NB_DTL_U){continue;}
-    ${tiered ? "let p=vec3i(lo)>>vec3u(5u);if(!rqPageSettled(p)){rqPage(p);}" : /* wgsl */`
-    // A fresh tile's liquid is the parent's, moving at the parent's velocity in this step's move, and its bricks have
-    // no BOUND_F yet (resMark's flow): the reach rule on the parent's faces over the tile's node block, per axis and
-    // side, grows the block (a falling drop's fresh tiles moved it bricks past their keep block: REACH at impact).
-    var rlo=vec3f(0.0);var rhi=vec3f(0.0);
-    let ns=select(NB_NONE,nbDtlSlot(T),nbDtlBit(1u,T));
-    if(ns!=NB_NONE){
-      var vlo=vec3f(0.0);var vhi=vec3f(0.0);
-      for(var n=0u;n<${DETAIL_BLOCK ** 3}u;n++){
-        let m=vec3i(i32(n%${DETAIL_BLOCK}u),i32((n/${DETAIL_BLOCK}u)%${DETAIL_BLOCK}u),i32(n/${DETAIL_BLOCK ** 2}u));
-        for(var a=0u;a<3u;a++){let u=nbDtlNode(ns,m,1u+a);vlo[a]=max(vlo[a],-u);vhi[a]=max(vhi[a],u);}
-      }
-      let dt=nbRingF(cfg.x,NB_RING_DT);let h=nbRingF(cfg.x,NB_RING_H);
-      for(var a=0u;a<3u;a++){
-        let ga=nbRingF(cfg.x,NB_RING_GRAVITY+a);
-        rlo[a]=(vlo[a]+max(-ga,0.0)*dt)*dt/h+NB_REACH_MARGIN;rhi[a]=(vhi[a]+max(ga,0.0)*dt)*dt/h+NB_REACH_MARGIN;
-      }
+  // The workgroup's tile (index + 1), 0 when it has none or the parent's liquid is not near it.
+  if(lane==0u){
+    let j=nbGroup(wid);var t=0u;
+    if(j<min(nbDtlWord(NB_DTL_META),NB_DTL_BUDGET)){
+      let i=nbDtlWord(NB_DTL_KEYS+j);let T=rdTile(i);
+      if(!nbDtlBit(2u,T)&&nbDtlPhi(NB_DTL_U*vec3f(T)+vec3f(0.5*NB_DTL_U))<=NB_DTL_REACH+NB_DTL_U){t=i+1u;}
     }
-    // The keep block (the tile's bricks and the layer past its + sides) at no flow, (factor / 2 + 1)^3 bricks.
-    let b0=vec3i(floor((lo-rlo)/8.0));let b1=vec3i(floor((lo+vec3f(NB_DTL_U-1.0)+rhi)/8.0))+vec3i(1);
-    let ext=vec3u(b1-b0+vec3i(1));
-    for(var k=0u;k<ext.x*ext.y*ext.z;k++){
-      let q=b0+vec3i(vec3u(k%ext.x,(k/ext.x)%ext.y,k/(ext.x*ext.y)));
-      if(nbBrickInRange(q)&&!rqSettled(q,rpass)){rqBrick(q,rpass);}
-    }`}
+    wTile=t;
   }
+  let t=workgroupUniformLoad(&wTile);if(t==0u){return;}
+  let T=rdTile(t-1u);let lo=NB_DTL_U*vec3f(T);
+  ${tiered ? "if(lane==0u){let p=vec3i(lo)>>vec3u(5u);if(!rqPageSettled(p)){rqPage(p);}}" : /* wgsl */`
+  // A fresh tile's liquid is the parent's, moving at the parent's velocity in this step's move, and its bricks have
+  // no BOUND_F yet (resMark's flow): the reach rule on the parent's faces over the tile's node block, per axis and
+  // side, grows the block (a falling drop's fresh tiles moved it bricks past their keep block: REACH at impact). The
+  // lanes split the block; the speeds are non-negative, so their bits order as the floats do (atomicMax).
+  var rlo=vec3f(0.0);var rhi=vec3f(0.0);
+  let ns=select(NB_NONE,nbDtlSlot(T),nbDtlBit(1u,T));
+  if(ns!=NB_NONE){
+    var vlo=vec3f(0.0);var vhi=vec3f(0.0);
+    for(var n=lane;n<${DETAIL_BLOCK ** 3}u;n+=64u){
+      let m=vec3i(i32(n%${DETAIL_BLOCK}u),i32((n/${DETAIL_BLOCK}u)%${DETAIL_BLOCK}u),i32(n/${DETAIL_BLOCK ** 2}u));
+      for(var a=0u;a<3u;a++){let u=nbDtlNode(ns,m,1u+a);vlo[a]=max(vlo[a],-u);vhi[a]=max(vhi[a],u);}
+    }
+    for(var a=0u;a<3u;a++){atomicMax(&wReach[a],bitcast<u32>(vlo[a]));atomicMax(&wReach[3u+a],bitcast<u32>(vhi[a]));}
+  }
+  workgroupBarrier();
+  if(ns!=NB_NONE){
+    let dt=nbRingF(cfg.x,NB_RING_DT);let h=nbRingF(cfg.x,NB_RING_H);
+    for(var a=0u;a<3u;a++){
+      let ga=nbRingF(cfg.x,NB_RING_GRAVITY+a);
+      let vl=bitcast<f32>(atomicLoad(&wReach[a]));let vh=bitcast<f32>(atomicLoad(&wReach[3u+a]));
+      rlo[a]=(vl+max(-ga,0.0)*dt)*dt/h+NB_REACH_MARGIN;rhi[a]=(vh+max(ga,0.0)*dt)*dt/h+NB_REACH_MARGIN;
+    }
+  }
+  // The keep block (the tile's bricks and the layer past its + sides) at no flow, (factor / 2 + 1)^3 bricks, a lane a brick.
+  let b0=vec3i(floor((lo-rlo)/8.0));let b1=vec3i(floor((lo+vec3f(NB_DTL_U-1.0)+rhi)/8.0))+vec3i(1);
+  let ext=vec3u(b1-b0+vec3i(1));
+  for(var k=lane;k<ext.x*ext.y*ext.z;k+=64u){
+    let q=b0+vec3i(vec3u(k%ext.x,(k/ext.x)%ext.y,k/(ext.x*ext.y)));
+    if(nbBrickInRange(q)&&!rqSettled(q,rpass)){rqBrick(q,rpass);}
+  }`}
 }`) : undefined;
   // detailRefresh (a detail engine's, the step's first kernel): the cells of the tiles the mask turned this step get their
   // OPEN back (fresh: FLAG_DTL_OUT set, a container cell that is no static solid's) or withhold it (gone), in their F

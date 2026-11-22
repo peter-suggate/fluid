@@ -20,7 +20,7 @@ import { brickLowerOn, brickModuleCode } from "./brick-lower";
 import { brickBootSourceBoxes, brickDropDue, brickNoSources, brickSourceRing, type BrickDrop, type BrickSources } from "./brick-source";
 import { brickSourceWords } from "./brick-source.wgsl";
 import { BRICK_SOLID_EDIT_WORDS, brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
-import { ARGS, BODY_FLAG, BOX_TOKEN, BrickLayout, boxPadded, FAIL, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
+import { ARGS, BODY_FLAG, BOX_TOKEN, BrickLayout, boxPadded, FAIL, foldArgs, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
 import { brickStaticNeedWords } from "./brick-static-need.wgsl";
 import { brickDetailWords, type BrickDetailLayout } from "./brick-detail.wgsl";
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
@@ -93,7 +93,7 @@ export interface BrickEngineOptions {
   readonly liveDrops?: boolean;
   /** A detail engine's coupling to its parent (brick-detail.ts, BrickLayoutOptions.detail): its mask and the
    * relaxation shell's hooks, the parent's nodes in `src` (written by the parent's allocator), the shell's claim
-   * (resDetail, 8 workgroups a residency pass) and the mask's turns (detailRefresh, the step's head). Absent: none. */
+   * (resDetail, a workgroup an active tile a residency pass) and the mask's turns (detailRefresh, the step's head). Absent: none. */
   readonly detail?: BrickDetailLayout;
   /** With detail: encodes the parent's state into `src` before the boot is queued (brick-detail.ts's exchange), so the
    * boot's residency claims the shell the parent's liquid reaches. */
@@ -467,15 +467,17 @@ export class BrickEngine {
     const churnClear: BrickPlacement = { kernel: set.stepEnd, dispatch: direct(1), z: 1 };
     const bootPhi: BrickPlacement = { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: Math.max(boxes, 0), w: boxes < 0 ? 1 : 0 };
     const res = brickResidencyKernels(layout, { tiered });
+    // resDetail: a workgroup a mask slot of the budget (the active tiles, early out past META.ACTIVE).
+    const detailTiles: BrickDispatch = { direct: foldArgs(layout.detail?.budget ?? 1) };
     const residency: BrickPlacement[] = [
       // Tiered, pass 0 also runs the page sources: a workgroup a page of C_ALL after F_ALL's bricks (FC_G1).
       { kernel: res.resMark, dispatch: tiered ? { indirect: ARGS.FC_G1 } : g1(LIST.F_ALL), z: 0 },
       ...(sources ? [{ kernel: res.resSource, dispatch: direct(8), z: 0 }] : []),
-      ...(res.resDetail ? [{ kernel: res.resDetail, dispatch: direct(8), z: 0 }] : []),
+      ...(res.resDetail ? [{ kernel: res.resDetail, dispatch: detailTiles, z: 0 }] : []),
       { kernel: set.setClaimPages, dispatch: direct(churnGroups(f, 64)) },
       { kernel: res.resMark, dispatch: g1(LIST.F_ALL), z: 1 },
       ...(sources ? [{ kernel: res.resSource, dispatch: direct(8), z: 1 }] : []),
-      ...(res.resDetail ? [{ kernel: res.resDetail, dispatch: direct(8), z: 1 }] : []),
+      ...(res.resDetail ? [{ kernel: res.resDetail, dispatch: detailTiles, z: 1 }] : []),
       { kernel: set.setClaimBricks, dispatch: direct(churnGroups(f, 64)), z: 0 },
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },

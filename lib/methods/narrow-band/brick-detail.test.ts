@@ -133,6 +133,10 @@ test("the fine residency claims a reached tile's keep block (all-h), grown by th
     const code = brickResidencyKernels(L).resDetail!.code;
     assert.ok(code.includes("let b0=vec3i(floor((lo-rlo)/8.0));let b1=vec3i(floor((lo+vec3f(NB_DTL_U-1.0)+rhi)/8.0))+vec3i(1);"), "the box the arithmetic below checks");
     assert.ok(code.includes("nbDtlBit(1u,T)") && code.includes("NB_REACH_MARGIN"), "a fresh tile's reach rule");
+    // A workgroup a tile, its lanes over the fresh tile's node block and the keep block's bricks: no lane walks the
+    // active tiles in turn (the 8-workgroup stride cost 0.3 ms a step at budget 32, 2026-11-23).
+    assert.ok(code.includes("let j=nbGroup(wid)") && code.includes("for(var n=lane;") && code.includes("for(var k=lane;"), "a tile a workgroup, the lanes split it");
+    assert.ok(!code.includes("num_workgroups"), "no stride over the active tiles");
     for (const T of [0, 1, 3]) {
       const [b0, b1] = box(factor, T, 0, 0);
       assert.equal(b1 - b0 + 1, factor / 2 + 1, `factor ${factor}: no flow, (factor/2 + 1) bricks an axis, as nbDtlBrickKeep and the F pool`);
