@@ -121,12 +121,26 @@ test("the stores follow the budget, never the container", () => {
   assert.ok(small.setup.capacities.k > 128, `the teaser's rods need more than 128 K slots (${small.setup.capacities.k})`);
 });
 
-test("the fine residency claims a reached tile's keep block (all-h): its bricks and the layer past its + sides", () => {
+test("the fine residency claims a reached tile's keep block (all-h), grown by the parent's flow on a fresh tile", () => {
+  // resDetail's box, in bricks: b0 = floor((lo - rlo) / 8), b1 = floor((lo + U - 1 + rhi) / 8) + 1 per axis, U = 4 factor.
+  const box = (factor: number, T: number, rlo: number, rhi: number) => {
+    const U = 4 * factor, lo = U * T;
+    return [Math.floor((lo - rlo) / 8), Math.floor((lo + U - 1 + rhi) / 8) + 1] as const;
+  };
   for (const factor of [2, 4] as const) {
     const detail: BrickDetailLayout = { factor, tiles: [64 / (4 * factor), 64 / (4 * factor), 64 / (4 * factor)], budget: 64, slots: 192 };
     const L = new BrickLayout({ lattice: [64, 64, 64], box: [64, 64, 64], f: 512, c: 8, b: 16, k: 0, particles: 1024, detail });
     const code = brickResidencyKernels(L).resDetail!.code;
-    assert.ok(code.includes(`k<${(factor / 2 + 1) ** 3}u`), `factor ${factor}: (factor/2 + 1)^3 bricks a tile, as nbDtlBrickKeep and the F pool`);
+    assert.ok(code.includes("let b0=vec3i(floor((lo-rlo)/8.0));let b1=vec3i(floor((lo+vec3f(NB_DTL_U-1.0)+rhi)/8.0))+vec3i(1);"), "the box the arithmetic below checks");
+    assert.ok(code.includes("nbDtlBit(1u,T)") && code.includes("NB_REACH_MARGIN"), "a fresh tile's reach rule");
+    for (const T of [0, 1, 3]) {
+      const [b0, b1] = box(factor, T, 0, 0);
+      assert.equal(b1 - b0 + 1, factor / 2 + 1, `factor ${factor}: no flow, (factor/2 + 1) bricks an axis, as nbDtlBrickKeep and the F pool`);
+      assert.equal(b0, (4 * factor * T) >> 3, "starting at the tile's own lowest brick");
+    }
+    // A falling drop at a 1/60 s step: ~3 m/s down at fine h 2 mm is ~25 cells, plus the reach margin, below the tile.
+    const [d0, d1] = box(factor, 3, 25 + 7, 7), [k0, k1] = box(factor, 3, 0, 0);
+    assert.ok(k0 - d0 >= 4 && d1 - k1 === 1, `factor ${factor}: the box reaches 4 bricks down, a margin's up`);
   }
 });
 

@@ -101,7 +101,7 @@ import { CFG, type BrickBinding } from "./brick-kernel";
 import { censusKernel } from "./brick-census.wgsl";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { BRICK_SOURCE_BINDING, BRICK_SOURCE_RING_WGSL } from "./brick-source.wgsl";
-import { brickDetailWGSL } from "./brick-detail.wgsl";
+import { DETAIL_BLOCK, brickDetailWGSL } from "./brick-detail.wgsl";
 
 /**
  * Each source class's margin past its move, in cells, the largest distance a stage reads past the class's tiles (the
@@ -390,7 +390,31 @@ fn rmFlowSide(s:u32,a:u32,side:u32)->f32{
     if(nbDtlBit(2u,T)){continue;}
     let lo=NB_DTL_U*vec3f(T);
     if(nbDtlPhi(lo+vec3f(0.5*NB_DTL_U))>NB_DTL_REACH+NB_DTL_U){continue;}
-    ${tiered ? "let p=vec3i(lo)>>vec3u(5u);if(!rqPageSettled(p)){rqPage(p);}" : `for(var k=0u;k<${(d.factor / 2 + 1) ** 3}u;k++){let q=(vec3i(lo)>>vec3u(3u))+vec3i(i32(k%${d.factor / 2 + 1}u),i32((k/${d.factor / 2 + 1}u)%${d.factor / 2 + 1}u),i32(k/${(d.factor / 2 + 1) ** 2}u));if(nbBrickInRange(q)&&!rqSettled(q,rpass)){rqBrick(q,rpass);}}`}
+    ${tiered ? "let p=vec3i(lo)>>vec3u(5u);if(!rqPageSettled(p)){rqPage(p);}" : /* wgsl */`
+    // A fresh tile's liquid is the parent's, moving at the parent's velocity in this step's move, and its bricks have
+    // no BOUND_F yet (resMark's flow): the reach rule on the parent's faces over the tile's node block, per axis and
+    // side, grows the block (a falling drop's fresh tiles moved it bricks past their keep block: REACH at impact).
+    var rlo=vec3f(0.0);var rhi=vec3f(0.0);
+    let ns=select(NB_NONE,nbDtlSlot(T),nbDtlBit(1u,T));
+    if(ns!=NB_NONE){
+      var vlo=vec3f(0.0);var vhi=vec3f(0.0);
+      for(var n=0u;n<${DETAIL_BLOCK ** 3}u;n++){
+        let m=vec3i(i32(n%${DETAIL_BLOCK}u),i32((n/${DETAIL_BLOCK}u)%${DETAIL_BLOCK}u),i32(n/${DETAIL_BLOCK ** 2}u));
+        for(var a=0u;a<3u;a++){let u=nbDtlNode(ns,m,1u+a);vlo[a]=max(vlo[a],-u);vhi[a]=max(vhi[a],u);}
+      }
+      let dt=nbRingF(cfg.x,NB_RING_DT);let h=nbRingF(cfg.x,NB_RING_H);
+      for(var a=0u;a<3u;a++){
+        let ga=nbRingF(cfg.x,NB_RING_GRAVITY+a);
+        rlo[a]=(vlo[a]+max(-ga,0.0)*dt)*dt/h+NB_REACH_MARGIN;rhi[a]=(vhi[a]+max(ga,0.0)*dt)*dt/h+NB_REACH_MARGIN;
+      }
+    }
+    // The keep block (the tile's bricks and the layer past its + sides) at no flow, (factor / 2 + 1)^3 bricks.
+    let b0=vec3i(floor((lo-rlo)/8.0));let b1=vec3i(floor((lo+vec3f(NB_DTL_U-1.0)+rhi)/8.0))+vec3i(1);
+    let ext=vec3u(b1-b0+vec3i(1));
+    for(var k=0u;k<ext.x*ext.y*ext.z;k++){
+      let q=b0+vec3i(vec3u(k%ext.x,(k/ext.x)%ext.y,k/(ext.x*ext.y)));
+      if(nbBrickInRange(q)&&!rqSettled(q,rpass)){rqBrick(q,rpass);}
+    }`}
   }
 }`) : undefined;
   // detailRefresh (a detail engine's, the step's first kernel): the cells of the tiles the mask turned this step get their

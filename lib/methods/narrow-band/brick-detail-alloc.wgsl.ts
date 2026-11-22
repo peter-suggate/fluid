@@ -130,16 +130,11 @@ fn dtPrevSlot(i:u32)->u32{
 
 var<workgroup> wgGo:u32;
 var<workgroup> wgMax:array<atomic<u32>,8>;
-// The face of the F brick s (origin o) or, past it, the parent's (its owner's: an h or a 4h tile's).
-fn dtFace(s:u32,o:vec3i,c:vec3i,a:u32)->f32{
-  if(all(c>=o)&&all(c<o+vec3i(8))){return vel[NB_VEL_F_U0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];}
-  return nbFaceU(c,a);
-}
-// The φ (h) of cell c's lower vertex: the F brick s's or, past it, the parent's.
-fn dtPhi(s:u32,o:vec3i,c:vec3i)->f32{
-  if(all(c>=o)&&all(c<o+vec3i(8))){return bitcast<f32>(phi[nbFPhiBase(s)+NB_STRIDE*s+nbLocal(c)]);}
-  return nbVertexPhi(c);
-}
+// The face and the vertex φ (h) by their owners (brick-owner.wgsl.ts): an F brick's storage holds them only where an
+// h tile owns them; a tiered parent's 4h tiles inside an F brick leave it stale, and read raw it was a falling drop's
+// heat.
+fn dtFace(c:vec3i,a:u32)->f32{return nbFaceU(c,a);}
+fn dtPhi(c:vec3i)->f32{return nbVertexPhi(c);}
 @compute @workgroup_size(64) fn dtlHeat(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   let g=nbGroup(wid);
   if(lane==0u){wgGo=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}
@@ -148,15 +143,17 @@ fn dtPhi(s:u32,o:vec3i,c:vec3i)->f32{
   let s=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(s);
   for(var j=0u;j<8u;j++){
     let l=lane+64u*j;let q=vec3i(i32(l&7u),i32((l>>3u)&7u),i32(l>>6u));let c=o+q;
-    if(!nbInWallBox(c)){continue;}
-    let p=bitcast<f32>(phi[nbFPhiBase(s)+NB_STRIDE*s+l]);
+    if(!nbInWallBox(c)||!nbCellOwnerH(c)){continue;}
+    let p=dtPhi(c);
     if(p>=0.0||p<=-DT_SURF){continue;}
-    // The liquid's own gradient: a difference across b only to a liquid cell (the air's extension is no flow).
+    // The liquid's own gradient: a difference across b only to a liquid vertex, along a's own axis too (face a of
+    // c + e_a has c + e_a for its corner; past the surface it is an air cell's face, which holds no flow, and the
+    // difference would read a falling drop's speed as deformation).
     var sum=0.0;var wet=vec3<bool>(true);
-    for(var b=0u;b<3u;b++){var e=vec3i(0);e[b]=1;wet[b]=dtPhi(s,o,c+e)<0.0;}
+    for(var b=0u;b<3u;b++){var e=vec3i(0);e[b]=1;wet[b]=nbInWallBox(c+e)&&dtPhi(c+e)<0.0;}
     for(var a=0u;a<3u;a++){
-      let u0=dtFace(s,o,c,a);
-      for(var b=0u;b<3u;b++){if(b!=a&&!wet[b]){continue;}var e=vec3i(0);e[b]=1;let du=dtFace(s,o,c+e,a)-u0;sum+=du*du;}
+      let u0=dtFace(c,a);
+      for(var b=0u;b<3u;b++){if(!wet[b]){continue;}var e=vec3i(0);e[b]=1;let du=dtFace(c+e,a)-u0;sum+=du*du;}
     }
     let raw=DT_DT*sqrt(sum)/DT_HM;
     let t=(q>>vec3u(2u));atomicMax(&wgMax[u32(t.x+2*t.y+4*t.z)],bitcast<u32>(raw));

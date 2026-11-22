@@ -150,13 +150,13 @@ var<workgroup> wNb:array<u32,27>;
       // The residency check (brick-abi.md §5.4, §8): a liquid vertex's 1-ring (every vertex of the cells it bounds)
       // is resident. φ is this step's advected level set on the directory the head committed, so a miss is a reach
       // defect of this step's head: FAIL.REACH with the absent brick's key, never read as air. Only the brick's face
-      // vertices reach a neighbour.${L.detail ? " A detail engine's: only across a cell its mask holds (outside it no physics runs)." : ""}
+      // vertices reach a neighbour.${L.detail ? " A detail engine's: only across a cell of a tile on last step too (outside the mask no physics runs; a tile the parent's allocator turned on this step, fresh, had no storage under last step's mask, and this head's residency claims it, resDetail)." : ""}
       if(p<0.0&&(any(c==vec3i(0))||any(c==vec3i(7)))){
         for(var n=0u;n<27u;n++){
           let d=nbNeighbourOffset(n);
           if(any((d<vec3i(0))&(c!=vec3i(0)))||any((d>vec3i(0))&(c!=vec3i(7)))||n==NB_REC_SELF){continue;}
           let w=o+c+d;let nb=(o>>vec3u(3u))+d;
-          if(any(w<vec3i(0))||any(w>NB_LATTICE)||!nbBrickInRange(nb)${L.detail ? "||!nbDtlOn(o+c+min(d,vec3i(0)))" : ""}){continue;}
+          if(any(w<vec3i(0))||any(w>NB_LATTICE)||!nbBrickInRange(nb)${L.detail ? "||!nbDtlOn(o+c+min(d,vec3i(0)))||nbDtlBit(1u,nbDtlTileOf(o+c+min(d,vec3i(0))))" : ""}){continue;}
           if(wNb[n]>=NB_SEAM){nbFail(NB_FAIL_REACH,nbKey(nb));}
         }
       }
