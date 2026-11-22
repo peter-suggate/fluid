@@ -27,7 +27,7 @@ import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
-import { nbfParticleRecordWGSL } from "./particles-formulas.wgsl";
+import { nbfP2GApicWGSL, nbfParticleRecordFor } from "./particles-formulas.wgsl";
 import { nbfExtensionWGSL, nbfMomentumWGSL, nbfP2GWGSL, nbfTensionWGSL, nbfViscosityWGSL, nbfVolumeWGSL } from "./velocity-formulas.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
@@ -253,6 +253,13 @@ fn vcTransferPage(slot:u32,lid:u32){
  }
 }
 `;
+// particleTransfer "apic": a record's velocity at the face is its affine velocity there, u_a + c_a . (q - x) (the old
+// engine's transferFace under APIC).
+const V_TRANSFER4_APIC_WGSL = (() => {
+  const from = "total+=m*w;momentum+=m*w*s.velocity[a];";
+  if (V_TRANSFER4_WGSL.split(from).length !== 2) throw new Error("velocity-kernels: vcTransferFace changed shape (its gather)");
+  return V_TRANSFER4_WGSL.replace(from, "total+=m*w;momentum+=m*w*(s.velocity[a]+dot(nbApicRowOf(s,a),r));");
+})();
 
 /** Tiered: the 4h extension (the old frame's ufxR, ufx4 and the 4h half of ufxH, uniform-frame-extension pair), in
  * the ABI's lower-face convention: the old 4h face (C, a), C's +face, is the C face (C + e_a, a), so the owner of C
@@ -549,7 +556,7 @@ fn fsCacheRawStaged(T:vec3i,a:u32)->f32{let r=T-ucLow;return wRaw[64u*a+u32(r.x+
 
   // pDeposit (transferDeposit): a workgroup a brick, over its bin in the bank the rebin wrote. The faces its
   // records reach: along the axis cells o-1..o+9 (11), across o-1..o+8 (10).
-  const pDeposit = k("pDeposit", [CFG, FB.set, FB.dir, FB.phiRO, FB.parts, FB.fdep], [FG_SLOT_WINDOW_WGSL, FG_PHI_WGSL, FG_RING_WGSL(11, { write: (j, x) => `atomicStore(&wMom[${j}],bitcast<u32>(${x}))`, read: j => `bitcast<f32>(atomicLoad(&wMom[${j}]))` }), nbfParticleRecordWGSL, V_WGSL].join("\n") + /* wgsl */`
+  const pDeposit = k("pDeposit", [CFG, FB.set, FB.dir, FB.phiRO, FB.parts, FB.fdep], [FG_SLOT_WINDOW_WGSL, FG_PHI_WGSL, FG_RING_WGSL(11, { write: (j, x) => `atomicStore(&wMom[${j}],bitcast<u32>(${x}))`, read: j => `bitcast<f32>(atomicLoad(&wMom[${j}]))` }), nbfParticleRecordFor(L), V_WGSL].join("\n") + /* wgsl */`
 const PD_WINDOW:u32=1100u;
 var<workgroup> wMom:array<atomic<u32>,3300>;
 var<workgroup> wWeight:array<atomic<u32>,3300>;
@@ -569,7 +576,7 @@ fn nbxDeposit(axis:u32,node:vec3i,momentum:i32,weight:u32){
 }
 fn nbxTransferHeat(tile:u32)->vec2f{return vec2f(0.0);}
 fn nbxTransferDepth(vertex:vec3u)->f32{return 0.0;}
-` + nbfP2GWGSL + /* wgsl */`
+` + nbfP2GWGSL + (L.apic ? nbfP2GApicWGSL : "") + /* wgsl */`
 fn pdLiquidAt(c:vec3i)->bool{
  let r=c-pdOrigin+vec3i(1);if(any(r<vec3i(0))||any(r>=vec3i(10))){return false;}
  let i=u32(r.x+10*(r.y+10*r.z));return ((atomicLoad(&wLiquid[i>>5u])>>(i&31u))&1u)!=0u;
@@ -605,7 +612,7 @@ fn pdLiquidAt(c:vec3i)->bool{
    supported=supported||(w.x*w.y*w.z>1e-6&&pdLiquidAt(b+vec3i(bit)));
   }
   parts[i].before.w=nbParticleRestate(s,nbParticleAge(s),select(1.0,0.0,supported));
-  if(supported){nbfP2GScatter(q,s.velocity.xyz,nbParticleMass(s));}
+  if(supported){${L.apic ? "nbfP2GScatterApic(q,s.velocity.xyz,nbApicRows(s),nbParticleMass(s));" : "nbfP2GScatter(q,s.velocity.xyz,nbParticleMass(s));"}}
  }
  workgroupBarrier();
  for(var j=lid;j<3300u;j+=256u){
@@ -624,7 +631,7 @@ fn pdLiquidAt(c:vec3i)->bool{
     ["if(nbInflowOn()){value=nbInflowForced(n,a,value);}", "if(nbInflowOn()){value=nbInflowForced(n,a,value);}\n   value=nbDetailForced(n,a,value);"],
     ...(F.tiered ? [["if(nbInflowOn()){value=vcInflowForced(T,a,value);}", "if(nbInflowOn()){value=vcInflowForced(T,a,value);}\n   value=nbDetailForced4(T,a,value);"]] : []),
   ].reduce((c, [from, to]) => strictSub(c, from!, to!), code) + brickDetailWGSL(L);
-  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdepPlain, ...(F.tiered ? [FB.partsRO] : []), ...(L.detail ? [FB.src] : [])], vDetail(windowBase + FG_RING_WGSL(10, null, false) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + BRICK_SOURCE_RING_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
+  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdepPlain, ...(F.tiered ? [FB.partsRO] : []), ...(L.detail ? [FB.src] : [])], vDetail(windowBase + FG_RING_WGSL(10, null, false) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + BRICK_SOURCE_RING_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordFor(L), L.apic ? V_TRANSFER4_APIC_WGSL : V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
 var<workgroup> wHeat:array<f32,125>;
 var<workgroup> wHot:array<f32,125>;
 var<workgroup> wDepth:array<f32,729>;

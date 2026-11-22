@@ -44,6 +44,8 @@ import { BRICK_PHASE as T, type BrickPhase, type BrickStageSeam } from "./brick-
 export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context => {
   const L = context.layout, F = fluidLayout(L, { tiered });
   nbfParticleSupported(context.values);
+  // The records the layout holds are the transfer's (BrickEngine derives BrickLayoutOptions.apic from the values).
+  if (context.values.particleTransfer !== undefined && L.apic !== (context.values.particleTransfer === "apic")) throw new Error(`NB-FLIP brick engine: particleTransfer "${String(context.values.particleTransfer)}" with ${L.apic ? "APIC" : "FLIP"} records`);
   // The stage context carries no wall mode yet (lane E): the brick scenes are free-slip boxes.
   if (context.fluid) nbfVelocitySupported({ viscosity: context.fluid.viscosity_Pa_s, surfaceTension: context.fluid.surfaceTension_N_m, noSlip: false });
   // Volume control (Kim et al. 2007): the method's control time; 0 turns it off.

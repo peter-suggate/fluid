@@ -41,6 +41,7 @@
 import { BOX_TOKEN, BRICK_CELLS, type BrickLayout, brickAbiWGSL, resolveBox } from "./brick-abi";
 import { type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
+import { NBF_PARTICLE_STRUCT_APIC, NBF_PARTICLE_STRUCT_FLIP } from "./particles-formulas.wgsl";
 
 /** Tile words (FT_*): per 4^3 tile, FT_WORDS words. */
 export const FT = {
@@ -149,11 +150,14 @@ export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindi
   // the forces relax to and the pressure prescribes (pressure-composite.wgsl.ts pressureDetailFaces). Only the
   // container's own planes are closed: the face rule tests the container's box, not the mask.
   if (L.detail && body.includes(FG_FACE_OPEN)) body = body.replace(FG_FACE_OPEN, "fn fgFaceOpen(c:vec3i,a:u32)->bool{var t=c;t[a]=0;return nbInDtlBox(t)&&c[a]>0&&c[a]<NB_WALL_BOX[a];}");
+  // The layout's record (particleStride floats): a kernel of an APIC layout that declares FLIP's would read the banks
+  // at the wrong stride.
+  if (L.apic && body.includes(NBF_PARTICLE_STRUCT_FLIP)) throw new Error(`Brick engine: kernel ${label} declares the FLIP record in an APIC layout`);
   return {
     label, entry, bindings,
     // The box hook (brick-abi.md §2, M3 padding): the walls and the cell domain at the box, the storage at the lattice.
     code: resolveBox(L, [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: false } }),
-      body.includes("struct Particle") ? "" : "struct Particle{position:vec4f,velocity:vec4f,before:vec4f}", fluidConstantsWGSL(F), declareBindings(bindings), body, ring].join("\n")),
+      body.includes("struct Particle") ? "" : L.apic ? NBF_PARTICLE_STRUCT_APIC : NBF_PARTICLE_STRUCT_FLIP, fluidConstantsWGSL(F), declareBindings(bindings), body, ring].join("\n")),
   };
 }
 

@@ -39,6 +39,7 @@ import type { BrickBodiesBinding, BrickBodiesHeader } from "./bodies-binding.wgs
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 import { GPUStageTimestampRecorder } from "../../core/performance-trace";
 import { BRICK_PHASE as T, type BrickPhase, type BrickSeam, seamed, stageRuns } from "./brick-timing";
+import { nbfParticleApic } from "./particles-formulas.wgsl";
 
 export type Vec3 = readonly [number, number, number];
 /** A box of initial liquid, in cells (vertex coordinates of the lattice). */
@@ -75,6 +76,7 @@ export interface BrickEngineOptions {
   readonly dt_s: number;
   readonly gravity_mps2: Vec3;
   readonly capacities: BrickCapacities;
+  /** APIC records (BrickLayoutOptions.apic). Absent: the method values' particleTransfer ("apic" or "flip"). */
   readonly apic?: boolean;
   /** The initial liquid in closed form (boxes; their union) ... */
   readonly liquid: readonly BrickLiquidBox[];
@@ -531,7 +533,7 @@ export class BrickEngine {
     const mask = brickStaticBinding(options), deferred = mask !== undefined && options.staticsDeferred === true;
     // The wall view (BrickLayout.wallView): terrain or a procedural boundary, which a deferred (empty) mask has not.
     const wallView = mask !== undefined && !deferred && (mask.walls.terrain !== undefined || mask.walls.boundary !== undefined);
-    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...(options.openSides ? { openSides: true } : {}), ...options.capacities, apic: options.apic, ...(staticTiles ? { staticTiles: true } : {}), ...(wallView ? { wallView: true } : {}), ...(options.detail ? { detail: options.detail } : {}) });
+    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...(options.openSides ? { openSides: true } : {}), ...options.capacities, apic: options.apic ?? nbfParticleApic(options.values ?? {}), ...(staticTiles ? { staticTiles: true } : {}), ...(wallView ? { wallView: true } : {}), ...(options.detail ? { detail: options.detail } : {}) });
     if (options.detail && (options.sources || options.liveDrops)) throw new Error("Brick engine: a detail engine has no sources (its liquid enters through the coupled shell)");
     const kPlain = layout.cap.k > 0 && (!deferred || options.bodies !== undefined);
     const solverFor = (cuts?: false) => options.solver(layout, { ...(options.bodies ? { bodies: { frame_m: options.bodies.frame_m, h_m: options.bodies.h_m } } : {}), ...(cuts === false ? { cuts } : {}) });

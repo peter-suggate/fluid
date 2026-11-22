@@ -30,7 +30,7 @@ import { brickLiveDrop } from "./brick-source";
 import { brickDropRefusal } from "./brick-scene";
 import type { GPUFluidParticleSource } from "../../core/webgpu-particle-overlay";
 import { narrowBandSiteAxis, type NarrowBandSurfaceSamples } from "../uniform/uniform-narrow-band-sites";
-import { NBF_PARTICLE_SETTINGS } from "./particles-formulas.wgsl";
+import { NBF_PARTICLE_SETTINGS, nbfParticleStride } from "./particles-formulas.wgsl";
 import { P_ENERGY_BUFFER } from "./particles-kernels.wgsl";
 import type { GPUQuality } from "../../core/gpu-quality";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
@@ -143,7 +143,8 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
    */
   private particleBankSource(bank: number): GPUFluidParticleSource {
     const e = this.brickEngine, L = e.layout, h = this.options.setup.h_m;
-    if (L.particleStride !== 12) throw new Error(`Brick engine: the particle layer reads FLIP records (12 floats), not ${L.particleStride}`);
+    // An APIC record (24 floats) keeps the FLIP record's 12 first (its affine rows follow), so the layer reads both.
+    if (L.particleStride !== nbfParticleStride(L.apic)) throw new Error(`Brick engine: the particle layer reads NB-FLIP records (12 or 24 floats), not ${L.particleStride}`);
     return {
       buffer: e.buffer("parts"), strideFloats: L.particleStride, capacity: L.cap.particles, firstRecord: bank * L.cap.particles,
       positionScale_m: [h, h, h], frame: { buffer: this.particleFrame, size: 48 },

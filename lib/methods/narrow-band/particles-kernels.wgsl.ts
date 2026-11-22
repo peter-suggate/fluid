@@ -41,7 +41,7 @@ import type { BrickBinding, BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { particleResidencyTravelWGSL } from "../uniform/uniform-local-residency";
-import { NBF_PARTICLE_SETTINGS, nbfParticleFormulasAt, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
+import { NBF_PARTICLE_SETTINGS, nbfApicWGSL, nbfParticleFormulasAt, nbfParticleRecordFor, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { nbfDeltaWGSL } from "./velocity-formulas.wgsl";
 import { BRICK_SOLID_CELL_WGSL, BRICK_SOLID_PARTICLE_TERRAIN_WGSL, BRICK_SOLID_PARTICLE_WGSL, brickMoveDeferWGSL, brickPSolidWGSL, brickSeedBlockedWGSL, brickSolidCellWGSL, brickSolidCellFieldWGSL, brickSolidParticleFieldWGSL } from "./brick-solid-walk.wgsl";
 import { brickStaticWGSL, type BrickStaticWalls } from "./brick-static.wgsl";
@@ -93,6 +93,27 @@ fn pPresent(q:vec3f)->bool{
 }
 `;
 
+/** particleTransfer "apic" (BrickLayout.apic): pMove's G2P rows (nbfApicRow) and their taps. A tap is the extended
+ * field US at the node's face, the node held to the box as fgVelAxis holds its sample (faces 0..N along the axis,
+ * cells 0..N-1 across; the rows' stencil positions stay the virtual ones): all h, F's face (fgFace); tiered, the fine
+ * sampler's h tap where the fine weight is over 0 (fsUnit: F's face where it owns it, else the 4h cache's trilinear),
+ * else the same h tap from the caches (fsTapH), as the old engine's umVelocityTap1 for every sample. */
+const P_APIC_WGSL = /* wgsl */`
+var<private> paFine:bool=false;
+fn nbxApicTap(node:vec3i,axis:u32)->f32{
+ var c=node;c[axis]+=1;
+ var hi=NB_WALL_BOX-vec3i(1);hi[axis]=NB_WALL_BOX[axis];
+ c=clamp(c,vec3i(0),hi);
+ if(!FG_TIERED){return fgFace(NB_VEL_F_US0,c,axis);}
+ if(paFine){return fsUnit(c,axis);}
+ return fsTapH(c,axis,false);
+}
+fn pApicSample(q:vec3f)->array<vec4f,3>{
+ paFine=FG_TIERED&&fsFineAny(q);
+ return array<vec4f,3>(nbfApicRow(q,0u),nbfApicRow(q,1u),nbfApicRow(q,2u));
+}
+`;
+
 /** fgDepth's text (FG_DEPTH_WGSL) as psDepth, its corner and reach reads through pSeed's stage (lane E). */
 const PS_DEPTH_WGSL = (() => {
   const at = FG_DEPTH_WGSL.indexOf("fn fgDepth(");
@@ -115,7 +136,9 @@ export function particleKernels(L: BrickLayout, F: FluidLayout, options: { reado
   const solidRO: BrickBinding = { name: "solid", kind: "ro", type: "array<u32>" };
   const nbfParticleFormulasWGSL = nbfParticleFormulasAt(options.bandDepth);
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
-  const common = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, FG_DEPTH_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, nbfParticleFormulasWGSL, BANK_WGSL, PARTICLE_WGSL].join("\n");
+  // The layout's record (FLIP's, or APIC's: particleTransfer "apic", BrickLayout.apic).
+  const record = nbfParticleRecordFor(L), apic = L.apic;
+  const common = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, FG_DEPTH_WGSL, FG_RUN_WGSL, record, nbfParticleFormulasWGSL, BANK_WGSL, PARTICLE_WGSL].join("\n");
 
   // pLiquid: a workgroup an F_ALL brick: fgLiquidCell of its 512 cells from the opening φ (the vertex ring of
   // o..o+8 through the window's owners), into P_LIQUID. pMove's pSupported reads the bits: the same predicate on the
@@ -146,7 +169,7 @@ var<workgroup> wLiquid:array<atomic<u32>,16>;
   // ring (window, liquid cells, depth vertices, UNIT taps) measured slower too (8.77 against 5.93 ms): the staging
   // cost 1.96 ms and the items' partial workgroups 1.3 ms, against 2.0 ms of record time saved (lane E, 2026-11-16).
   const pMoveBindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.partsRO, FB.fcell, FB.fpart, FB.fmoved];
-  const pMoveCode = [common, nbfSeedFormulasWGSL].join("\n") + /* wgsl */`
+  const pMoveCode = [common, nbfSeedFormulasWGSL, ...(apic ? [nbfApicWGSL, P_APIC_WGSL] : [])].join("\n") + /* wgsl */`
 // A liquid cell of the opening φ: pLiquid's bit (fgLiquidCell of the same φ) where an F slot holds the cell, else
 // fgLiquidCell through the owners. Valid in the move only (pLiquid runs before it; the level set rewrites φ).
 fn pLiquidCell(c:vec3i)->bool{
@@ -266,21 +289,25 @@ fn pFile(i:u32,p:Particle,split:bool){
  }
  let mode=nbParticleMode(p);let dt=pDt();let h=pH();let m=nbParticleMass(p);
  var pic=vec3f(0.0);var v=p.velocity.xyz;
- if(mode!=1.0){pic=fgSampleVel(q,0u,3u);v=nbfG2P(v,p.before.xyz,pic,false,first,0.95);}
- else{
+ if(mode!=1.0){pic=fgSampleVel(q,0u,3u);${apic ? "let rows=pApicSample(q);v=vec3f(rows[0].w,rows[1].w,rows[2].w);p.cx=vec4f(rows[0].xyz,0.0);p.cy=vec4f(rows[1].xyz,0.0);p.cz=vec4f(rows[2].xyz,0.0);" : "v=nbfG2P(v,p.before.xyz,pic,false,first,0.95);"}}
+ else{${apic ? `
+  // APIC: a ballistic record carries no affine velocity (the old engine's).
+  p.cx=vec4f(0.0);p.cy=vec4f(0.0);p.cz=vec4f(0.0);` : ""}
   v=nbfBallisticKick(v,pGravity(),dt);
   for(var axis=0u;axis<3u;axis++){
    let ahead=nbfBallisticAhead(q,v,m,axis);let solid=ahead[axis]<0.0||ahead[axis]>f32(NB_WALL_BOX[axis]);
    if(nbfBallisticStop(v,axis,solid)){v[axis]=0.0;}
   }
  }
- if(!nbfFinite(v,1e10)){pFatal(2u,i);return;}
+ if(!nbfFinite(v,1e10)){pFatal(2u,i);return;}${apic ? `
+ if(!nbfApicFinite(array<vec3f,3>(p.cx.xyz,p.cy.xyz,p.cz.xyz),1e10)){pFatal(2u,i);return;}` : ""}
  let depth=fgDepth(q);
  p.before.w=nbParticleRestate(p,0.0,mode);
  p.velocity=vec4f(v,depth);p.position.w=max(p.position.w,pHeat(q));
  p.before=vec4f(pic,p.before.w);
  if(nbfRetireDeep(depth)){return;}
- let ballistic=mode==1.0||!pSupported(q);p.before.w=nbParticleRestate(p,nbParticleAge(p),select(0.0,1.0,ballistic));
+ let ballistic=mode==1.0||!pSupported(q);p.before.w=nbParticleRestate(p,nbParticleAge(p),select(0.0,1.0,ballistic));${apic ? `
+ if(ballistic){p.cx=vec4f(0.0);p.cy=vec4f(0.0);p.cz=vec4f(0.0);}` : ""}
  p.position.w=nbfHeatAtG2P(p.position.w,pHeat(q),4.0,dt,ballistic,depth,fgTileThin(pCellOf(q)));
  if(p.position.w<=0.0){return;}
  var end=nbfDrift(q,p.velocity.xyz,pic,mode!=1.0,dt,h);
@@ -396,7 +423,7 @@ var<workgroup> sOcc:atomic<u32>;
  if(lid<8u){fcStore(fgTileWord(slot,lid,FT_THETA),0u);fcStore(fgTileWord(slot,lid,FT_SURF),0u);atomicAnd(&fcell[fgTileWord(slot,lid,FT_FLAGS)],~FTF_SURFACE_TILE);}
 }`);
 
-  const pScatter = k("pScatter", [CFG, FB.set, FB.dir, FB.parts, FB.fcell, FB.fpart, FB.fmoved], [FG_SLOT_WGSL, FG_FCELL_WGSL, nbfParticleRecordWGSL, nbfParticleFormulasWGSL, BANK_WGSL].join("\n") + /* wgsl */`
+  const pScatter = k("pScatter", [CFG, FB.set, FB.dir, FB.parts, FB.fcell, FB.fpart, FB.fmoved], [FG_SLOT_WGSL, FG_FCELL_WGSL, record, nbfParticleFormulasWGSL, BANK_WGSL].join("\n") + /* wgsl */`
 fn pPlace(dst:u32,p:Particle,rank:u32){
  if(rank==NB_NONE){return;}
  let c=pCellOf(p.position.xyz);let s=fgSlot(c);if(s==NB_NONE){return;}
@@ -418,7 +445,7 @@ fn pPlace(dst:u32,p:Particle,rank:u32){
  pPlace(dst,a,ra);pPlace(dst,b,rb);
 }`);
 
-  const pTiles = k("pTiles", [CFG, FB.set, FB.dir, FB.partsRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, nbfParticleRecordWGSL, BANK_WGSL].join("\n") + /* wgsl */`
+  const pTiles = k("pTiles", [CFG, FB.set, FB.dir, FB.partsRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, record, BANK_WGSL].join("\n") + /* wgsl */`
 var<workgroup> wTheta:array<atomic<u32>,64>;
 var<workgroup> wSurf:array<atomic<u32>,8>;
 @compute @workgroup_size(256) fn pTiles(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
@@ -649,7 +676,7 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
   // before.xyz still holds the record's grid velocity (pMove's PIC sample, a seed's site sample), the display's
   // Motion energy |velocity - before|^2 into P_ENERGY at the record's bank index (GPUFluidParticleSource.motionEnergy,
   // the old engine's GPUFluidParticleMotion capture fused here: a store a live record, no pass of its own).
-  const pDelta = k("pDelta", [CFG, FB.set, FB.dir, FB.velRO, FB.parts, FB.fcell, P_ENERGY_RW], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_VEL_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, BANK_WGSL, nbfDeltaWGSL].join("\n") + /* wgsl */`
+  const pDelta = k("pDelta", [CFG, FB.set, FB.dir, FB.velRO, FB.parts, FB.fcell, P_ENERGY_RW], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_VEL_WGSL, FG_RUN_WGSL, record, BANK_WGSL, nbfDeltaWGSL].join("\n") + /* wgsl */`
 // The delta of face axis a at window index r: the +face of old anchor cell r - 1, the ABI face of cell r - 1 + e_a.
 // NONE where the anchor's tile lacks support (umTileSupport bit 2) or the face is a low wall face.
 fn nbxDelta(axis:u32,r:vec3u)->f32{
@@ -672,12 +699,13 @@ fn nbxDelta(axis:u32,r:vec3u)->f32{
  let n=min(atomicLoad(&nbSet[NB_H_PCOUNT0+bank]),NB_PCAP);
  if(i>=n){return;}
  var p=parts[pAt(bank,i)];if(!nbLive(p)){return;}
- let motion=p.velocity.xyz-p.before.xyz;pEnergy[i]=dot(motion,motion);
+ let motion=p.velocity.xyz-p.before.xyz;pEnergy[i]=dot(motion,motion);${apic ? `
+ // APIC: G2P reads no delta (the old engine's recordDelta returns under APIC); before keeps the grid velocity.` : `
  let q=p.position.xyz;let run=fgRun(vec3i(floor(q)));
  // Only before changes: the record's other words are not rewritten.
  if(i<run.x||i>=run.y){parts[pAt(bank,i)].before=vec4f(vec3f(NB_DELTA_NONE),p.before.w);return;}
  if(nbParticleMode(p)==1.0){return;}
- parts[pAt(bank,i)].before=vec4f(nbfDeltaSample(q),p.before.w);
+ parts[pAt(bank,i)].before=vec4f(nbfDeltaSample(q),p.before.w);`}
 }`);
 
   // pJoin (transferRefine's joins, NB-FLIP's join rule): a lane a live record of bank dst, after pDeposit's mode.
@@ -693,7 +721,7 @@ fn nbxDelta(axis:u32,r:vec3u)->f32{
   // reach. Each supported tile's brick gets NB_S_PSUPPORT + NB_PSUPPORT_WORDS slot: word 0 bit tx | ty<<1 | tz<<2 (atomicOr),
   // words 1..3 the -x,-y,-z and 4..6 the +x,+y,+z travel maxima (f32 bits, atomicMax, a 0 travel skipped). An
   // absent brick inside the lattice latches FAIL.REACH. The census reads and clears the words (lane E).
-  const pJoin = k("pJoin", [CFG, FB.set, FB.dir, FB.partsRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, nbfParticleRecordWGSL, BANK_WGSL].join("\n") + /* wgsl */`
+  const pJoin = k("pJoin", [CFG, FB.set, FB.dir, FB.partsRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, record, BANK_WGSL].join("\n") + /* wgsl */`
 ${NBF_SUPPORT_TRAVEL_WGSL}
 fn pMaxF(at:u32,v:f32){let b=bitcast<u32>(v);if(v>0.0&&atomicLoad(&nbSet[at])<b){atomicMax(&nbSet[at],b);}}
 fn pSupport(p:Particle){

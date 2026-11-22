@@ -11,7 +11,8 @@
  *
  * Settings are the gate scenes' (every one resolves the same NB-FLIP values): particleTransfer "flip",
  * crowdedCells "merge", surfaceSamples 8 (3 mass bits), particleDensity "graded", sampleSeparation "pairs",
- * particleBandDepth 3, heatExpiry "held". A scene with other values fails at build (`nbfParticleSupported`). */
+ * particleBandDepth 3, heatExpiry "held". particleTransfer "apic" is the one other value the kernels implement
+ * (nbfApicWGSL, the layout's apic records). A scene with other values fails at build (`nbfParticleSupported`). */
 
 /** The NB-FLIP values these formulas are written for. Unknown or other values must fail explicitly. */
 export interface NbfParticleSettings {
@@ -23,18 +24,35 @@ export const NBF_PARTICLE_SETTINGS: NbfParticleSettings = {
   particleTransfer: "flip", crowdedCells: "merge", surfaceSamples: 8, particleDensity: "graded",
   sampleSeparation: "pairs", particleBandDepth: 3, heatExpiry: "held",
 };
+/** The particle transfers the kernels implement: FLIP (the default) and APIC (nbfApicWGSL). */
+export const NBF_PARTICLE_TRANSFERS = ["flip", "apic"] as const;
+export type NbfParticleTransfer = typeof NBF_PARTICLE_TRANSFERS[number];
 /** Throws naming the first setting the brick engine's particle kernels do not implement. */
 export function nbfParticleSupported(values: Readonly<Record<string, unknown>>): void {
   for (const [key, want] of Object.entries(NBF_PARTICLE_SETTINGS)) {
     const got = values[key];
+    if (key === "particleTransfer") {
+      if (got !== undefined && !(NBF_PARTICLE_TRANSFERS as readonly unknown[]).includes(got)) throw new Error(`NB-FLIP brick engine: particleTransfer "${String(got)}" is not implemented (only ${NBF_PARTICLE_TRANSFERS.map(t => `"${t}"`).join(" or ")})`);
+      continue;
+    }
     if (got !== undefined && got !== want) throw new Error(`NB-FLIP brick engine: ${key} "${String(got)}" is not implemented (only "${String(want)}")`);
   }
 }
+/** Whether the method values select APIC records (BrickLayoutOptions.apic). An unsupported transfer throws. */
+export function nbfParticleApic(values: Readonly<Record<string, unknown>>): boolean {
+  nbfParticleSupported({ particleTransfer: values.particleTransfer });
+  return values.particleTransfer === "apic";
+}
 
+/** The FLIP record's struct (12 floats), and the APIC record's (24: FLIP's and the affine rows cx, cy, cz). */
+export const NBF_PARTICLE_STRUCT_FLIP = "struct Particle{position:vec4f,velocity:vec4f,before:vec4f}";
+export const NBF_PARTICLE_STRUCT_APIC = "struct Particle{position:vec4f,velocity:vec4f,before:vec4f,cx:vec4f,cy:vec4f,cz:vec4f}";
+/** Floats a record: BrickLayout.particleStride. */
+export const nbfParticleStride = (apic: boolean) => apic ? 24 : 12;
 /** The particle record (narrowBandParticleWGSL(false, true, 3)): FLIP, merge, 3 mass bits. before.w packs the
  * ballistic bit (31), the sparse age (bits 3..30) and mass - 1 (bits 0..2). */
 export const nbfParticleRecordWGSL = /* wgsl */`
-struct Particle{position:vec4f,velocity:vec4f,before:vec4f}
+${NBF_PARTICLE_STRUCT_FLIP}
 fn nbParticleMode(p:Particle)->f32{return f32(bitcast<u32>(p.before.w)>>31u);}
 fn nbParticleAge(p:Particle)->f32{return bitcast<f32>(bitcast<u32>(p.before.w)&0x7ffffff8u);}
 fn nbParticleState(age:f32,mode:f32)->f32{return bitcast<f32>((bitcast<u32>(age)&0x7ffffff8u)|(u32(mode)<<31u));}
@@ -47,6 +65,59 @@ fn nbDead()->Particle{var p=Particle();p.position=vec4f(-1.0,0.0,0.0,0.0);return
 // clear for a merge's mass (particleSlabWGSL).
 const NB_SEED_FIRST:u32=0x7f7ffff8u;
 fn nbSeedFirst()->f32{return bitcast<f32>(NB_SEED_FIRST);}
+`;
+/** The APIC record: the FLIP record's words and accessors unchanged (before.w packs the mode, age and mass alike; the
+ * old engine's APIC moved them to a fourth row), then the affine velocity's rows cx, cy, cz (xyz; w unused): row a is
+ * the gradient of velocity component a, in m/s an h cell (nbfApicWGSL). A seed's rows are zero (Particle()). */
+export const nbfParticleRecordApicWGSL = nbfParticleRecordWGSL.replace(NBF_PARTICLE_STRUCT_FLIP, NBF_PARTICLE_STRUCT_APIC) + /* wgsl */`
+fn nbApicRowOf(p:Particle,a:u32)->vec3f{if(a==1u){return p.cy.xyz;}if(a==2u){return p.cz.xyz;}return p.cx.xyz;}
+fn nbApicRows(p:Particle)->array<vec3f,3>{return array<vec3f,3>(p.cx.xyz,p.cy.xyz,p.cz.xyz);}
+`;
+/** The record a layout's kernels read: FLIP's, or APIC's where the layout holds APIC records. */
+export const nbfParticleRecordFor = (L: { readonly apic: boolean }) => L.apic ? nbfParticleRecordApicWGSL : nbfParticleRecordWGSL;
+
+/** particleTransfer "apic": the affine particle-in-cell transfer (Jiang et al. 2015, Section 5.3's quadratic MAC
+ * form; Sato et al. 2018 Section 3.2), ported from the old engine (uniform-narrow-band-apic.wgsl.ts: nbApicRow).
+ * - G2P (nbfApicRow): on face axis a, the 3^3 quadratic B-spline nodes about p (pbQuadratic's, the deposit's own
+ *   weights), node j at x_j = base + j + offset (cells; offset 0.5 off the axis, 1 along it: the + face of cell
+ *   base + j). The velocity is v_a = sum w u, and the row is c_a = D^-1 sum w u (x_j - p) with D = I/4 (the quadratic
+ *   kernel's, Jiang et al. 2015 Section 5.3, for unit cells): rows store velocity per h cell of displacement, so D is
+ *   I/4 whatever h is. The kernel defines nbxApicTap(node, axis), the extended field at node's face (a node outside the
+ *   box held to it: the stencil positions, and so D, stay the virtual ones).
+ * - P2G (nbfP2GScatterApic, after nbfP2GWGSL): each node takes w m (u_a + c_a . (x_j - p)), the affine velocity at
+ *   the node (Jiang et al. 2015 Eq. 9 with B_p D_p^-1 = C_p). A linear field transfers exactly both ways (both kernels
+ *   reproduce affine fields; the tests), and the deposit conserves angular momentum with the same weights. */
+export const nbfApicWGSL = /* wgsl */`
+fn nbfApicWeights(f:f32)->vec3f{return vec3f(0.5*(1.5-f)*(1.5-f),0.75-(f-1.0)*(f-1.0),0.5*(f-0.5)*(f-0.5));}
+fn nbfApicOffset(axis:u32)->vec3f{var offset=vec3f(0.5);offset[axis]=1.0;return offset;}
+fn nbfApicBase(p:vec3f,axis:u32)->vec3i{return vec3i(floor(p-nbfApicOffset(axis)-0.5));}
+// Face axis a's row at p: xyz c_a (m/s a cell), w v_a (m/s).
+fn nbfApicRow(p:vec3f,axis:u32)->vec4f{
+ let base=nbfApicBase(p,axis);let f=p-nbfApicOffset(axis)-vec3f(base);
+ let wx=nbfApicWeights(f.x);let wy=nbfApicWeights(f.y);let wz=nbfApicWeights(f.z);
+ var v=0.0;var c=vec3f(0.0);
+ for(var z=0;z<3;z++){for(var y=0;y<3;y++){let wyz=wy[y]*wz[z];for(var x=0;x<3;x++){
+  let w=wx[x]*wyz;let u=nbxApicTap(base+vec3i(x,y,z),axis);
+  v+=w*u;c+=w*u*(vec3f(f32(x),f32(y),f32(z))-f);
+ }}}
+ return vec4f(4.0*c,v);
+}
+// An APIC record's rows are finite (the old G2P's guard).
+fn nbfApicFinite(c:array<vec3f,3>,bound:f32)->bool{return all(abs(c[0])<vec3f(bound))&&all(abs(c[1])<vec3f(bound))&&all(abs(c[2])<vec3f(bound));}
+`;
+/** The APIC deposit (needs nbfP2GWGSL and its nbxDeposit): nbfP2GScatter with each node's affine velocity. */
+export const nbfP2GApicWGSL = /* wgsl */`
+fn nbfP2GScatterApic(p:vec3f,u:vec3f,c:array<vec3f,3>,mass:f32){
+ for(var axis=0u;axis<3u;axis++){
+  let base=nbfP2GBase(p,axis);let f=nbfP2GFraction(p,axis,base);
+  let wx=pbQuadratic(f.x);let wy=pbQuadratic(f.y);let wz=pbQuadratic(f.z);
+  for(var z=0;z<3;z++){for(var y=0;y<3;y++){let wyz=wy[y]*wz[z];for(var x=0;x<3;x++){
+   let node=base+vec3i(x,y,z);let w=wx[x]*wyz*mass;
+   let un=u[axis]+dot(c[axis],vec3f(f32(x),f32(y),f32(z))-f);
+   nbxDeposit(axis,node,nbfP2GMomentumWord(w,un),nbfP2GWeightWord(w));
+  }}}
+ }
+}
 `;
 
 /** nbfParticleFormulasWGSL with the band bandDepth cells deep (the scene's brickTiers.particleBandDepth): records

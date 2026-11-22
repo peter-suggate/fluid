@@ -12,6 +12,7 @@
  * arguments; particle bins per F slot.
  */
 import { DETAIL_PLANES, brickDetailMaskWGSL, brickDetailPlaneWords, type BrickDetailLayout } from "./brick-detail.wgsl";
+import { nbfParticleStride } from "./particles-formulas.wgsl";
 
 /** Words a brick slot of a channel: 512 cells and 8 words of padding, so the
  * 27 neighbours of a brick do not alias the same cache sets (the arena
@@ -233,7 +234,8 @@ export interface BrickCapacities {
 export interface BrickLayoutOptions extends BrickCapacities {
   /** The lattice in h cells. */
   readonly lattice: readonly [number, number, number];
-  /** APIC records (28 floats) instead of FLIP's 12. */
+  /** APIC records (24 floats: FLIP's 12 and the affine rows, particles-formulas.wgsl.ts nbfParticleRecordApicWGSL)
+   * instead of FLIP's 12 (particleTransfer "apic"). The banks keep the capacity's record count. */
   readonly apic?: boolean;
   /** NB_PHI_FAR in h, where it is not the lattice's largest extent: a padded container's lattice is its own cells,
    * and the old engine's far φ is its page-rounded lattice's (fluidLatticeFarPhi; brick-scene.ts). */
@@ -315,6 +317,8 @@ export class BrickLayout {
   readonly openSides: boolean;
   readonly window: readonly [number, number, number];
   readonly windowBits: readonly [number, number, number];
+  /** BrickLayoutOptions.apic. */
+  readonly apic: boolean;
   readonly particleStride: number;
   /** set buffer regions (words). */
   readonly set: {
@@ -375,7 +379,8 @@ export class BrickLayout {
     this.windowBits = this.window.map(n => Math.log2(n)) as [number, number, number];
     // fgPack (fluid-grid.wgsl.ts) packs a cell's coordinates in one word, each axis its window's cell bits.
     if (this.windowBits.reduce((a, b) => a + b, 0) + 15 > 32) throw new Error(`Brick engine: a window of ${this.window.join("x")} pages packs a cell in more than 32 bits (fgPack)`);
-    this.particleStride = options.apic ? 28 : 12;
+    this.apic = options.apic === true;
+    this.particleStride = nbfParticleStride(this.apic);
     let at = HEADER_WORDS;
     const take = (n: number) => { const o = at; at += align64(n); return o; };
     const ring = take(RING_SLOTS * RING_WORDS);
