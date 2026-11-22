@@ -130,6 +130,8 @@ fn dtPrevSlot(i:u32)->u32{
 
 var<workgroup> wgGo:u32;
 var<workgroup> wgMax:array<atomic<u32>,8>;
+var<workgroup> wgN:atomic<u32>;
+var<workgroup> wgCells:array<u32,512>;
 // The face and the vertex φ (h) by their owners (brick-owner.wgsl.ts): an F brick's storage holds them only where an
 // h tile owns them; a tiered parent's 4h tiles inside an F brick leave it stale, and read raw it was a falling drop's
 // heat.
@@ -141,11 +143,20 @@ fn dtPhi(c:vec3i)->f32{return nbVertexPhi(c);}
   if(lane<8u){atomicStore(&wgMax[lane],0u);}
   if(workgroupUniformLoad(&wgGo)==0u){return;}
   let s=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(s);
+  // The surface cells first, listed, then the lanes share them: a surface lies on few of a brick's cells, scattered
+  // over the lanes' eight, and walked in place every lane waited on its SIMD's slowest (0.28 of 0.36 ms a step on
+  // cm12-figure-6's parent, 2026-11-23).
   for(var j=0u;j<8u;j++){
-    let l=lane+64u*j;let q=vec3i(i32(l&7u),i32((l>>3u)&7u),i32(l>>6u));let c=o+q;
+    let l=lane+64u*j;let c=o+vec3i(i32(l&7u),i32((l>>3u)&7u),i32(l>>6u));
     if(!nbInWallBox(c)||!nbCellOwnerH(c)){continue;}
     let p=dtPhi(c);
     if(p>=0.0||p<=-DT_SURF){continue;}
+    wgCells[atomicAdd(&wgN,1u)]=l;
+  }
+  workgroupBarrier();
+  let n=atomicLoad(&wgN);
+  for(var k=lane;k<n;k+=64u){
+    let l=wgCells[k];let q=vec3i(i32(l&7u),i32((l>>3u)&7u),i32(l>>6u));let c=o+q;
     // The liquid's own gradient: a difference across b only to a liquid vertex, along a's own axis too (face a of
     // c + e_a has c + e_a for its corner; past the surface it is an air cell's face, which holds no flow, and the
     // difference would read a falling drop's speed as deformation).

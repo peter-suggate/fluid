@@ -35,7 +35,7 @@ import { brickDetailPools, brickDetailSpecs, DETAIL_RING } from "./brick-detail"
 import { brickDetailPlan, DETAIL_DEFAULT_BUDGET } from "./brick-detail-regions";
 import { brickDetailSceneGaps, brickDetailSubScene } from "./brick-detail-scene";
 import { brickDetailHash, brickDetailPlaneWords, brickDetailSrc, brickDetailWGSL, DETAIL_HASH_WGSL, type BrickDetailLayout } from "./brick-detail.wgsl";
-import { brickDetailAllocDispatches, brickDetailAllocWords } from "./brick-detail-alloc.wgsl";
+import { brickDetailAllocDispatches, brickDetailAllocWGSL, brickDetailAllocWords } from "./brick-detail-alloc.wgsl";
 import { brickDetailSurfaceCapacity, brickDetailSurfaceWGSL } from "./brick-detail-surface";
 import { BRICK_SOURCE_WGSL, brickSourceWGSL } from "./brick-source.wgsl";
 import { brickResidencyKernels } from "./brick-residency.wgsl";
@@ -207,6 +207,13 @@ test("the allocator: its dispatches cover the candidates, the forced tiles and t
   assert.deepEqual(g.dtlThreshold, [1, 1, 1]);
   assert.equal(w.forced + 6, w.words, "the forced list last");
   assert.equal(w.heat + 3 * 512 * 100, w.forced, "the heat: three words a tile of the parent's C pool");
+  // dtlHeat lists a brick's surface cells, then its lanes share them (the gradient's 15 reads): no lane walks its own
+  // eight cells' gradients in place (0.28 -> 0.16 ms a step on cm12-figure-6's parent, 2026-11-23).
+  const L = new BrickLayout({ lattice: [64, 64, 64], box: [64, 64, 64], f: 512, c: 8, b: 16, k: 0, particles: 1024 });
+  const code = brickDetailAllocWGSL(L, { factor: 2, tiles: [8, 8, 8], budget: 64, slots: 192 }, { dt_s: 1 / 60, h_m: 0.01, forced: 0 });
+  const heat = code.slice(code.indexOf("fn dtlHeat("));
+  assert.ok(heat.includes("wgCells[atomicAdd(&wgN,1u)]=l;") && heat.includes("for(var k=lane;k<n;k+=64u)"), "the surface cells listed, then shared");
+  assert.ok(heat.indexOf("wgCells[atomicAdd") < heat.indexOf("dtFace("), "no face read before the list");
 });
 
 test("the fine surface: the floor open, the side walls and lid capped, the budget's pool", () => {
