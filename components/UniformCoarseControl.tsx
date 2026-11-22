@@ -14,6 +14,7 @@ import { NARROW_BAND_ACTIVITY_CONTROLS, NARROW_BAND_PARTICLE_CAP_CONTROL as CAP,
 import { NARROW_BAND_TUNE_DIALS, narrowBandTunePosition, narrowBandTuneValues, type NarrowBandTuneDial } from "../lib/methods/uniform/uniform-narrow-band-tuning";
 import { RailChoice, RailLink, RailRange, RailReadout, RailRule } from "./rail";
 import { AutomaticDetailTune } from "./automatic-detail";
+import { SurfaceTensionTune } from "./surface-tension";
 import { ChoiceField, Facts, Field, FieldList, NumberInput, RangeField, Swatch, Switch, SwitchField } from "./ui";
 
 const SHAPE_DISPLACEMENT_HINT = "Shape measures how far the surface moves at 4h, not the error in phi beside it. Off: value error.";
@@ -204,6 +205,7 @@ export function UniformTunePanel() {
       options={[{ value: "flip", label: "FLIP" }, { value: "apic", label: "APIC" }]}
       hint="How particles and grid exchange velocity. FLIP (95%) carries the particles' residual velocity; APIC (experimental) replaces it with quadratic affine transfers (Sato 2018). Restarts the solver."
       testId="scene-detail-particle-transfer" onChange={value => set("particleTransfer", value)} />
+    <SurfaceTensionTune scene={scene} />
     <RailRule />
     <AutomaticDetailTune scene={scene} />
     <RailRule />
