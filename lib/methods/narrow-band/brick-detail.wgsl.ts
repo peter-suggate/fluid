@@ -149,9 +149,11 @@ fn nbDetailForced4(T:vec3i,a:u32,value:f32)->f32{
   let al=nbDtlAlpha(p);if(al>=1.0){return value;}
   return mix(nbDtlU(p,a),value,al);
 }
-// A 4h tile on a coupled face where the parent's liquid is near (its centre 2 cells from the face): the census holds it
-// h (band, never calm).
-fn nbDetailHeld(t:vec3i)->bool{let c=4.0*vec3f(t)+vec3f(2.0);return nbDtlWall(c)<=2.0&&nbDtlPhi(c)<NB_DTL_REACH;}
+// A 4h tile on a coupled face where the parent's surface is near (its centre 2 cells from the face): the census holds
+// it h (band, never calm), so the liquid the parent moves across the face meets the fine band there. Deep under the
+// parent's surface the face's tiles may be native 4h rows, whose coupled faces are prescribed as the h rows' are
+// (pressure-composite.wgsl.ts rowsC and projectC).
+fn nbDetailHeld(t:vec3i)->bool{let c=4.0*vec3f(t)+vec3f(2.0);return nbDtlWall(c)<=2.0&&abs(nbDtlPhi(c))<NB_DTL_REACH;}
 // A record at q (cells) retires in the shell's outer half where the parent is air.
 fn nbDetailRetire(q:vec3f)->bool{return nbDtlAlpha(q)<0.5&&nbDtlPhi(q)>0.0;}
 `;

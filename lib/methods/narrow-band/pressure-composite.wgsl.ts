@@ -814,7 +814,10 @@ ${L.staticTiles ? "  // With the static tiles an exact tile of a cut brick is a 
     for(var f=0u;f<6u;f++){
       let a=f/2u;let side=f&1u;let sign=npSign(f);let e=poUnit(a);let Tn=T+sign*e;
       let plane=4*select(T,Tn,side==1u);
-      if(!nbTileInWallBox(Tn)){
+      if(!nbTileInWallBox(Tn)){${L.detail ? `
+        // A detail engine's coupled box face (pressureDetailFaces' native twin): the parent's velocity, prescribed. Its
+        // flux (the whole 4h face's, the forces' relaxed value) enters the divergence; no coupling, never a wall.
+        if(((${L.detail.coupled}u>>f)&1u)!=0u){div+=f32(sign)*nbFacePlane(plane,a);poSetWall(poFlagsWordC(select(T,Tn,side==1u)),a,false);continue;}` : ""}
         // The root's wall slot: fraction 0.5 (the wall face's mean h V), b its forced flux.
         let fraction=0.5;let u=nbFacePlane(plane,a);let c=4.0*fraction;let lift=f32(sign)*4.0*h*u;
         div+=f32(sign)*fraction*u;
@@ -1111,20 +1114,20 @@ fn pcProjectPage(cs:u32,lid:u32,still:bool){
       if(nbTileInLattice(Lt)&&nbTileOwnerH(Lt)){continue;}
       let fa=NB_STRIDE*(cs+a*NB_CCAP)+i;let held=vel[NB_VEL_C_US0+fa];let us=poForcedC(cs,i,a,held);
       let low=poNativeX(Lt);
-      let wall=T[a]==0||4*T[a]==NB_WALL_BOX[a];let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
+      let wall=${L.detail ? `(T[a]==0||4*T[a]==NB_WALL_BOX[a])&&((${L.detail.coupled}u>>(2u*a+select(0u,1u,T[a]!=0)))&1u)==0u` : "T[a]==0||4*T[a]==NB_WALL_BOX[a]"};let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
       var u=us;
       if(own.y>0.0&&low.y>0.0){u=us-(own.x-low.x)/(4.0*h);}
       else if(own.y>0.0||low.y>0.0){
         // The liquid side m, the face's sign from m (T's lower face -1, Lt's upper +1), the other side.
         let mine=own.y>0.0;let sign=select(1.0,-1.0,mine);let x=select(low.x,own.x,mine);let other=select(own.y,low.y,mine);
         let m=select(Lt,T,mine);
-        if(other==-1.0){
+        if(other==-1.0${L.detail ? "&&wall" : ""}){
           let mw=nbPageWord(m>>vec3u(3u));let mat=NB_STRIDE*mw+nbTileIndex(m);
           let lift=sign*4.0*h*us;
           if(pres[NB_PRES_C_PPHI+mat]< -4.0||!separated){u=us-sign*lift/(4.0*h);}
           else{u=us+sign*x/(4.0*h);}
         }
-        else{u=us+sign*x/(4.0*h*poNativeTheta(Lt,T,a));}
+        ${L.detail ? "// A detail engine's coupled box face (not a wall): the prescribed velocity, US.\n        else if(other==-1.0){u=us;}\n        " : ""}else{u=us+sign*x/(4.0*h*poNativeTheta(Lt,T,a));}
       }
       // A still page's discarded correction: its liquid faces' only (a face with no liquid side is the extension's, not
       // the projection's, so its kick is no correction).

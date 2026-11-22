@@ -8,6 +8,9 @@
  * - the shell's slab index is a bijection onto [0, brickDetailNodes) and its WGSL is defined only for detail layouts;
  * - the parent's shader text without a detail layout is unchanged (the hooks are all conditional);
  * - the fine surface closes the container's walls and leaves the coupled faces open;
+ * - deep coupled faces may be native 4h rows: the census holds a face tile h only near the parent's surface, rowsC
+ *   prescribes a native row's coupled face (its flux, no coupling, never a wall), projectC keeps its US, and
+ *   regionStill never freezes a page of the coupled shell; without a detail layout those kernels' text is unchanged;
  * - the scene document: automatic detail validates, a detail region validates and survives the editor's record round
  *   trip, a detail change re-seeds the solve while an ordinary region stays live, and the uniform engine refuses detail.
  */
@@ -28,9 +31,11 @@ import { brickDetailSpecs, detailCoupledFaces } from "./brick-detail";
 import { automaticDetailBoxes, brickDetailBoxes } from "./brick-detail-regions";
 import { brickDetailSceneGaps, brickDetailSubScene } from "./brick-detail-scene";
 import { DETAIL_DEPTH, brickDetailIndex, brickDetailNodes, brickDetailWGSL } from "./brick-detail.wgsl";
+import { brickPressureSolver } from "./brick-pressure-solver";
+import { brickRegionHeatKernels } from "./brick-region-heat.wgsl";
 import { brickDetailSurfaceCapacity, brickDetailSurfaceWGSL } from "./brick-detail-surface";
 import { BRICK_SOURCE_WGSL, brickSourceWGSL } from "./brick-source.wgsl";
-import type { BrickLayout } from "./brick-abi";
+import { BrickLayout } from "./brick-abi";
 import type { Vec3 } from "./brick-engine";
 import "../index";
 
@@ -144,6 +149,30 @@ test("the parent's shader text is unchanged without a detail layout", () => {
   const text = brickSourceWGSL(D);
   assert.match(text, /fn nbSourcePhi\(p:vec3f,value:f32\)->f32\{return nbDetailPhi\(p,nbSourcePhiCore\(p,value\)\);\}/);
   assert.match(brickDetailWGSL(D), /const NB_DTL_CLO:vec3<bool>=vec3<bool>\(true,false,false\)/);
+});
+
+test("deep coupled faces: native rows prescribed, the hold near the parent's surface, the shell never still", () => {
+  const pressure = (L: BrickLayout) => {
+    const s = brickPressureSolver!(L), texts = new Map<string, string>();
+    for (const p of [...(s.before ?? []), ...s.setup, ...s.finish, ...Array.from({ length: s.slots }, (_, k) => s.slot(k)).flat()]) texts.set(p.kernel.label, p.kernel.code);
+    return texts;
+  };
+  const options = { lattice: [64, 64, 64] as [number, number, number], box: [48, 48, 48] as [number, number, number], f: 125, c: 8, b: 16, k: 0, particles: 1024 };
+  const plain = new BrickLayout(options), nested = new BrickLayout({ ...options, detail: { factor: 2, nodes: [27, 27, 27], coupled: 0b111011 } });
+  const p0 = pressure(plain), p1 = pressure(nested), still = (L: BrickLayout) => brickRegionHeatKernels(L).regionStill.code;
+  const rowsC = (m: Map<string, string>) => m.get("pressureRowsC")!, projectC = (m: Map<string, string>) => m.get("pressureProjectC")!;
+  assert.ok(rowsC(p0) && projectC(p0));
+  // Off a detail layout: the native wall slot and the projection's walls as they were.
+  assert.ok(!rowsC(p0).includes("coupled box face") && projectC(p0).includes("let wall=T[a]==0||4*T[a]==NB_BOX[a];"));
+  assert.ok(!still(plain).includes("lo+vec3i(32)>box"));
+  // A detail layout: the coupled face is the row's prescribed flux (no DIAG, no lift, attached), projected as US.
+  assert.ok(rowsC(p1).includes("if(((59u>>f)&1u)!=0u){div+=f32(sign)*nbFacePlane(plane,a);poSetWall(poFlagsWordC(select(T,Tn,side==1u)),a,false);continue;}"));
+  assert.ok(projectC(p1).includes("let wall=(T[a]==0||4*T[a]==NB_BOX[a])&&((59u>>(2u*a+select(0u,1u,T[a]!=0)))&1u)==0u;"));
+  assert.ok(projectC(p1).includes("else if(other==-1.0){u=us;}"));
+  // The floor (bit 2, not coupled) stays a wall in the walls' re-decision.
+  assert.match(p1.get("pmgWallsC")!, /fn pWallFace\(c:vec3i,a:u32,n:i32\)->i32\{let m=59u;/);
+  assert.ok(still(nested).includes("{let lo=32*P;let reach=12;let box=vec3i(48,48,48);\n   if(lane==0u&&(any(vec3<bool>(true,false,true)&(lo<vec3i(reach)))||any(vec3<bool>(true,true,true)&(lo+vec3i(32)>box-vec3i(reach))))){atomicStore(&wgWarm,1u);}}"));
+  assert.match(brickDetailWGSL(nested), /fn nbDetailHeld\(t:vec3i\)->bool\{let c=4\.0\*vec3f\(t\)\+vec3f\(2\.0\);return nbDtlWall\(c\)<=2\.0&&abs\(nbDtlPhi\(c\)\)<NB_DTL_REACH;\}/);
 });
 
 test("the fine surface: side walls and lid capped, the floor and the coupled faces open", () => {

@@ -49,6 +49,7 @@
  */
 import { BRICK_SOURCE_BINDING, BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 import { ARGS, BrickLayout, LIST } from "./brick-abi";
+import { DETAIL_SHELL } from "./brick-detail.wgsl";
 import { CFG, type BrickBinding, type BrickKernel } from "./brick-kernel";
 import { CENSUS, CENSUS_FORMULAS, CENSUS_HOOKS, CENSUS_OWNER, CENSUS_REGION, censusKernel, censusPlanWGSL } from "./brick-census.wgsl";
 import { uniformTileFineDefectWGSL, uniformTileSurfaceRateWGSL } from "../uniform/uniform-tile-update-error";
@@ -236,7 +237,14 @@ var<workgroup> wgWarm:atomic<u32>;
   let g=nbGroup(wid);
   if(lane==0u){wgGo=select(0u,1u,g<nbListCount(NB_LIST_C_ALL));atomicStore(&wgWarm,0u);}
   if(workgroupUniformLoad(&wgGo)==0u){return;}
-  let cs=nbListSlot(NB_LIST_C_ALL,g);let P=nbKeyCoord(nbCRec(cs,NB_REC_KEY));
+  let cs=nbListSlot(NB_LIST_C_ALL,g);let P=nbKeyCoord(nbCRec(cs,NB_REC_KEY));${L.detail ? (() => {
+    const d = L.detail, b = (side: number) => `vec3<bool>(${[0, 1, 2].map(a => ((d.coupled >> (2 * a + side)) & 1) !== 0).join(",")})`;
+    // A detail engine's coupled shell (brick-detail.wgsl.ts) follows the parent every step: a page within it is never
+    // still (its faces' relaxed velocity and the shell's φ are rewritten each step, never frozen).
+    return `
+  {let lo=32*P;let reach=${DETAIL_SHELL * d.factor + 4};let box=vec3i(${L.box.join(",")});
+   if(lane==0u&&(any(${b(0)}&(lo<vec3i(reach)))||any(${b(1)}&(lo+vec3i(32)>box-vec3i(reach))))){atomicStore(&wgWarm,1u);}}`;
+  })() : ""}
   if(lane<27u){
     let q=P+nbNeighbourOffset(lane);
     // A page with an F child (its h bricks, their particles and seams) in the 27 keeps the page live.
