@@ -22,6 +22,7 @@ import { brickSourceWords } from "./brick-source.wgsl";
 import { BRICK_SOLID_EDIT_WORDS, brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
 import { ARGS, BODY_FLAG, BOX_TOKEN, BrickLayout, boxPadded, FAIL, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
 import { brickStaticNeedWords } from "./brick-static-need.wgsl";
+import { brickDetailWords, type BrickDetailLayout } from "./brick-detail.wgsl";
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
@@ -88,6 +89,13 @@ export interface BrickEngineOptions {
   /** Drops queued while the scene runs (queueDrop: a ball dropped into it, injectLiquidBall). The drop boxes' claim
    * (resSource) is scheduled as with `sources`: 8 workgroups a residency pass that skip an empty box. */
   readonly liveDrops?: boolean;
+  /** A detail engine's coupling to its parent (brick-detail.ts, BrickLayoutOptions.detail): the relaxation shell's
+   * hooks, the parent's nodes after `src`'s stub (written by the parent's exchange), and the shell's claim (resDetail,
+   * 8 workgroups a residency pass). Absent: none. */
+  readonly detail?: BrickDetailLayout;
+  /** With detail: encodes the parent's state into `src` before the boot is queued (brick-detail.ts's exchange), so the
+   * boot's residency claims the shell the parent's liquid reaches. */
+  readonly primeDetail?: (buffer: (name: string) => GPUBuffer) => void;
   /** The static voxel mask (brick-static.wgsl.ts brickStaticMask: its words and walls), bound as `solid` and stamped
    * by solidStamp (M3). Absent: the box rule alone, no binding, no stamp. */
   readonly staticMask?: BrickStaticMaskBinding;
@@ -461,9 +469,11 @@ export class BrickEngine {
       // Tiered, pass 0 also runs the page sources: a workgroup a page of C_ALL after F_ALL's bricks (FC_G1).
       { kernel: res.resMark, dispatch: tiered ? { indirect: ARGS.FC_G1 } : g1(LIST.F_ALL), z: 0 },
       ...(sources ? [{ kernel: res.resSource, dispatch: direct(8), z: 0 }] : []),
+      ...(res.resDetail ? [{ kernel: res.resDetail, dispatch: direct(8), z: 0 }] : []),
       { kernel: set.setClaimPages, dispatch: direct(churnGroups(f, 64)) },
       { kernel: res.resMark, dispatch: g1(LIST.F_ALL), z: 1 },
       ...(sources ? [{ kernel: res.resSource, dispatch: direct(8), z: 1 }] : []),
+      ...(res.resDetail ? [{ kernel: res.resDetail, dispatch: direct(8), z: 1 }] : []),
       { kernel: set.setClaimBricks, dispatch: direct(churnGroups(f, 64)), z: 0 },
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
@@ -520,7 +530,8 @@ export class BrickEngine {
     const mask = brickStaticBinding(options), deferred = mask !== undefined && options.staticsDeferred === true;
     // The wall view (BrickLayout.wallView): terrain or a procedural boundary, which a deferred (empty) mask has not.
     const wallView = mask !== undefined && !deferred && (mask.walls.terrain !== undefined || mask.walls.boundary !== undefined);
-    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...(options.openSides ? { openSides: true } : {}), ...options.capacities, apic: options.apic, ...(staticTiles ? { staticTiles: true } : {}), ...(wallView ? { wallView: true } : {}) });
+    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...(options.openSides ? { openSides: true } : {}), ...options.capacities, apic: options.apic, ...(staticTiles ? { staticTiles: true } : {}), ...(wallView ? { wallView: true } : {}), ...(options.detail ? { detail: options.detail } : {}) });
+    if (options.detail && (options.sources || options.liveDrops)) throw new Error("Brick engine: a detail engine has no sources (its liquid enters through the coupled shell)");
     const kPlain = layout.cap.k > 0 && (!deferred || options.bodies !== undefined);
     const solverFor = (cuts?: false) => options.solver(layout, { ...(options.bodies ? { bodies: { frame_m: options.bodies.frame_m, h_m: options.bodies.h_m } } : {}), ...(cuts === false ? { cuts } : {}) });
     const solver = solverFor(kPlain || !deferred ? undefined : false);
@@ -592,6 +603,7 @@ export class BrickEngine {
     if (armed) { engine.armed = armed; engine.armedBuffers = [...Object.entries(armed.solver.buffers), ...Object.entries(armed.stages.buffers)]; }
     engine.allocate([...initial, ...boot.pages]);
     engine.record();
+    options.primeDetail?.(name => engine.buffer(name as never));
     engine.boot();
     engine.encodeAhead();
     if (editOnly.length) {
@@ -735,7 +747,7 @@ export class BrickEngine {
     if (mask && this.stages.tiered === true) make("staticNeed", brickStaticNeedWords(L));
     // The sources' static record (brick-source.ts): every drop's extrusion edges, once; a stub with no sources.
     const edges = this.options.sources?.edges;
-    const src = make("src", brickSourceWords(edges ? edges.length / 4 : 0));
+    const src = make("src", this.layout.detail ? brickDetailWords(this.layout.detail) : brickSourceWords(edges ? edges.length / 4 : 0));
     if (edges?.length) uploadWords(d.queue, src, 0, edges);
     const lane = [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)];
     for (const [name, words] of lane) {

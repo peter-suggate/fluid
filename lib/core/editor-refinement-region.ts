@@ -44,6 +44,7 @@ import {
   DEFAULT_REGION_DRAFT,
   nextRefinementRegionId,
   OCTREE_REFINEMENT_REGION_CAPACITY,
+  DETAIL_REGION_CELL_SIZES,
   OCTREE_REFINEMENT_REGION_CELL_SIZES,
   refinementRegionLattice,
   sceneRefinementRegions,
@@ -260,9 +261,12 @@ export const studioRegionSpace: RegionSpace<SceneDescription, Partial<SceneDescr
  * both and enforce nothing, so a box here holds one tier and never a range.
  */
 const uniformRegionSpace: RegionSpace<SceneDescription, Partial<SceneDescription>> = {
-  ...studioRegionSpace, cellSizes: [1, 4], defaultCellSize_cells: 1, brick_cells: 4, allowAutomaticCeiling: false,
+  ...studioRegionSpace, cellSizes: [...DETAIL_REGION_CELL_SIZES, 1, 4], defaultCellSize_cells: 1, brick_cells: 4, allowAutomaticCeiling: false,
   drawHint: "Drag a box over the water where it needs finer simulation",
   heldTiers: [
+    // The brick engine's nested detail engines (brick-detail.ts): a box simulated and drawn at h / 4 or h / 2.
+    { cells: 0.25, label: "Detail \u00d74", note: "h/4", hint: "A nested fine engine runs inside the box at a quarter of the cell size, coupled to the scene on its open faces, and the box shows its surface. The brick engine only; costly." },
+    { cells: 0.5, label: "Detail \u00d72", note: "h/2", hint: "A nested fine engine runs inside the box at half the cell size, coupled to the scene on its open faces, and the box shows its surface. The brick engine only." },
     { cells: 1, label: "Fine", hint: "Covered tiles run at the finest cell (h) under every detail policy; the solver never clips a Fine box." },
     { cells: 4, label: "Coarse", hint: "Covered tiles stay one 4h cell each under Dynamic detail (solid contact stays h); Requested is already 4h outside Fine boxes." },
   ],

@@ -1,3 +1,4 @@
+import { sceneDetailRegions } from "./refinement-regions";
 import { rigidScreenBounds } from "../svo/features/primary-visibility/rigid-screen-bounds";
 import { ROUNDED_PLATE_RENDER_TAG } from "./rigid-cut-render";
 import {publishSceneRigidSurfaces} from './rigid-surface';
@@ -558,7 +559,16 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
 export function gpuSceneSeedKey(scene: SceneDescription, methodId?: string): string {
   const c = scene.container;
   const geometry = (methodId === "adaptive-mass" || methodId === "adaptive-volume") ? "live-fluid" : authoredFluidGeometryKey(scene);
-  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${geometry}:${JSON.stringify(scene.fluid.initialVelocity_m_s ?? null)}:${JSON.stringify(scene.fluid.initialHeightField ?? null)}:${JSON.stringify(scene.fluid.refinementKeyframes ?? null)}:${terrainContentStamp(scene.terrain)}:${proceduralSolidKey(scene.solidBoundary)}:${inflowBudgetKey(scene.fluid.inflow)}`;
+  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${geometry}:${JSON.stringify(scene.fluid.initialVelocity_m_s ?? null)}:${JSON.stringify(scene.fluid.initialHeightField ?? null)}:${JSON.stringify(scene.fluid.refinementKeyframes ?? null)}:${terrainContentStamp(scene.terrain)}:${proceduralSolidKey(scene.solidBoundary)}:${inflowBudgetKey(scene.fluid.inflow)}:${detailEngineKey(scene)}`;
+}
+
+/**
+ * The brick engine's nested detail engines (brick-detail.ts): its detail regions (sub-cell minimum) and automatic
+ * detail. They are built with the solver, so a change is a re-seed, never a live region edit.
+ */
+function detailEngineKey(scene: SceneDescription): string {
+  const regions = sceneDetailRegions(scene).map((r) => `${r.minimumCellSize_cells}:${r.min_m.x},${r.min_m.y},${r.min_m.z}>${r.max_m.x},${r.max_m.y},${r.max_m.z}`).sort();
+  return `${scene.fluid.automaticDetail?.factor ?? 0}|${regions.join("|")}`;
 }
 
 /**
@@ -3333,6 +3343,7 @@ export class FluidLabRenderer {
       revision: gpuInfo?.surfaceRevision ?? gpuInfo?.encodedSteps ?? 0,
     }) ? this.particleSurfacePipeline : undefined;
     this.waterPipeline.setExtraSurface(fineSurface?.geometry);
+    this.waterPipeline.setDetailSurfaces(this.gpuFluid?.detailSurfaces ?? []);
     // The Water view: the records themselves join the water's interfaces.
     this.waterPipeline.setParticleWater(particlesVisible && composedLayers && particleView(composedLayers) === "water" ? this.gpuFluid?.particleSource : undefined,
       [scene.container.width_m, scene.container.height_m, scene.container.depth_m]);

@@ -3,7 +3,12 @@
 import { RigidDropRow } from "../lib/features/rigid-placement/ui";
 import { InteractiveRows } from "../lib/features/interactive/ui";
 import { LiquidDropRow as SharedLiquidDropRow } from "../lib/features/liquid-drop/ui";
+import { useState } from "react";
 import { RegionRow as SharedRegionRow } from "../lib/features/refinement-region/ui";
+import { ToolstripMenuButton, ToolstripMenuItem, useToolstripSection } from "./toolstrip";
+import { useEditorHost } from "../lib/core/session/host-context";
+import { patchCommitter } from "./EntityOptions";
+import type { SceneDescription } from "../lib/core/model";
 import { studioRegionSpaceForMethod } from "../lib/core/editor-refinement-region";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { voxelToolGroups } from "../lib/core/editor-voxel-tool-actions";
@@ -57,7 +62,49 @@ export function RegionRow() {
   return <SharedRegionRow
     space={studioRegionSpaceForMethod(methodId)}
     doc={scene}
+    after={methodId === "uniform-narrow-band-flip" ? <AutomaticDetailMenu scene={scene} /> : undefined}
   />;
+}
+
+/** The automatic detail factors on offer: none, h / 2 and h / 4. */
+const AUTOMATIC_DETAIL_CHOICES = [
+  { factor: undefined, label: "Off", hint: "Only the boxes drawn as Detail tiers run a nested fine engine." },
+  { factor: 2, label: "Detail \u00d72", hint: "Every thin obstacle the moving liquid strikes (rods, posts) gets a nested engine at half the cell size." },
+  { factor: 4, label: "Detail \u00d74", hint: "Every thin obstacle the moving liquid strikes (rods, posts) gets a nested engine at a quarter of the cell size: costly." },
+] as const;
+
+/**
+ * Whether the brick engine places detail boxes by itself (`fluid.automaticDetail`, brick-detail-regions.ts): around
+ * every thin upstanding obstacle in the liquid's reach, in a scene with energy to splash. A scene setting rather than
+ * a box, so it rides beside the region chooser and commits (and undoes) as one scene edit, which rebuilds the solve.
+ */
+function AutomaticDetailMenu({ scene }: { scene: SceneDescription }) {
+  const commit = patchCommitter(useEditorHost<SceneDescription, Partial<SceneDescription>>());
+  const [open, setOpen] = useState(false);
+  const { claim } = useToolstripSection("automatic-detail", () => setOpen(false));
+  const raise = (next: boolean) => { claim(next); setOpen(next); };
+  const current = scene.fluid.automaticDetail?.factor;
+  return <ToolstripMenuButton
+    label={`Automatic detail: ${AUTOMATIC_DETAIL_CHOICES.find((choice) => choice.factor === current)?.label ?? "Off"}`}
+    hint="Nested fine engines placed automatically where fast liquid meets thin obstacles."
+    open={open}
+    testId="automatic-detail"
+    onOpen={raise}
+  >
+    {AUTOMATIC_DETAIL_CHOICES.map((choice) => <ToolstripMenuItem
+      key={choice.label}
+      label={choice.label}
+      title={choice.hint}
+      active={choice.factor === current}
+      testId={`automatic-detail-${choice.factor ?? "off"}`}
+      onClick={() => {
+        raise(false);
+        if (choice.factor === current) return;
+        const { automaticDetail: _previous, ...fluid } = scene.fluid;
+        commit(`Automatic detail ${choice.label}`, { fluid: choice.factor ? { ...fluid, automaticDetail: { factor: choice.factor } } : fluid }, { reseed: true });
+      }}
+    />)}
+  </ToolstripMenuButton>;
 }
 
 /**

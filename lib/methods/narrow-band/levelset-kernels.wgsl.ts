@@ -37,7 +37,7 @@ import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_PHI_WGSL, FG_RI
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 import { CENSUS } from "./brick-census.wgsl";
-import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
+import { brickSourceWGSL } from "./brick-source.wgsl";
 import { BRICK_SOLID_LEVEL_SET_WGSL, brickLevelSetDeferWGSL, brickPhiSolidWGSL } from "./brick-solid-walk.wgsl";
 import { brickStaticWGSL, type BrickStaticWalls } from "./brick-static.wgsl";
 
@@ -114,7 +114,7 @@ var<workgroup> sFresh:u32;
 }`);
 
   const lAdvectBindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell, FB.src];
-  const lAdvectCode = [base, FG_VEL_WGSL, FG_SAMPLE_WGSL, nbfLevelSetConstantsWGSL, levelSetReleaseWGSL(), BRICK_SOURCE_WGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
+  const lAdvectCode = [base, FG_VEL_WGSL, FG_SAMPLE_WGSL, nbfLevelSetConstantsWGSL, levelSetReleaseWGSL(), brickSourceWGSL(L)].join("\n") + LS_SET_WGSL + /* wgsl */`
 fn nbxTraceVelocity(x:vec3f)->vec3f{return fgSampleVel(x,0u,3u);}
 fn nbxPointFrom(q:vec3f,x:vec3f)->vec3f{return fgHeld(x);}
 fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x4c540000u);}
@@ -266,7 +266,7 @@ var<workgroup> sCount:u32;
  }
 }`);
 
-  const lUnion = k("lUnion", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell, FB.src], [base, nbfLevelSetConstantsWGSL, BRICK_SOURCE_WGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
+  const lUnion = k("lUnion", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell, FB.src], [base, nbfLevelSetConstantsWGSL, brickSourceWGSL(L)].join("\n") + LS_SET_WGSL + /* wgsl */`
 var<private> lHome:vec3i;
 // The 3^3 tile stage about the vertex's tile (nbCoupleHeat): θ heat, or the surface heat less one; -1 where it
 // does not count (no slot, outside the box, or a dry tile for the surface heat). Tiered, a tile no F slot holds

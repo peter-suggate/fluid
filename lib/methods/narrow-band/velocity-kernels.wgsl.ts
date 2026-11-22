@@ -22,6 +22,7 @@
  * sweep extends takes no delta, as the old engine did where the 4h band did not reach); no cold freeze or thaw.
  */
 import { BRICK_SOURCE_RING_WGSL, BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
+import { brickDetailWGSL } from "./brick-detail.wgsl";
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
@@ -617,7 +618,13 @@ fn pdLiquidAt(c:vec3i)->bool{
 
   // uTransfer (transferProperties, then forces): a workgroup a brick, a lane two cells' three lower faces. Stages
   // the 125 tiles about the brick (the 27 about each face's home tile) and its 9^3 depth vertices.
-  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdepPlain, ...(F.tiered ? [FB.partsRO] : [])], windowBase + FG_RING_WGSL(10, null, false) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + BRICK_SOURCE_RING_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
+  // A detail engine (brick-detail.wgsl.ts): the forces' velocity relaxed toward the parent's in the coupled shell, after
+  // the nozzle's, on the F faces and the C faces (binds src).
+  const vDetail = (code: string) => L.detail === undefined ? code : [
+    ["if(nbInflowOn()){value=nbInflowForced(n,a,value);}", "if(nbInflowOn()){value=nbInflowForced(n,a,value);}\n   value=nbDetailForced(n,a,value);"],
+    ...(F.tiered ? [["if(nbInflowOn()){value=vcInflowForced(T,a,value);}", "if(nbInflowOn()){value=vcInflowForced(T,a,value);}\n   value=nbDetailForced4(T,a,value);"]] : []),
+  ].reduce((c, [from, to]) => strictSub(c, from!, to!), code) + brickDetailWGSL(L);
+  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdepPlain, ...(F.tiered ? [FB.partsRO] : []), ...(L.detail ? [FB.src] : [])], vDetail(windowBase + FG_RING_WGSL(10, null, false) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + BRICK_SOURCE_RING_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
 var<workgroup> wHeat:array<f32,125>;
 var<workgroup> wHot:array<f32,125>;
 var<workgroup> wDepth:array<f32,729>;
@@ -726,7 +733,7 @@ ${stagedHead("vcTransferPage", -1)}
    vel[vAt(NB_VEL_F_US0,slot,a,l)]=value;vel[vAt(NB_VEL_F_U0,slot,a,l)]=value;
   }
  }
-}`);
+}`));
 
   // uKick: the boot's projected half kick's force (UniformMixedFrame.kick, webgpu-uniform-reference.ts kickMixedFrame:
   // an advance of lead dt/2 with gravity alone, no transport, viscosity, capillarity or volume term). Per open face:

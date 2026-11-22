@@ -132,6 +132,8 @@ export function fluidConstantsWGSL(F: FluidLayout): string {
 }
 
 /** A lane F kernel: the ABI prelude (set atomic as nbSet, dir plain), F's constants, its bindings, then the body. */
+const FG_FACE_OPEN = "fn fgFaceOpen(c:vec3i,a:u32)->bool{var t=c;t[a]=0;return nbInWallBox(t)&&c[a]>0&&c[a]<NB_WALL_BOX[a];}";
+
 export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindings: readonly BrickBinding[], body: string, entry = label): BrickKernel {
   // A kernel that never writes fcell binds it read-only and reads it with plain loads (FG_FCELL_RO_WGSL): the same
   // words (no lane of the dispatch writes them), without a device atomic a read.
@@ -143,6 +145,9 @@ export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindi
   const ring = (body.includes("fn fgPhiWord") && !body.includes("fn fgRingAt") ? FG_NO_RING_WGSL : "")
     + (body.includes("fn fsCacheOf") && !body.includes("fn fsCacheRawStaged") ? "\nfn fsCacheRawStaged(T:vec3i,a:u32)->f32{return fsCacheRaw(T,a);}" : "")
     + (body.includes("fn fsUnit(") && !body.includes("fn fsUnitAbsent") ? "\nfn fsUnitAbsent(c:vec3i,a:u32)->f32{return fsTapH(c,a,false);}" : "");
+  // A detail engine's coupled box planes are open faces (brick-detail.wgsl.ts): they carry the parent's velocity, which
+  // the forces relax to and the pressure prescribes (pressure-composite.wgsl.ts pressureDetailFaces).
+  if (L.detail && body.includes(FG_FACE_OPEN)) body = body.replace(FG_FACE_OPEN, `fn fgFaceOpen(c:vec3i,a:u32)->bool{var t=c;t[a]=0;let lo=((${L.detail.coupled}u>>(2u*a))&1u)!=0u;let hi=((${L.detail.coupled}u>>(2u*a+1u))&1u)!=0u;return nbInWallBox(t)&&(c[a]>0||(lo&&c[a]==0))&&(c[a]<NB_WALL_BOX[a]||(hi&&c[a]==NB_WALL_BOX[a]));}`);
   return {
     label, entry, bindings,
     // The box hook (brick-abi.md §2, M3 padding): the walls and the cell domain at the box, the storage at the lattice.

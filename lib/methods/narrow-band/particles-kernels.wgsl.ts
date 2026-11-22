@@ -35,6 +35,7 @@
  * Sparse retirement is off (sparseNeighbours 0, as the old method's default).
  */
 import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
+import { brickDetailWGSL } from "./brick-detail.wgsl";
 import { ARGS, type BrickLayout } from "./brick-abi";
 import type { BrickBinding, BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
@@ -226,7 +227,9 @@ fn pFile(i:u32,p:Particle,split:bool){
  var p=parts[pAt(src,i)];
  if(!nbLive(p)){return;}
  if(cfg.z==1u){pFile(i,p,false);return;}
- var q=p.position.xyz;
+ var q=p.position.xyz;${L.detail ? `
+ // A detail engine: a record in the coupled shell's outer half where the parent is air retires (brick-detail.wgsl.ts).
+ if(nbDetailRetire(q)){return;}` : ""}
  // pSeparate's shift for this record (a merged record, whose position and mass change below, takes its own).
  let sep=fmoved[i].position.xyz;var merged=false;
  // R1: a record whose tile was 4h-owned at the last two rebins (TILE_OCC bits 16 and 24 + tile, pScan) and is
@@ -343,8 +346,10 @@ fn sepSum(src:u32,i:u32,q:vec3f,m:f32)->vec3f{
 }`);
   // Statics (lane E, brick-solid-walk.wgsl.ts): pMove defers a NEAR_SOLID brick's records to pSolid, which moves them
   // with pMove's text and the solid walk.
-  const pMove = k("pMove", pMoveBindings, statics ? BRICK_SOLID_PARTICLE_WGSL + brickMoveDeferWGSL(pMoveCode) : pMoveCode);
-  const pSolid = statics ? k("pSolid", ground ? [...pMoveBindings, solidRO] : pMoveBindings, (ground ? ground + (field ? brickSolidParticleFieldWGSL(walls?.terrain !== undefined) : BRICK_SOLID_PARTICLE_TERRAIN_WGSL) : BRICK_SOLID_PARTICLE_WGSL) + brickPSolidWGSL(pMoveCode)) : undefined;
+  // A detail engine's pMove and pSolid (pMove's body for the records it defers) retire the shell's records (binds src).
+  const dB = L.detail ? [FB.src] : [], dW = L.detail ? brickDetailWGSL(L) : "";
+  const pMove = k("pMove", [...pMoveBindings, ...dB], (statics ? BRICK_SOLID_PARTICLE_WGSL + brickMoveDeferWGSL(pMoveCode) : pMoveCode) + dW);
+  const pSolid = statics ? k("pSolid", [...pMoveBindings, ...(ground ? [solidRO] : []), ...dB], (ground ? ground + (field ? brickSolidParticleFieldWGSL(walls?.terrain !== undefined) : BRICK_SOLID_PARTICLE_TERRAIN_WGSL) : BRICK_SOLID_PARTICLE_WGSL) + brickPSolidWGSL(pMoveCode) + dW) : undefined;
 
   const pScan = k("pScan", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, BANK_WGSL].join("\n") + /* wgsl */`
 var<workgroup> scan:array<u32,256>;

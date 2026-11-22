@@ -194,6 +194,12 @@ export interface InjectedLiquidBall {
 }
 
 /** Minimal interface the renderer needs from a GPU solver. */
+/** A detail engine's mesh (GPUSolverInstance.detailSurfaces). */
+export interface GPUDetailSurface {
+  readonly geometry: { readonly vertices: GPUBuffer; readonly indirect: GPUBuffer; readonly indirectOffset: number };
+  readonly box_m: readonly [readonly [number, number, number], readonly [number, number, number]];
+}
+
 export interface GPUSolverInstance {
   readonly info: GPUEulerianInfo;
   /** The cloth pose `readClothPose` last read back, for picking, editing and history. */
@@ -238,6 +244,11 @@ export interface GPUSolverInstance {
   /** Capture a health receipt in the caller's submission; read only after submitting it. */
   captureSimulationHealth?(encoder: GPUCommandEncoder): () => Promise<void>;
   readonly denseLevelSetVolumeSource?: DenseLevelSetVolumeConsumerSource;
+  /**
+   * Nested detail engines' own surfaces (NB-FLIP detail boxes): each a mesh in the water's SurfaceVertex layout and
+   * its box in world metres. The renderer draws each beside the level set's mesh and not that mesh inside the boxes.
+   */
+  readonly detailSurfaces?: readonly GPUDetailSurface[];
   readonly volumeTexture: GPUTexture;
   /** Field the renderer contours; a smooth level set when the solver keeps one separate from volumeTexture. */
   readonly surfaceFieldTexture?: GPUTexture;

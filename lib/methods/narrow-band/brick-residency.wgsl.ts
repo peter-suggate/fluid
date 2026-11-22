@@ -100,7 +100,8 @@ import { BOX_TOKEN, type BrickLayout } from "./brick-abi";
 import { CFG, type BrickBinding } from "./brick-kernel";
 import { censusKernel } from "./brick-census.wgsl";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
-import { BRICK_SOURCE_RING_WGSL } from "./brick-source.wgsl";
+import { BRICK_SOURCE_BINDING, BRICK_SOURCE_RING_WGSL } from "./brick-source.wgsl";
+import { brickDetailWGSL } from "./brick-detail.wgsl";
 
 /**
  * Each source class's margin past its move, in cells, the largest distance a stage reads past the class's tiles (the
@@ -370,5 +371,21 @@ fn rmFlowSide(s:u32,a:u32,side:u32)->f32{
     }` : ""}
   }
 }`);
-  return { resMark, resSource };
+  // resDetail (a detail engine's, brick-detail.wgsl.ts): the coupled shell's bricks where the parent's liquid is near
+  // (its φ at the brick's centre under NB_DTL_REACH) as one more source after resMark's pass, so the shell holds
+  // storage for the liquid the relaxation brings in. Tiered it keeps or claims their pages alone (pass 0): the parent's
+  // liquid is 4h storage until the census refines it, as a page source's is; all-h, the bricks (both passes, as
+  // resSource's). A workgroup strides the box's bricks; one past the shell's reach is skipped on its distance alone.
+  const d = L.detail;
+  const resDetail = d ? censusKernel(L, "resDetail", [CFG, setRW, dirRW, BRICK_SOURCE_BINDING], brickDetailWGSL(L) + RQ_WGSL + /* wgsl */`
+@compute @workgroup_size(64) fn resDetail(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) nw:vec3u){
+  let rpass=cfg.z;${tiered ? "if(rpass!=0u){return;}" : ""}
+  let ext=vec3u(ceil(NB_DTL_BOX/8.0));let n=ext.x*ext.y*ext.z;
+  for(var j=wid.x*64u+lane;j<n;j+=64u*nw.x){
+    let q=vec3i(vec3u(j%ext.x,(j/ext.x)%ext.y,j/(ext.x*ext.y)));let centre=8.0*vec3f(q)+vec3f(4.0);
+    if(nbDtlWall(centre)>NB_DTL_SHELL+4.0||nbDtlPhi(centre)>NB_DTL_REACH){continue;}
+    ${tiered ? "let p=q>>vec3u(2u);if(!rqPageSettled(p)){rqPage(p);}" : "if(!rqSettled(q,rpass)){rqBrick(q,rpass);}"}
+  }
+}`) : undefined;
+  return { resMark, resSource, ...(resDetail ? { resDetail } : {}) };
 }

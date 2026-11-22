@@ -48,6 +48,35 @@ export const OCTREE_REFINEMENT_REGION_CELL_SIZES: readonly number[] =
 
 export const DEFAULT_REFINEMENT_REGION_CELL_SIZE = 8;
 
+/**
+ * Sub-cell detail (the brick engine's nested detail engines, brick-detail.ts):
+ * a region whose minimum cell size is below one finest cell asks for a fine
+ * simulation inside it at h / 2 or h / 4. Only the brick NB-FLIP engine
+ * honours these; every other method refuses them explicitly.
+ */
+export const DETAIL_REGION_CELL_SIZES: readonly number[] = Object.freeze([0.25, 0.5]);
+/** Every minimum cell size a region may carry: the detail rungs below the octree's ladder. */
+export const REFINEMENT_REGION_CELL_SIZES: readonly number[] =
+  Object.freeze([...DETAIL_REGION_CELL_SIZES, ...OCTREE_REFINEMENT_REGION_CELL_SIZES]);
+
+/** A detail region's refinement factor (2 or 4), or undefined for an ordinary region. */
+export function refinementRegionDetailFactor(region: Pick<FluidRefinementRegion, "minimumCellSize_cells">): 2 | 4 | undefined {
+  const cells = region.minimumCellSize_cells;
+  return cells === 0.5 ? 2 : cells === 0.25 ? 4 : undefined;
+}
+
+/** The scene's detail regions (sub-cell minimum), in authored order. */
+export function sceneDetailRegions(scene: SceneDescription): readonly FluidRefinementRegion[] {
+  return sceneRefinementRegions(scene).filter(region => refinementRegionDetailFactor(region) !== undefined);
+}
+
+/** Why a method other than the brick engine cannot run this scene's detail regions (undefined: it has none). */
+export function detailRegionRefusal(scene: SceneDescription, method: string): string | undefined {
+  const authored = sceneDetailRegions(scene).length, automatic = scene.fluid?.automaticDetail !== undefined;
+  if (authored === 0 && !automatic) return undefined;
+  return `${method} cannot run sub-cell detail regions (${authored ? `${authored} authored` : "automatic detail"}); only the brick NB-FLIP engine nests detail engines`;
+}
+
 /** The one rule a region can express today. */
 export const REFINEMENT_REGION_RULES = Object.freeze([
   {
@@ -101,8 +130,8 @@ export const DEFAULT_REGION_DRAFT: RegionDraft =
 /** Round a requested cell-size bound down onto the dyadic ladder above. */
 export function clampRefinementRegionCellSize(requested: number): number {
   if (!Number.isFinite(requested)) return DEFAULT_REFINEMENT_REGION_CELL_SIZE;
-  let chosen = OCTREE_REFINEMENT_REGION_CELL_SIZES[0]!;
-  for (const size of OCTREE_REFINEMENT_REGION_CELL_SIZES) {
+  let chosen = REFINEMENT_REGION_CELL_SIZES[0]!;
+  for (const size of REFINEMENT_REGION_CELL_SIZES) {
     if (size <= requested + 1e-9) chosen = size;
   }
   return chosen;
@@ -212,12 +241,12 @@ export function validateRefinementRegions(
       || max!.z < -container.depth_m / 2 || min!.z > container.depth_m / 2) {
       errors.push(`${where} must overlap the container`);
     }
-    if (!OCTREE_REFINEMENT_REGION_CELL_SIZES.includes(region?.minimumCellSize_cells)) {
-      errors.push(`${where} minimum cell size must be one of ${OCTREE_REFINEMENT_REGION_CELL_SIZES.join(", ")} cells`);
+    if (!REFINEMENT_REGION_CELL_SIZES.includes(region?.minimumCellSize_cells)) {
+      errors.push(`${where} minimum cell size must be one of ${REFINEMENT_REGION_CELL_SIZES.join(", ")} cells`);
     }
     if (region?.maximumCellSize_cells !== undefined
-      && !OCTREE_REFINEMENT_REGION_CELL_SIZES.includes(region.maximumCellSize_cells)) {
-      errors.push(`${where} maximum cell size must be one of ${OCTREE_REFINEMENT_REGION_CELL_SIZES.join(", ")} cells`);
+      && !REFINEMENT_REGION_CELL_SIZES.includes(region.maximumCellSize_cells)) {
+      errors.push(`${where} maximum cell size must be one of ${REFINEMENT_REGION_CELL_SIZES.join(", ")} cells`);
     } else if (region?.maximumCellSize_cells !== undefined
       && region.maximumCellSize_cells < region.minimumCellSize_cells) {
       errors.push(`${where} maximum cell size must not be smaller than its minimum cell size`);

@@ -13,7 +13,9 @@
  * texel q is the cell whose +face it is: the brick's lower face (c, a) is the old (c - e_a, a). A vector component at a
  * dynamic axis is read, never written (nbAxisPick).
  */
+import type { BrickLayout } from "./brick-abi";
 import type { BrickBinding } from "./brick-kernel";
+import { brickDetailWGSL } from "./brick-detail.wgsl";
 import { SRC_PIN_MARGIN, SRC_PLUG_OVERLAP, SRC_RING } from "./brick-source";
 
 export const BRICK_SOURCE_BINDING: BrickBinding = { name: "src", kind: "ro", type: "array<f32>" };
@@ -173,3 +175,23 @@ fn nbSourceRegion(r:vec3i)->bool{
   return nbSourcePhi(16.0*vec3f(r)+vec3f(8.0),1.0e30)<8.0*1.7320508+4.0;
 }
 `;
+
+/**
+ * The sources' WGSL for a φ writer (lAdvect, lUnion, the C level set's): BRICK_SOURCE_WGSL, and on a detail layout
+ * (brick-detail.wgsl.ts) its relaxation after the sources, nbSourcePhi = nbDetailPhi(p, the sources' φ). The sources'
+ * own tests (nbSourceTile, nbSourceRegion: the census's and the heat's) keep the sources alone (nbSourcePhiCore), so
+ * the shell is neither a fine source nor a heat trigger. Off a detail layout the text is BRICK_SOURCE_WGSL's.
+ */
+export function brickSourceWGSL(L: BrickLayout): string {
+  if (!L.detail) return BRICK_SOURCE_WGSL;
+  const head = "fn nbSourcePhi(p:vec3f,value:f32)->f32{";
+  if (BRICK_SOURCE_WGSL.split(head).length !== 2) throw new Error("brickSourceWGSL: nbSourcePhi's definition moved");
+  const core = BRICK_SOURCE_WGSL.replace(head, "fn nbSourcePhiCore(p:vec3f,value:f32)->f32{")
+    .replace("return nbSourcePhi(4.0*vec3f(t)+vec3f(2.0),3.0e38)", "return nbSourcePhiCore(4.0*vec3f(t)+vec3f(2.0),3.0e38)")
+    .replace("return nbSourcePhi(16.0*vec3f(r)+vec3f(8.0),1.0e30)", "return nbSourcePhiCore(16.0*vec3f(r)+vec3f(8.0),1.0e30)");
+  if (/nbSourcePhi\(/.test(core)) throw new Error("brickSourceWGSL: a sources' test still reads nbSourcePhi");
+  return core + brickDetailWGSL(L) + /* wgsl */`
+// φ (cells) at p with this step's sources, relaxed toward the parent's in the coupled shell.
+fn nbSourcePhi(p:vec3f,value:f32)->f32{return nbDetailPhi(p,nbSourcePhiCore(p,value));}
+`;
+}

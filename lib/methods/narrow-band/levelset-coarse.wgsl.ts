@@ -119,7 +119,7 @@ import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { FB, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel, fluidLayout } from "./fluid-grid.wgsl";
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
-import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
+import { brickSourceWGSL } from "./brick-source.wgsl";
 
 /** Lane F's kernel whose pass each C kernel can fold into (FC_G1 dispatch), in the frame's order. */
 export const LC_FOLD = { lcAdvect: "lAdvect", lcCouple: "lUnion", lcClear: "lClear", lcRetire: "lDistance", lcPublish: "lPublish" } as const;
@@ -683,7 +683,7 @@ fn lcPublishPage(slot:u32,live:bool,lid:u32){
 
 /** The page bodies (fn lc*Page(slot, live, lid)) and what each needs before it, for folding into lane F's passes. */
 export const levelSetCoarseWGSL = {
-  common: () => [FG_SLOT_WGSL, FG_FCELL_WGSL, ownersWGSL(), LC_TRILINEAR_WGSL, LC_COMMON_WGSL, BRICK_SOURCE_WGSL].join("\n"),
+  common: (L: BrickLayout) => [FG_SLOT_WGSL, FG_FCELL_WGSL, ownersWGSL(), LC_TRILINEAR_WGSL, LC_COMMON_WGSL, brickSourceWGSL(L)].join("\n"),
   advect: () => [LC_VELOCITY_WGSL, nbfLevelSetConstantsWGSL, LC_PHI_ADVECT_REST_WGSL, levelSetReleaseWGSL(), LC_ADVECT_WGSL].join("\n"),
   couple: () => [FG_RUN_WGSL, nbfLevelSetConstantsWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL, LC_NEAR_KNOWN_WGSL, LC_COUPLE_WGSL].join("\n"),
   clear: () => [LC_SEEDS_WGSL, LC_CLEAR_WGSL].join("\n"),
@@ -709,14 +709,14 @@ export interface LevelSetCoarseKernels {
 export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayout(L, { tiered: true })): LevelSetCoarseKernels {
   if (!F.tiered) throw new Error("levelset-coarse: the C kernels read through the tier owners; build them with fluidLayout(L, { tiered: true })");
   const bindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell, FB.src];
-  const k = (label: string, part: string, page: string) => fluidKernel(L, F, label, bindings, [levelSetCoarseWGSL.common(), part, /* wgsl */`
+  const k = (label: string, part: string, page: string) => fluidKernel(L, F, label, bindings, [levelSetCoarseWGSL.common(L), part, /* wgsl */`
 @compute @workgroup_size(256) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_C_ACT);
  var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ACT,g);}
  ${page}(slot,live,lid);
 }`].join("\n"));
   // X8: eight workgroups a page, each one z plane of its C vertices (lcPart), a lane a vertex.
-  const k8 = (label: string, part: string, page: string) => fluidKernel(L, F, label, bindings, [levelSetCoarseWGSL.common(), part, /* wgsl */`
+  const k8 = (label: string, part: string, page: string) => fluidKernel(L, F, label, bindings, [levelSetCoarseWGSL.common(L), part, /* wgsl */`
 @compute @workgroup_size(64) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ACT);
  var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ACT,e);}
@@ -724,7 +724,7 @@ export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayo
 }`].join("\n"));
   return {
     // lcAdvect: eight workgroups a page (LC_ADVECT_GROUPS), each one z plane of its C vertices, a lane a vertex.
-    lcAdvect: fluidKernel(L, F, "lcAdvect", bindings, [levelSetCoarseWGSL.common(), levelSetCoarseWGSL.advect(), /* wgsl */`
+    lcAdvect: fluidKernel(L, F, "lcAdvect", bindings, [levelSetCoarseWGSL.common(L), levelSetCoarseWGSL.advect(), /* wgsl */`
 @compute @workgroup_size(64) fn lcAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ACT);
  var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ACT,e);}

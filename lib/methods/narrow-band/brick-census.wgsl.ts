@@ -81,6 +81,7 @@ import { ARGS, BOX_TOKEN, BrickLayout, H, LIST, brickAbiWGSL, resolveBox } from 
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { BRICK_SOURCE_BINDING, BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
+import { brickDetailWGSL } from "./brick-detail.wgsl";
 import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
 import { BODIES_RO, BODY_CUTS_RO, PB_BRICK_CANDIDATES_WGSL, PB_BRICK_MARK_WGSL, pbBrickBodiesWGSL, type BrickBodiesFrame } from "./bodies-binding.wgsl";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../uniform/uniform-surface-transport.wgsl";
@@ -1401,7 +1402,7 @@ fn ciTile(cs:u32,i:u32,lane:u32){
   // page's F children 8r..8r+7). A band tile is h only when its F brick and each in-range 27-neighbour of it are
   // resident; a clamped tile's missing bricks are appended as candidates, once a page (the page's bit of the 6^3
   // bricks about it in CAND_MASK, whose atomicOr names the one lane that lists it), and it refines one census late.
-  const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRW, BRICK_SOURCE_BINDING, ...(bodies ? [BODIES_RO, BODY_CUTS_RO] : [])], BRICK_SOURCE_WGSL + OWNER + HOOKS + CENSUS_FORMULAS + PLAN + REGION + (bodies ? pbBrickBodiesWGSL(bodies) + PB_BRICK_MARK_WGSL + PB_BRICK_CANDIDATES_WGSL : "") + /* wgsl */`
+  const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRW, BRICK_SOURCE_BINDING, ...(bodies ? [BODIES_RO, BODY_CUTS_RO] : [])], BRICK_SOURCE_WGSL + (L.detail ? brickDetailWGSL(L) : "") + OWNER + HOOKS + CENSUS_FORMULAS + PLAN + REGION + (bodies ? pbBrickBodiesWGSL(bodies) + PB_BRICK_MARK_WGSL + PB_BRICK_CANDIDATES_WGSL : "") + /* wgsl */`
 var<workgroup> wgWant:array<atomic<u32>,2>;
 var<workgroup> wgCount:array<atomic<u32>,4>;
 var<workgroup> wgDec:array<atomic<u32>,2>;
@@ -1485,7 +1486,7 @@ fn cdBodyHeld(t:vec3i)->bool{
     toCoarse=!nbTileH(cs,i)||(known&&(census[o+${CENSUS.CALM}u+word]&bit)!=0u);
     if(!toCoarse){atomicAdd(&nbSet[NB_H_CENSUS_CALM_HELD],1u);}
   }
-${hold ? "  if(cdHeld(t)){band=true;toCoarse=false;}\n" : ""}${bodies ? "  // The body rule (cdBodyHeld): band, and not calm, whatever the rules above decided.\n  if(cdBodyHeld(t)){band=true;toCoarse=false;}\n" : ""}  if(toCoarse){
+${hold ? "  if(cdHeld(t)){band=true;toCoarse=false;}\n" : ""}${bodies ? "  // The body rule (cdBodyHeld): band, and not calm, whatever the rules above decided.\n  if(cdBodyHeld(t)){band=true;toCoarse=false;}\n" : ""}${L.detail ? "  // A detail engine's coupled faces (nbDetailHeld): h where the parent's liquid is near, so no native 4h row meets a\n  // prescribed face (those are the h rows', pressureDetailFaces).\n  if(nbDetailHeld(t)){band=true;toCoarse=false;}\n" : ""}  if(toCoarse){
     band=false;atomicAdd(&nbSet[NB_H_CENSUS_CALM],1u);
     let tc=NC_S*cs+${CENSUS.TC}u+16u*i;
     if(ncDt()*bitcast<f32>(census[tc+4u])/ncH()>${UNIFORM_TILE_UPDATE_BUDGET_H}){atomicAdd(&nbSet[NB_H_CENSUS_CALM_MOVING],1u);}

@@ -47,6 +47,8 @@ export interface RegionTier {
   readonly label: string;
   /** What the solver does inside a box held at this tier. */
   readonly hint: string;
+  /** The chooser's note beside the label (default: the cells, cubed). */
+  readonly note?: string;
 }
 
 /** Finest cells across the domain, per axis. */

@@ -1,3 +1,4 @@
+import { detailRegionRefusal } from "../../core/refinement-regions";
 import { NARROW_BAND_SURFACE_ADVECTION, narrowBandControlParams, narrowBandControlValues, narrowBandSurfaceAdvection, narrowBandSurfaceAdvectionSettings } from "./uniform-narrow-band-controls";
 import type { MethodParamValues, SimulationMethod } from "../../core/method-contract";
 import { UNIFORM_GEOMETRIC_PARAMS } from "./uniform-geometric-parameters";
@@ -135,6 +136,9 @@ export const uniformNarrowBandMethod:SimulationMethod={
  normalizeValues:narrowBandFlipValues,
  // "auto" (the default) takes the brick engine exactly when the scene has no gaps; info.nbEngine names the engine that ran.
  createSolverAsync:async(device,scene,quality,values,loads,progress,signal)=>{const choice=nbEngineChoice(scene,values);
+  // Sub-cell detail regions are the brick engine's nested detail engines: the uniform engine refuses them, never ignores them.
+  const detailRefusal=choice.ran==="uniform"?detailRegionRefusal(scene,`The uniform NB-FLIP engine${choice.gap?` (auto: ${choice.gap})`:""}`):undefined;
+  if(detailRefusal)throw new Error(detailRefusal);
   const solver=choice.ran==="brick"?await createBrickSolver(device,scene,values,quality):await WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
   {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineAdvection:narrowBandSurfaceAdvectionSettings(values.surfaceAdvection).fine,phiCoarseAdvection:narrowBandSurfaceAdvectionSettings(values.surfaceAdvection).coarse,narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandSparseNeighbours:narrowBandControlValues(values).sparseNeighbours,narrowBandParticleCellCap:narrowBandControlValues(values).particleCellCap,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",narrowBandNearSettled:uniformNearSettled(values),retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal);
   solver.info.nbEngine=choice;return solver;},

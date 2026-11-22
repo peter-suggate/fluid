@@ -123,7 +123,7 @@ export function RegionDraftMenu<Doc, Patch>({ space }: {
     {space.heldTiers.map((tier) => <ToolstripMenuItem
       key={tier.cells}
       label={tier.label}
-      note={`${tier.cells}\u00b3`}
+      note={tier.note ?? `${tier.cells}\u00b3`}
       title={tier.hint}
       active={chosen === tier.cells}
       testId={`region-draft-cells-${tier.cells}`}

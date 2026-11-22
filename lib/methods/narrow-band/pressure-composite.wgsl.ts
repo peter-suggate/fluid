@@ -528,7 +528,33 @@ fn poRelease(phiOwner:f32,ghost:f32,sign:f32,u:f32,w:f32,h:f32)->bool{
  * Unpadded, every token resolves to the lattice's own name, so the text is byte-identical.
  */
 export const PO_TILE_BOX_TOKEN = "nbTileInWallBox(";
-export function pressureResolveBox(L: Pick<BrickLayout, "lattice" | "box"> & { readonly staticTiles?: boolean }, code: string, tiered = true): string {
+/** poBandFace's last line, where a detail layout's coupled faces take their kind (pressureDetailFaces). */
+const PO_BAND_RETURN = "  return PoFace(face,n.wet,native);\n}";
+
+/**
+ * A detail engine's coupled box faces (brick-detail.wgsl.ts): a face of the box that lies inside the parent's container
+ * is the parent's velocity, prescribed (K_NEUMANN: U = US, the forces' relaxed value, whose flux enters the row's
+ * divergence), not a wall. The nested domain's inflow condition (a one-way nest: the outer solution's normal velocity
+ * on the inner boundary), so liquid crosses the box with the parent's flux; a wall would hold the box's volume fixed.
+ * The flux is the cell's open fraction's (the whole face's), not the wall's half aperture. A closed or sealed face
+ * (a static solid there) stays closed. Off a detail layout, or in a kernel with no band face, the code is unchanged.
+ */
+export function pressureDetailFaces(L: Pick<BrickLayout, "detail">, code: string): string {
+  if (!L.detail || !code.includes("fn poBandFace(")) return code;
+  if (code.split(PO_BAND_RETURN).length !== 2) throw new Error("Pressure: poBandFace's return moved (the detail faces)");
+  const cuts = code.includes("fn poFrac(");
+  return code.replace(PO_BAND_RETURN, "  return PoFace(poDetailFace(c,f,face),n.wet,native);\n}") + /* wgsl */`
+const PO_DTL_COUPLED:u32=${L.detail.coupled}u;
+fn poDetailFace(c:vec3i,f:u32,face:NpFace)->NpFace{
+  if(((PO_DTL_COUPLED>>f)&1u)==0u||face.kind==NP_K_CLOSED){return face;}
+  let q=c+npSign(f)*poUnit(f/2u);if(nbInWallBox(q)){return face;}
+  return NpFace(NP_K_NEUMANN,0.0,${cuts ? "poFrac(c)" : "1.0"});
+}
+`;
+}
+
+export function pressureResolveBox(L: Pick<BrickLayout, "lattice" | "box" | "detail"> & { readonly staticTiles?: boolean }, code: string, tiered = true): string {
+  code = pressureDetailFaces(L, code);
   const padded = boxPadded(L);
   // A native row is a whole 4h tile: a box plane inside a tile has no row form (no partial native row; refused).
   if (padded && tiered && L.box.some(n => n % 4 !== 0)) throw new Error(`Pressure: the walls at the box ${L.box.join("x")} need whole 4h tiles (each axis a multiple of 4) on a tiered lattice`);

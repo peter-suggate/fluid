@@ -449,6 +449,12 @@ export interface SceneDescription {
      * latches FAIL.REACH: a scene whose liquid spreads farther authors it.
      */
     brickTiers?: { particleBandDepth?: number; openTopHeadroom?: number; openWorldMargin?: number };
+    /**
+     * Brick engine: automatic detail regions (brick-detail-regions.ts). Each thin upstanding static obstacle
+     * (a rod, post or pillar) in the liquid's reach, in a scene with energy to splash (liquid above its rest
+     * level, a drop or an inflow), gets a nested detail engine at h / factor around it. Absent: none.
+     */
+    automaticDetail?: { factor: 2 | 4 };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -1006,6 +1012,8 @@ export function validateScene(scene: SceneDescription): string[] {
       || inflow.center_m.z < -c.depth_m / 2 || inflow.center_m.z > c.depth_m / 2) errors.push("Inflow center must be inside the container");
   }
   if (c) errors.push(...validateRefinementRegions(scene.fluid?.refinementRegions, c));
+  const automaticDetail = scene.fluid?.automaticDetail;
+  if (automaticDetail !== undefined && automaticDetail.factor !== 2 && automaticDetail.factor !== 4) errors.push("Automatic detail factor must be 2 or 4");
   if (!Array.isArray(scene.solidVoxels)) errors.push("Solid voxels must be an array");
   else for (const [index, patch] of scene.solidVoxels.entries()) {
       const before = errors.length;

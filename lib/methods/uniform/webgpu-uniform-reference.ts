@@ -1,3 +1,4 @@
+import { detailRegionRefusal } from "../../core/refinement-regions";
 import {packRigidBodyCutAtlas} from '../../core/solid-cuts';
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 import { WebgpuSculptSubstrate } from "../../svo/features/scene-publication/webgpu-sculpt-substrate";
@@ -1112,6 +1113,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     onProgress: GPUInitializationReporter,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<WebGPUUniformReferenceSolver> {
+    // Sub-cell detail regions are the brick engine's (brick-detail.ts): refused here, never clamped to h.
+    const detailRefusal = detailRegionRefusal(scene, "The uniform engine");
+    if (detailRefusal) throw new Error(detailRefusal);
     const scope = gpuInitializationDevice(device, signal);
     device = scope.device;
     const runner = new GPUInitializationTaskRunner(onProgress, signal);

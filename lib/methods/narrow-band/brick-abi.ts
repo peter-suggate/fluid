@@ -11,6 +11,7 @@
  * words a C slot); 32-word records; lists in slot order with indirect
  * arguments; particle bins per F slot.
  */
+import type { BrickDetailLayout } from "./brick-detail.wgsl";
 
 /** Words a brick slot of a channel: 512 cells and 8 words of padding, so the
  * 27 neighbours of a brick do not alias the same cache sets (the arena
@@ -251,6 +252,9 @@ export interface BrickLayoutOptions extends BrickCapacities {
    * F brick holds the liquid continued through the walls' contact layer, which the pressure reads in place of PHI
    * (brickOwnerWGSL view). Absent: PHI1 is the level set's scratch alone (the text unchanged). */
   readonly wallView?: boolean;
+  /** A detail engine's coupling to its parent (brick-detail.wgsl.ts): the relaxation shell's hooks and the parent's
+   * nodes in `src`. Absent: no hook (the text unchanged). */
+  readonly detail?: BrickDetailLayout;
 }
 
 const align64 = (n: number) => Math.ceil(n / 64) * 64;
@@ -297,6 +301,8 @@ export class BrickLayout {
   readonly wallView: boolean;
   /** BrickLayoutOptions.openTop. */
   readonly openTop: boolean;
+  /** BrickLayoutOptions.detail. */
+  readonly detail?: BrickDetailLayout;
   /** BrickLayoutOptions.openSides. */
   readonly openSides: boolean;
   readonly window: readonly [number, number, number];
@@ -352,6 +358,7 @@ export class BrickLayout {
     this.staticTiles = options.staticTiles === true;
     this.wallView = options.wallView === true;
     this.openTop = options.openTop === true;
+    if (options.detail) this.detail = options.detail;
     this.openSides = options.openSides === true;
     if (this.openSides && this.box.some((n, a) => a !== 1 && n !== this.lattice[a])) throw new Error(`Brick engine: an open world's box ${this.box.join("x")} holds the lattice's sides ${this.lattice.join("x")}`);
     if (this.openTop && this.box[1] !== this.lattice[1]) throw new Error(`Brick engine: an open top's box ${this.box.join("x")} holds the lattice's height ${this.lattice[1]}`);

@@ -41,6 +41,8 @@ import { SimulationFailureError, type SimulationFailure } from "../../core/simul
 import { BrickEngine } from "./brick-engine";
 import type { BrickCensusHold } from "./brick-census.wgsl";
 import { BrickPresentation } from "./brick-present";
+import type { BrickDetailSurface } from "./brick-detail-surface";
+import { BrickDetail, type BrickDetailSpec } from "./brick-detail";
 import type { BrickSceneSetup } from "./brick-scene";
 import type { PressureSolverFactory } from "./brick-pressure-slot";
 import type { BrickStagesFactory } from "./brick-stages";
@@ -71,6 +73,8 @@ export interface BrickSolverOptions {
   readonly censusHold?: BrickCensusHold;
   /** The scene whose rigid bodies the solver hosts (lane P, M5: bodies-host.ts); absent, or no bodies: none. */
   readonly rigid?: SceneDescription;
+  /** The scene's detail engines (brick-detail.ts brickDetailSpecs): each steps after the parent, driven by it. */
+  readonly detail?: readonly BrickDetailSpec[];
 }
 
 /** Whether `scene` differs from `running` in its solid voxels alone (each other field the same object, or the same
@@ -91,8 +95,11 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   readonly brickPresentation: BrickPresentation;
   /** Lane P's rigid bodies (M5), when the scene has any. */
   readonly rigidBodies?: BrickRigidBodies;
+  /** The detail engines (brick-detail.ts), in the scene's box order. */
+  readonly details: readonly BrickDetail[];
   readonly fluidDomain: GPUSolverInstance["fluidDomain"];
   readonly denseLevelSetVolumeSource: DenseLevelSetVolumeConsumerSource;
+  readonly detailSurfaces: readonly BrickDetailSurface[];
   private presentEnabled: boolean;
   /** Presentation copies submitted, and the last copy's GPU completion time (ms, wall), apart from the steps. */
   presentations = 0;
@@ -112,8 +119,8 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   private traceSampleId = 0;
   private destroyed = false;
 
-  private constructor(private readonly options: BrickSolverOptions, engine: BrickEngine, presentation: BrickPresentation, rigid?: BrickRigidBodies) {
-    this.brickEngine = engine; this.brickPresentation = presentation; this.presentEnabled = options.present ?? true;
+  private constructor(private readonly options: BrickSolverOptions, engine: BrickEngine, presentation: BrickPresentation, rigid: BrickRigidBodies | undefined, details: readonly BrickDetail[]) {
+    this.brickEngine = engine; this.brickPresentation = presentation; this.presentEnabled = options.present ?? true; this.details = details; this.detailSurfaces = details.map(d => d.surface);
     if (rigid) this.rigidBodies = rigid;
     if (options.rigid) this.scene = options.rigid;
     if (options.setup.boundary) this.boundary = options.setup.boundary;
@@ -164,9 +171,12 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
       ...(s.staticMask ? { staticMask: s.staticMask } : {}), ...(s.staticsDeferred ? { staticsDeferred: true } : {}), ...(s.terrain ? { terrain: s.terrain } : {}), ...(s.boundary ? { boundary: s.boundary } : {}),
     });
     const presentation = await BrickPresentation.create(engine, options.farPhi_m, options.setup.presentCells);
+    const details: BrickDetail[] = [];
+    try { for (const spec of options.detail ?? []) details.push(await BrickDetail.create(device, engine, spec, { stages: options.stages, solver: options.solver, values: options.values })); }
+    catch (error) { details.forEach(d => d.destroy()); presentation.destroy(); engine.destroy(); rigid?.destroy(); throw error; }
     // The stage timing's closing marker, compiled before any sampled step asks for it (markersReady).
     await GPUStageTimestampRecorder.prepare(device);
-    const solver = new BrickNBFlipSolver(options, engine, presentation, rigid);
+    const solver = new BrickNBFlipSolver(options, engine, presentation, rigid, details);
     solver.present();
     return solver;
   }
@@ -223,6 +233,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   private present() {
     const d = this.brickEngine.device, enc = d.createCommandEncoder({ label: "nb-brick.present" });
     this.brickPresentation.encode(enc);
+    for (const d of this.details) d.present(enc);
     const t0 = performance.now();
     d.queue.submit([enc.finish()]);
     this.presentations++;
@@ -237,7 +248,10 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     // A held stroke: no step until its pipelines land (simulationReady is false; the app does not ask).
     if (this.brickEngine.editHeld) return false;
     this.rigidBodies?.offer(bodies);
-    try { if (!this.advanceSampled()) this.brickEngine.advance(1); } catch (error) {
+    try {
+      if (!this.advanceSampled()) this.brickEngine.advance(1);
+      for (const d of this.details) d.advance();
+    } catch (error) {
       // A latched FAIL (lagged receipt) refuses further steps: report it, never step on.
       this.refresh({ simulationFailure: this.failure(error instanceof Error ? error.message : String(error)) });
       return false;
@@ -368,6 +382,10 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     if (s.boundary && field?.length !== s.boundary.length) throw new Error("This edit changes the procedural boundary's bricks; reset the scene to apply it.");
     const cut = brickStaticCutBricks(trial, s.terrain || field ? { ...(s.terrain ? { terrain: s.terrain } : {}), ...(field ? { boundary: field } : {}), box: s.box ?? s.lattice } : undefined), k = this.brickEngine.layout.cap.k;
     if (cut > k) throw new Error(`This voxel edit cuts ${cut} bricks, over the ${k} K slots the brick engine was built with; reset the scene to apply it.`);
+    // The detail engines hold the same patches, cut to their boxes and refined (brick-detail-scene.ts).
+    for (const d of this.details) {
+      try { d.validateSolids(scene); } catch (error) { throw new Error(`${error instanceof Error ? error.message : String(error)}; reset the scene to apply it.`); }
+    }
   }
 
   /**
@@ -412,8 +430,15 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     this.scene = scene;
     this.rigidBodies?.system.setScene(scene);
     // A paint or a fill over solid moves no bit: nothing to upload or restamp.
-    if (!ranges || !(hi[0] > lo[0])) return;
-    this.brickEngine.restampStatics(mask.words, ranges, lo, hi, boundary);
+    if (ranges && hi[0] > lo[0]) this.brickEngine.restampStatics(mask.words, ranges, lo, hi, boundary);
+    // The same edit opens every detail engine's own cells (its mask is the box's cut of the same patches).
+    for (const d of this.details) {
+      try { d.foldSolids(scene); } catch (error) {
+        const message = `live voxel edit refused by detail engine ${d.spec.box.origins.join("+")}: ${error instanceof Error ? error.message : String(error)}`;
+        this.refresh({ simulationFailure: this.failure(message) });
+        throw error;
+      }
+    }
   }
 
   // The rigid contract (method-contract.ts), the shared system's.
@@ -425,5 +450,5 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   pickRigidBody(origin: RigidBodyState["position_m"], direction: RigidBodyState["position_m"]): Promise<GPURigidBodyPick | undefined> { return this.rigidBodies ? this.rigidBodies.system.pick(origin, direction) : Promise.resolve(undefined); }
   readRigidBodyPoses(): Promise<GPURigidBodyPose[] | undefined> { return this.rigidBodies ? this.rigidBodies.readPoses() : Promise.resolve(undefined); }
 
-  destroy() { this.destroyed = true; this.brickPresentation.destroy(); this.brickEngine.destroy(); this.rigidBodies?.destroy(); this.particleFrame.destroy(); }
+  destroy() { this.destroyed = true; this.details.forEach(d => d.destroy()); this.brickPresentation.destroy(); this.brickEngine.destroy(); this.rigidBodies?.destroy(); this.particleFrame.destroy(); }
 }

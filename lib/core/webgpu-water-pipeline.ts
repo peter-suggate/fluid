@@ -1598,6 +1598,9 @@ export const surfaceRasterShader = /* wgsl */ `
 ${waterInterfaceDepthWGSL}
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, cameraBasisPadding:array<vec4f,19>, cameraBasisRight:vec4f }
 struct SurfaceVertex { position:vec4f, normal:vec4f }
+// Up to four world boxes (count in n.x) where this mesh is not drawn: another mesh (a detail engine's) owns them.
+struct SurfaceClip { n:vec4u, lo:array<vec4f,4>, hi:array<vec4f,4> }
+@group(0) @binding(2) var<uniform> surfaceClip:SurfaceClip;
 override interfaceCoverageExpansionPixels:f32=0.0;
 override peelBehindFirstExit:f32=0.0;
 override encodeBackContact:bool=false;
@@ -1615,8 +1618,16 @@ fn project(world:vec3f)->vec4f {
   let ndc=vec2f(dot(relative,right)/(depth*aspect*aperture),dot(relative,up)/(depth*aperture));
   return vec4f(ndc*depth,WATER_INTERFACE_NEAR_M,depth);
 }
+fn surfaceClipped(index:u32)->bool{
+  if(surfaceClip.n.x==0u){return false;}
+  let first=index-index%3u;let c=(vertices[first].position.xyz+vertices[first+1u].position.xyz+vertices[first+2u].position.xyz)/3.0;
+  for(var k=0u;k<min(surfaceClip.n.x,4u);k++){if(all(c>surfaceClip.lo[k].xyz)&&all(c<surfaceClip.hi[k].xyz)){return true;}}
+  return false;
+}
 @vertex fn surfaceVertex(@builtin(vertex_index) index:u32)->Out {
-  let v=vertices[index]; var o:Out; o.clip=project(v.position.xyz);o.world=v.position.xyz;o.normal=normalize(v.normal.xyz);o.film=v.normal.w;o.solid=clamp(v.position.w-1.0,0.0,1.0);
+  let v=vertices[index]; var o:Out; o.clip=project(v.position.xyz);
+  // A clipped triangle's three vertices all leave the clip volume (beyond the far plane), so it rasterises nothing.
+  if(surfaceClipped(index)){o.clip=vec4f(0.0,0.0,2.0,1.0);o.world=v.position.xyz;o.normal=vec3f(0.0,1.0,0.0);o.film=0.0;o.solid=0.0;return o;}o.world=v.position.xyz;o.normal=normalize(v.normal.xyz);o.film=v.normal.w;o.solid=clamp(v.position.w-1.0,0.0,1.0);
   // The fine particle skin (w <= 0) is pushed back -w metres along its view
   // ray: it covers the same pixels, and the level set wins wherever the skin
   // stands less than that in front of it. The stored position stays true.
@@ -2364,6 +2375,10 @@ export interface WaterSceneOpticsInput {
   readonly container?: { readonly width_m: number; readonly depth_m: number };
 }
 
+/** SurfaceClip's bytes: the count, then four low and four high corners. */
+const SURFACE_CLIP_BYTES = 16 + 2 * 4 * 16;
+type SurfaceDraw = { group: GPUBindGroup; vertices: GPUBuffer; indirect: GPUBuffer; offset: number };
+
 export class RasterWaterPipeline {
   private lensOptions:LensBloomOptions=DEFAULT_LENS_BLOOM_OPTIONS;
   private lensCamera?:HdrLensBloom;
@@ -2569,7 +2584,12 @@ export class RasterWaterPipeline {
   private particleWater?: ParticleWaterInterface;
   private particleWaterReady = false;
   /** A cosmetic mesh in the same SurfaceVertex layout, drawn after the level set's in every interface pass. */
-  private extraSurface?: { group: GPUBindGroup; vertices: GPUBuffer; indirect: GPUBuffer; offset: number };
+  private extraSurface?: SurfaceDraw;
+  private detailSurfaces: SurfaceDraw[] = [];
+  private detailClipKey = "[]";
+  /** The level set mesh's clip (the detail boxes) and the extra meshes' (none). */
+  private surfaceClipBuffer?: GPUBuffer;
+  private surfaceNoClipBuffer?: GPUBuffer;
   private fluidDomain?: FluidDomain;
   private fallbackSparseControl?: GPUBuffer;
   /** Created on the first capture and reused by every later one. */
@@ -2766,8 +2786,11 @@ export class RasterWaterPipeline {
     ] });
     this.surfaceLayout = this.device.createBindGroupLayout({ label: "Water surface bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-      { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } }
+      { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } }
     ] });
+    this.surfaceClipBuffer = this.device.createBuffer({ label: "Water surface clip", size: SURFACE_CLIP_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.surfaceNoClipBuffer = this.device.createBuffer({ label: "Water surface no clip", size: SURFACE_CLIP_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.surfacePeelLayout = this.device.createBindGroupLayout({ label: "Water rear-interface peel binding", entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
     ] });
@@ -3403,21 +3426,41 @@ export class RasterWaterPipeline {
    * the level set alone.
    */
   setExtraSurface(geometry: { vertices: GPUBuffer; indirect: GPUBuffer; indirectOffset: number } | undefined) {
-    if (!geometry || !this.surfaceLayout) { this.extraSurface = undefined; return; }
-    const current = this.extraSurface;
-    if (current?.vertices === geometry.vertices && current.indirect === geometry.indirect && current.offset === geometry.indirectOffset) return;
-    this.extraSurface = {
-      group: this.device.createBindGroup({ label: "Water extra surface", layout: this.surfaceLayout, entries: [
-        { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: geometry.vertices } }] }),
+    this.extraSurface = this.surfaceDraw(geometry, this.extraSurface, "Water extra surface");
+  }
+
+  /**
+   * The detail engines' meshes (brick-detail-surface.ts): each drawn beside the level set's, which is not drawn inside
+   * their boxes (world metres, up to four), so a box shows its own engine's surface alone. Empty: none.
+   */
+  setDetailSurfaces(surfaces: readonly { readonly geometry: { vertices: GPUBuffer; indirect: GPUBuffer; indirectOffset: number }; readonly box_m: readonly [readonly [number, number, number], readonly [number, number, number]] }[]) {
+    if (surfaces.length > 4) throw new Error(`Water surface: ${surfaces.length} detail surfaces, over the clip's 4`);
+    const previous = this.detailSurfaces;
+    this.detailSurfaces = surfaces.map((s, i) => this.surfaceDraw(s.geometry, previous[i], "Water detail surface")!);
+    const key = JSON.stringify(surfaces.map(s => s.box_m));
+    if (key === this.detailClipKey || !this.surfaceClipBuffer) return;
+    this.detailClipKey = key;
+    const words = new ArrayBuffer(SURFACE_CLIP_BYTES), n = new Uint32Array(words, 0, 4), box = new Float32Array(words, 16);
+    n[0] = surfaces.length;
+    surfaces.forEach((s, i) => { box.set([...s.box_m[0], 0], 4 * i); box.set([...s.box_m[1], 0], 16 + 4 * i); });
+    this.device.queue.writeBuffer(this.surfaceClipBuffer, 0, words);
+  }
+
+  private surfaceDraw(geometry: { vertices: GPUBuffer; indirect: GPUBuffer; indirectOffset: number } | undefined, current: SurfaceDraw | undefined, label: string): SurfaceDraw | undefined {
+    if (!geometry || !this.surfaceLayout || !this.surfaceNoClipBuffer) return undefined;
+    if (current?.vertices === geometry.vertices && current.indirect === geometry.indirect && current.offset === geometry.indirectOffset) return current;
+    return {
+      group: this.device.createBindGroup({ label, layout: this.surfaceLayout, entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: geometry.vertices } }, { binding: 2, resource: { buffer: this.surfaceNoClipBuffer } }] }),
       vertices: geometry.vertices, indirect: geometry.indirect, offset: geometry.indirectOffset,
     };
   }
 
   private drawExtraSurface(pass: GPURenderPassEncoder) {
-    const extra = this.extraSurface;
-    if (!extra) return;
-    pass.setBindGroup(0, extra.group);
-    pass.drawIndirect(extra.indirect, extra.offset);
+    for (const extra of [...this.detailSurfaces, ...(this.extraSurface ? [this.extraSurface] : [])]) {
+      pass.setBindGroup(0, extra.group);
+      pass.drawIndirect(extra.indirect, extra.offset);
+    }
   }
 
   /**
@@ -3513,7 +3556,7 @@ export class RasterWaterPipeline {
     if (this.prepareLayout && this.indirectBuffer && this.activeCubeBuffer && this.polygoniseDispatchBuffer) this.prepareBindGroup = this.device.createBindGroup({ layout: this.prepareLayout, entries: [
       { binding: 0, resource: { buffer: this.indirectBuffer } }, { binding: 1, resource: { buffer: this.activeCubeBuffer } }, { binding: 2, resource: { buffer: this.polygoniseDispatchBuffer } }
     ] });
-    if (this.surfaceLayout && this.vertexBuffer) this.surfaceBindGroup = this.device.createBindGroup({ layout: this.surfaceLayout, entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.vertexBuffer } }] });
+    if (this.surfaceLayout && this.vertexBuffer && this.surfaceClipBuffer) this.surfaceBindGroup = this.device.createBindGroup({ layout: this.surfaceLayout, entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.vertexBuffer } }, { binding: 2, resource: { buffer: this.surfaceClipBuffer } }] });
     if (this.causticLayout && this.vertexBuffer && this.waterSceneOpticsBuffer && this.causticReceiver) this.causticBindGroup = this.device.createBindGroup({ label: "Water caustic projection inputs", layout: this.causticLayout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.vertexBuffer } },
       { binding: 2, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 3, resource: this.causticReceiver.createView() }
@@ -3858,6 +3901,7 @@ export class RasterWaterPipeline {
     this.lensCamera?.destroy();
     this.frontWorldReflections?.destroy(); this.rearWorldReflections?.destroy();
     this.particleWater?.destroy(); this.particleWater = undefined;
+    this.surfaceClipBuffer?.destroy(); this.surfaceNoClipBuffer?.destroy();
     for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.bulkWindowsDispatchBuffer,this.reflectionBounds,this.frontReflections,this.rearReflections,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.fallbackSolidTerrain,this.fallbackSolidUniform,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

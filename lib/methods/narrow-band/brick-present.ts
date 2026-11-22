@@ -133,7 +133,8 @@ export class BrickPresentation {
   readonly vertexPhi: GPUTexture;
   readonly volume: GPUTexture;
   readonly openFraction: GPUTexture;
-  private readonly shown: GPUBuffer;
+  /** A word a lattice brick: nonzero where this frame's copy wrote the brick (elsewhere its vertices hold far air). */
+  readonly shown: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly groups: readonly [GPUBindGroup, GPUBindGroup];
   private readonly pipelines: readonly [GPUComputePipeline, GPUComputePipeline];
