@@ -91,6 +91,7 @@ interface UIOverrideSpec {
 
 const UI_OVERRIDES: Readonly<Record<string, UIOverrideSpec>> = {
   grid: { label: "Grid overlay", group: "render", hint: "Slice axis of the field overlay" },
+  svoShadowBias: { label: "Shadow origin bias", group: "render" },
   gridSlice: { label: "Grid slice", group: "render" },
   layers: { label: "Visual layers", group: "render" },
   gridMode: { label: "Overlay field", group: "render" },
@@ -334,6 +335,7 @@ export function sceneOverrideClearPlan(
     switch (key) {
       case "fluidParticles": ui.fluidParticleDisplay = preset.renderProfile?.fluidParticleDisplay ?? initialUI.fluidParticleDisplay; break;
       case "fluidSurface": ui.fluidSurfaceRenderMode = preset.renderProfile?.fluidSurfaceRenderMode ?? initialUI.fluidSurfaceRenderMode; break;
+      case "svoShadowBias": svoRenderTuning.shadowBiasCells = sceneRenderTuning(preset.renderProfile).shadowBiasCells; break;
       case "svoResolution": svoRenderTuning.resolutionScale = sceneRenderTuning(preset.renderProfile).resolutionScale; break;
       case "svoRefinementDepth": svoRenderTuning.environmentRefinementDepth = sceneRenderTuning(preset.renderProfile).environmentRefinementDepth; break;
       case "overlay": ui.sceneOverlay = initialUI.sceneOverlay; break;

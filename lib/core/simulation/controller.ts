@@ -1,3 +1,8 @@
+import { ProjectileSimulation } from "./projectiles";
+import { environmentCatalogPending } from "../voxel-environments";
+import { meshAssetDistanceFieldReady, sceneMeshAssetIds } from "../imported-assets/asset-library";
+import { publishSolidPatches } from "../voxel-editor/transaction";
+import { sessionToolHost } from "../voxel-editor/session-host";
 import { GPU_RIGID_BODY_CAPACITY } from "../rigid-capacity";
 import { sceneRenderTuning } from "../scene-render-profile";
 import { SceneInteractionHost } from "../../interaction/runtime/host";
@@ -158,6 +163,7 @@ interface OpenEditGesture {
 }
 
 interface PaneRuntime {
+  projectiles?: ProjectileSimulation;
   interaction?: SceneInteractionHost;
   interactionScene?: SceneDescription;
   interactionFluid?: InteractionFluidDriver;
@@ -365,6 +371,7 @@ export class SimulationController {
     // one describes nothing. Drop it before anything can draw from it.
     this.session(PRIMARY_PANE_ID).sceneDraft.getState().clearDraft();
     const runtime = this.runtime(PRIMARY_PANE_ID);
+    runtime.projectiles = scene.rigidBodies.some(body => body.launcher) ? new ProjectileSimulation() : undefined;
     runtime.bodies = initializeRigidBodies(scene.rigidBodies);
     this.publishBodies(rigidDiagnostics(runtime.bodies, scene.fluid.gravity_m_s2));
     // Open on an empty selection: with no gizmo on screen the first drag
@@ -420,6 +427,34 @@ export class SimulationController {
       current.interactionFluid = undefined; current.interaction?.setFluidDriver(undefined);
       current.interaction?.releaseInput();
     };
+  }
+
+  private projectilesReady(): boolean {
+    for (const [id, pane] of this.paneSessions) {
+      if (!this.runtime(id).projectiles) continue;
+      const scene = pane.scene.getState().scene;
+      if (!this.runtime(id).acceptLiveSolidEdit || pane.ui.getState().voxelStrokePending
+        || environmentCatalogPending(scene) || !sceneMeshAssetIds(scene).every(meshAssetDistanceFieldReady)) return false;
+    }
+    return true;
+  }
+
+  private advanceProjectiles(dt: number) {
+    for (const [id, session] of this.paneSessions) {
+      const runtime = this.runtime(id);
+      if (!runtime.projectiles) continue;
+      const scene = session.scene.getState().scene;
+      const patches = runtime.projectiles.step(scene, runtime.bodies, this.clock.targetTime(), dt);
+      this.publishBodies(undefined, id);
+      if (!patches.length) continue;
+      const host = sessionToolHost(session, runtime.acceptLiveSolidEdit!);
+      host.begin("Broadside impact");
+      void publishSolidPatches(host, scene, patches).catch(error => {
+        if (session.scene.getState().scene !== scene) return;
+        this.setRunState("paused");
+        session.runtime.getState().setNotice(String(error), "warn");
+      });
+    }
   }
 
   private advanceInteractions(dt: number) {
@@ -764,7 +799,10 @@ export class SimulationController {
     // barrier opening instead, so neither pane runs ahead of the other.
     // Every pane's carry, not pane A's: the step the barrier just opened is a
     // step for both documents, and a body held in B has to be held through it.
-    if (this.clock.advance(elapsed, dt, [...this.paneSessions.values()].some(p => Boolean(p.scene.getState().scene.interaction?.entities.length))) > 0) {
+    if (!this.projectilesReady()) { this.clock.dropPendingTime(); return; }
+    if (this.clock.advance(elapsed, dt, [...this.paneSessions.values()].some(p =>
+      Boolean(this.runtime(p.id).projectiles || p.scene.getState().scene.interaction?.entities.length))) > 0) {
+      this.advanceProjectiles(dt);
       for (const paneId of this.paneRuntimes.keys()) this.applyBodyHold(paneId);
     }
     this.advanceInteractions(dt);
@@ -818,7 +856,9 @@ export class SimulationController {
     if (!this.clock.canAcceptNextStep()) return;
     if (this.safeBrowserBringup() && this.safeBrowserStepConsumed) return;
     if (this.safeBrowserBringup()) this.safeBrowserStepConsumed = true;
+    if (!this.projectilesReady()) return;
     this.clock.step(dt);
+    this.advanceProjectiles(dt);
     this.advanceInteractions(dt);
   }
 
@@ -921,6 +961,7 @@ export class SimulationController {
     if (paneRuntime.interaction && !paneRuntime.committingInteraction) {
       void paneRuntime.interaction.replaceScene(scene, true).then(() => paneRuntime.interaction?.setRunning(this.runState() === "running")).catch(error => this.session(paneId).runtime.getState().setNotice(String(error), "warn"));
     } else if (!paneRuntime.interaction && scene.interaction?.entities.length) this.interaction(paneId);
+    paneRuntime.projectiles = scene.rigidBodies.some(body => body.launcher) ? new ProjectileSimulation() : undefined;
     paneRuntime.bodies = initializeRigidBodies(scene.rigidBodies);
     const runtimePlan = planSceneRuntime(scene);
     // Reset is a host operation: every pane returns to its own t = 0.
@@ -1614,6 +1655,8 @@ export class SimulationController {
     const before = paneRuntime.bodies;
     const after = adoptRigidBodyRoster(before, scene.rigidBodies);
     paneRuntime.bodies = after;
+    if (scene.rigidBodies.some(body => body.launcher)) paneRuntime.projectiles ??= new ProjectileSimulation();
+    else paneRuntime.projectiles = undefined;
     if (before.length === after.length && before.every((body, index) => body === after[index])) return;
     this.publishBodies(rigidDiagnostics(after, scene.fluid.gravity_m_s2), paneId);
   }

@@ -8,6 +8,7 @@ export interface SceneRenderProfile {
   readonly playbackPixelBudget?: number;
   readonly interpolateWater?: boolean;
   readonly edgeAntialiasing?: boolean;
+  readonly shadowBiasCells?: number;
   readonly environmentRefinementDepth?: number;
   readonly fluidSurfaceRenderMode?: "shaded" | "wireframe" | "simple";
   readonly fluidParticleDisplay?: "off" | "motion" | "speed" | "fine" | "water";
@@ -20,6 +21,8 @@ export function sceneRenderProfileErrors(profile: SceneRenderProfile): string[] 
   if (profile.playbackPixelBudget !== undefined && (!Number.isSafeInteger(profile.playbackPixelBudget) || profile.playbackPixelBudget < 1)) return ["Playback pixel budget must be a positive integer"];
   if (profile.stillResolutionScale !== undefined && (!Number.isFinite(profile.stillResolutionScale) || profile.stillResolutionScale < .35 || profile.stillResolutionScale > 2)) return ["Still resolution scale must be between 0.35 and 2"];
   if (profile.resolutionScale !== undefined && (!Number.isFinite(profile.resolutionScale) || profile.resolutionScale < .35 || profile.resolutionScale > 2)) return ["Scene render resolution scale must be between 0.35 and 2"];
+  const bias = profile.shadowBiasCells;
+  if (bias !== undefined && (!Number.isFinite(bias) || bias < 0 || bias > .25)) return ["Shadow bias must be between 0 and .25 cells"];
   const depth = profile.environmentRefinementDepth;
   if (profile.fluidParticleDisplay !== undefined && !["off", "motion", "speed", "fine", "water"].includes(profile.fluidParticleDisplay)) return ["Scene fluid particle display must be off, motion, speed, fine or water"];
   if (profile.fluidSurfaceRenderMode !== undefined && !["shaded", "wireframe", "simple"].includes(profile.fluidSurfaceRenderMode)) return ["Scene fluid surface render mode must be shaded, wireframe or simple"];
@@ -33,13 +36,17 @@ export function sceneRenderTuning(profile?: SceneRenderProfile, explicit?: SvoRe
   if (explicit) return explicit;
   const depth = profile?.environmentRefinementDepth;
   const scale = profile?.resolutionScale;
-  if (depth === undefined && scale === undefined) return DEFAULT_SVO_RENDER_TUNING;
+  const bias = profile?.shadowBiasCells;
+  if (depth === undefined && scale === undefined && bias === undefined) return DEFAULT_SVO_RENDER_TUNING;
   const errors = sceneRenderProfileErrors(profile!);
   if (errors.length) throw new RangeError(errors[0]);
-  const key = `${depth ?? DEFAULT_SVO_RENDER_TUNING.environmentRefinementDepth}/${scale ?? DEFAULT_SVO_RENDER_TUNING.resolutionScale}`;
+  const environmentRefinementDepth = depth ?? DEFAULT_SVO_RENDER_TUNING.environmentRefinementDepth;
+  const resolutionScale = scale ?? DEFAULT_SVO_RENDER_TUNING.resolutionScale;
+  const shadowBiasCells = bias ?? DEFAULT_SVO_RENDER_TUNING.shadowBiasCells;
+  const key = `${environmentRefinementDepth}/${resolutionScale}/${shadowBiasCells}`;
   let result = defaults.get(key);
   if (!result) {
-    result = normalizeSvoRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, environmentRefinementDepth: depth ?? DEFAULT_SVO_RENDER_TUNING.environmentRefinementDepth, resolutionScale: scale ?? DEFAULT_SVO_RENDER_TUNING.resolutionScale });
+    result = normalizeSvoRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, environmentRefinementDepth, resolutionScale, shadowBiasCells });
     defaults.set(key, result);
   }
   return result;

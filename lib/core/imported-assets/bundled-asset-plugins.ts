@@ -35,72 +35,73 @@ import header30 from "./metadata/forest-alder-0-volume.json";
 import header31 from "./metadata/forest-alder-1-volume.json";
 import header32 from "./metadata/forest-cedar-0-volume.json";
 import header33 from "./metadata/forest-cedar-1-volume.json";
-import header34 from "./metadata/hero-pond-and-ground-volume.json";
-import header35 from "./metadata/hero-ground-tile-volume.json";
-import header36 from "./metadata/hero-ground-surround-volume.json";
-import header37 from "./metadata/hero-boulder-0-volume.json";
-import header38 from "./metadata/hero-boulder-1-volume.json";
-import header39 from "./metadata/hero-boulder-2-volume.json";
-import header40 from "./metadata/hero-boulder-3-volume.json";
-import header41 from "./metadata/hero-stepping-0-volume.json";
-import header42 from "./metadata/hero-stepping-1-volume.json";
-import header43 from "./metadata/hero-stepping-2-volume.json";
-import header44 from "./metadata/hero-stepping-3-volume.json";
-import header45 from "./metadata/hero-stepping-4-volume.json";
-import header46 from "./metadata/hero-pebble-0-volume.json";
-import header47 from "./metadata/hero-pebble-1-volume.json";
-import header48 from "./metadata/hero-pebble-2-volume.json";
-import header49 from "./metadata/hero-pebble-3-volume.json";
-import header50 from "./metadata/hero-oak-volume.json";
-import header51 from "./metadata/hero-birch-volume.json";
-import header52 from "./metadata/hero-pine-volume.json";
-import header53 from "./metadata/hero-willow-volume.json";
-import header54 from "./metadata/hero-azalea-volume.json";
-import header55 from "./metadata/hero-juniper-volume.json";
-import header56 from "./metadata/hero-boxwood-volume.json";
-import header57 from "./metadata/hero-hebe-volume.json";
-import header58 from "./metadata/hero-grass-volume.json";
-import header59 from "./metadata/hero-rosette-volume.json";
-import header60 from "./metadata/hero-hose-and-nozzle-volume.json";
-import header61 from "./metadata/terrace-host-volume.json";
-import header62 from "./metadata/terrace-reader-volume.json";
-import header63 from "./metadata/garden-pavilion-volume.json";
-import header64 from "./metadata/neighbor-cottage-volume.json";
-import header65 from "./metadata/neighborhood-ground-volume.json";
-import header66 from "./metadata/wooded-horizon-volume.json";
-import header67 from "./metadata/lavender-border-volume.json";
-import header68 from "./metadata/terrace-festoon-volume.json";
-import header69 from "./metadata/valley-farmland-volume.json";
-import header70 from "./metadata/lane-bungalow-volume.json";
-import header71 from "./metadata/hill-saltbox-volume.json";
-import header72 from "./metadata/teak-lounger-volume.json";
-import header73 from "./metadata/garden-parasol-volume.json";
-import header74 from "./metadata/insulated-cooler-volume.json";
-import header75 from "./metadata/refreshment-set-volume.json";
-import header76 from "./metadata/diving-board-ladder-volume.json";
-import header77 from "./metadata/pool-stainless-ladder-volume.json";
-import header78 from "./metadata/honed-travertine-paver-volume.json";
-import header79 from "./metadata/living-turf-volume.json";
-import header80 from "./metadata/cedar-fence-panel-volume.json";
-import header81 from "./metadata/stucco-window-bay-volume.json";
-import header82 from "./metadata/limestone-coping-volume.json";
-import header83 from "./metadata/limestone-coping-corner-volume.json";
-import header84 from "./metadata/ceramic-waterline-volume.json";
-import header85 from "./metadata/teak-serving-table-volume.json";
-import header86 from "./metadata/tokyo-shopfront-left-volume.json";
-import header87 from "./metadata/tokyo-blade-left-volume.json";
-import header88 from "./metadata/tokyo-lights-left-volume.json";
-import header89 from "./metadata/tokyo-shopfront-right-volume.json";
-import header90 from "./metadata/tokyo-blade-right-volume.json";
-import header91 from "./metadata/tokyo-lights-right-volume.json";
-import header92 from "./metadata/tokyo-lantern-volume.json";
-import header93 from "./metadata/tokyo-blade-left-1-volume.json";
-import header94 from "./metadata/tokyo-blade-left-2-volume.json";
-import header95 from "./metadata/tokyo-blade-right-1-volume.json";
-import header96 from "./metadata/tokyo-blade-right-2-volume.json";
-import header97 from "./metadata/tokyo-shopfront-closed-right-volume.json";
-import header98 from "./metadata/tokyo-cyclist-volume.json";
-import header99 from "./metadata/tokyo-vending-volume.json";
+import header34 from "./metadata/sailing-galleon-volume.json";
+import header35 from "./metadata/hero-pond-and-ground-volume.json";
+import header36 from "./metadata/hero-ground-tile-volume.json";
+import header37 from "./metadata/hero-ground-surround-volume.json";
+import header38 from "./metadata/hero-boulder-0-volume.json";
+import header39 from "./metadata/hero-boulder-1-volume.json";
+import header40 from "./metadata/hero-boulder-2-volume.json";
+import header41 from "./metadata/hero-boulder-3-volume.json";
+import header42 from "./metadata/hero-stepping-0-volume.json";
+import header43 from "./metadata/hero-stepping-1-volume.json";
+import header44 from "./metadata/hero-stepping-2-volume.json";
+import header45 from "./metadata/hero-stepping-3-volume.json";
+import header46 from "./metadata/hero-stepping-4-volume.json";
+import header47 from "./metadata/hero-pebble-0-volume.json";
+import header48 from "./metadata/hero-pebble-1-volume.json";
+import header49 from "./metadata/hero-pebble-2-volume.json";
+import header50 from "./metadata/hero-pebble-3-volume.json";
+import header51 from "./metadata/hero-oak-volume.json";
+import header52 from "./metadata/hero-birch-volume.json";
+import header53 from "./metadata/hero-pine-volume.json";
+import header54 from "./metadata/hero-willow-volume.json";
+import header55 from "./metadata/hero-azalea-volume.json";
+import header56 from "./metadata/hero-juniper-volume.json";
+import header57 from "./metadata/hero-boxwood-volume.json";
+import header58 from "./metadata/hero-hebe-volume.json";
+import header59 from "./metadata/hero-grass-volume.json";
+import header60 from "./metadata/hero-rosette-volume.json";
+import header61 from "./metadata/hero-hose-and-nozzle-volume.json";
+import header62 from "./metadata/terrace-host-volume.json";
+import header63 from "./metadata/terrace-reader-volume.json";
+import header64 from "./metadata/garden-pavilion-volume.json";
+import header65 from "./metadata/neighbor-cottage-volume.json";
+import header66 from "./metadata/neighborhood-ground-volume.json";
+import header67 from "./metadata/wooded-horizon-volume.json";
+import header68 from "./metadata/lavender-border-volume.json";
+import header69 from "./metadata/terrace-festoon-volume.json";
+import header70 from "./metadata/valley-farmland-volume.json";
+import header71 from "./metadata/lane-bungalow-volume.json";
+import header72 from "./metadata/hill-saltbox-volume.json";
+import header73 from "./metadata/teak-lounger-volume.json";
+import header74 from "./metadata/garden-parasol-volume.json";
+import header75 from "./metadata/insulated-cooler-volume.json";
+import header76 from "./metadata/refreshment-set-volume.json";
+import header77 from "./metadata/diving-board-ladder-volume.json";
+import header78 from "./metadata/pool-stainless-ladder-volume.json";
+import header79 from "./metadata/honed-travertine-paver-volume.json";
+import header80 from "./metadata/living-turf-volume.json";
+import header81 from "./metadata/cedar-fence-panel-volume.json";
+import header82 from "./metadata/stucco-window-bay-volume.json";
+import header83 from "./metadata/limestone-coping-volume.json";
+import header84 from "./metadata/limestone-coping-corner-volume.json";
+import header85 from "./metadata/ceramic-waterline-volume.json";
+import header86 from "./metadata/teak-serving-table-volume.json";
+import header87 from "./metadata/tokyo-shopfront-left-volume.json";
+import header88 from "./metadata/tokyo-blade-left-volume.json";
+import header89 from "./metadata/tokyo-lights-left-volume.json";
+import header90 from "./metadata/tokyo-shopfront-right-volume.json";
+import header91 from "./metadata/tokyo-blade-right-volume.json";
+import header92 from "./metadata/tokyo-lights-right-volume.json";
+import header93 from "./metadata/tokyo-lantern-volume.json";
+import header94 from "./metadata/tokyo-blade-left-1-volume.json";
+import header95 from "./metadata/tokyo-blade-left-2-volume.json";
+import header96 from "./metadata/tokyo-blade-right-1-volume.json";
+import header97 from "./metadata/tokyo-blade-right-2-volume.json";
+import header98 from "./metadata/tokyo-shopfront-closed-right-volume.json";
+import header99 from "./metadata/tokyo-cyclist-volume.json";
+import header100 from "./metadata/tokyo-vending-volume.json";
 
 export const bundledAssetPlugins = [
   { id: "alpine-lake", label: "Alpine Lake", sources: ["assets/alpine-lake/alpine-runtime.blend","assets/alpine-lake/alpine-shore-scree.blend"], assets: [
@@ -149,34 +150,37 @@ export const bundledAssetPlugins = [
       { "id":"forest-cedar-0","name":"Forest Cedar 0","meshUrl":"/assets/forest-waterfall/forest-cedar-0.glb","sourceFiles":["assets/forest-waterfall/forest-waterfall-runtime.blend"], volume: { url: "/assets/forest-waterfall/forest-cedar-0.fvx.gz", header: header32 as unknown as MeshVolumeHeader } },
       { "id":"forest-cedar-1","name":"Forest Cedar 1","meshUrl":"/assets/forest-waterfall/forest-cedar-1.glb","sourceFiles":["assets/forest-waterfall/forest-waterfall-runtime.blend"], volume: { url: "/assets/forest-waterfall/forest-cedar-1.fvx.gz", header: header33 as unknown as MeshVolumeHeader } },
     ] },
+  { id: "galleons", label: "Pirate galleons", sources: ["assets/galleons/broadside.blend"], assets: [
+      { "id":"sailing-galleon","name":"Sailing Galleon","meshUrl":"/assets/galleons/sailing-galleon.glb","sourceFiles":["assets/galleons/broadside.blend"], volume: { url: "/assets/galleons/sailing-galleon.fvx.gz", header: header34 as unknown as MeshVolumeHeader } },
+    ] },
   { id: "hero-garden-blender", label: "Hero Garden Blender", sources: ["assets/hero-garden-blender/hero-garden.blend"], assets: [
-      { "id":"hero-pond-and-ground","name":"Hero Pond And Ground","meshUrl":"/assets/hero-garden-blender/hero-pond-and-ground.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pond-and-ground.fvx.gz", header: header34 as unknown as MeshVolumeHeader } },
-      { "id":"hero-ground-tile","name":"Hero Ground Tile","meshUrl":"/assets/hero-garden-blender/hero-ground-tile.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-ground-tile.fvx.gz", header: header35 as unknown as MeshVolumeHeader } },
-      { "id":"hero-ground-surround","name":"Hero Ground Surround","meshUrl":"/assets/hero-garden-blender/hero-ground-surround.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-ground-surround.fvx.gz", header: header36 as unknown as MeshVolumeHeader } },
-      { "id":"hero-boulder-0","name":"Hero Boulder 0","meshUrl":"/assets/hero-garden-blender/hero-boulder-0.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-boulder-0.fvx.gz", header: header37 as unknown as MeshVolumeHeader } },
-      { "id":"hero-boulder-1","name":"Hero Boulder 1","meshUrl":"/assets/hero-garden-blender/hero-boulder-1.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-boulder-1.fvx.gz", header: header38 as unknown as MeshVolumeHeader } },
-      { "id":"hero-boulder-2","name":"Hero Boulder 2","meshUrl":"/assets/hero-garden-blender/hero-boulder-2.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-boulder-2.fvx.gz", header: header39 as unknown as MeshVolumeHeader } },
-      { "id":"hero-boulder-3","name":"Hero Boulder 3","meshUrl":"/assets/hero-garden-blender/hero-boulder-3.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-boulder-3.fvx.gz", header: header40 as unknown as MeshVolumeHeader } },
-      { "id":"hero-stepping-0","name":"Hero Stepping 0","meshUrl":"/assets/hero-garden-blender/hero-stepping-0.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-stepping-0.fvx.gz", header: header41 as unknown as MeshVolumeHeader } },
-      { "id":"hero-stepping-1","name":"Hero Stepping 1","meshUrl":"/assets/hero-garden-blender/hero-stepping-1.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-stepping-1.fvx.gz", header: header42 as unknown as MeshVolumeHeader } },
-      { "id":"hero-stepping-2","name":"Hero Stepping 2","meshUrl":"/assets/hero-garden-blender/hero-stepping-2.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-stepping-2.fvx.gz", header: header43 as unknown as MeshVolumeHeader } },
-      { "id":"hero-stepping-3","name":"Hero Stepping 3","meshUrl":"/assets/hero-garden-blender/hero-stepping-3.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-stepping-3.fvx.gz", header: header44 as unknown as MeshVolumeHeader } },
-      { "id":"hero-stepping-4","name":"Hero Stepping 4","meshUrl":"/assets/hero-garden-blender/hero-stepping-4.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-stepping-4.fvx.gz", header: header45 as unknown as MeshVolumeHeader } },
-      { "id":"hero-pebble-0","name":"Hero Pebble 0","meshUrl":"/assets/hero-garden-blender/hero-pebble-0.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pebble-0.fvx.gz", header: header46 as unknown as MeshVolumeHeader } },
-      { "id":"hero-pebble-1","name":"Hero Pebble 1","meshUrl":"/assets/hero-garden-blender/hero-pebble-1.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pebble-1.fvx.gz", header: header47 as unknown as MeshVolumeHeader } },
-      { "id":"hero-pebble-2","name":"Hero Pebble 2","meshUrl":"/assets/hero-garden-blender/hero-pebble-2.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pebble-2.fvx.gz", header: header48 as unknown as MeshVolumeHeader } },
-      { "id":"hero-pebble-3","name":"Hero Pebble 3","meshUrl":"/assets/hero-garden-blender/hero-pebble-3.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pebble-3.fvx.gz", header: header49 as unknown as MeshVolumeHeader } },
-      { "id":"hero-oak","name":"Hero Oak","meshUrl":"/assets/hero-garden-blender/hero-oak.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-oak.fvx.gz", header: header50 as unknown as MeshVolumeHeader } },
-      { "id":"hero-birch","name":"Hero Birch","meshUrl":"/assets/hero-garden-blender/hero-birch.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-birch.fvx.gz", header: header51 as unknown as MeshVolumeHeader } },
-      { "id":"hero-pine","name":"Hero Pine","meshUrl":"/assets/hero-garden-blender/hero-pine.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pine.fvx.gz", header: header52 as unknown as MeshVolumeHeader } },
-      { "id":"hero-willow","name":"Hero Willow","meshUrl":"/assets/hero-garden-blender/hero-willow.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-willow.fvx.gz", header: header53 as unknown as MeshVolumeHeader } },
-      { "id":"hero-azalea","name":"Hero Azalea","meshUrl":"/assets/hero-garden-blender/hero-azalea.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-azalea.fvx.gz", header: header54 as unknown as MeshVolumeHeader } },
-      { "id":"hero-juniper","name":"Hero Juniper","meshUrl":"/assets/hero-garden-blender/hero-juniper.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-juniper.fvx.gz", header: header55 as unknown as MeshVolumeHeader } },
-      { "id":"hero-boxwood","name":"Hero Boxwood","meshUrl":"/assets/hero-garden-blender/hero-boxwood.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-boxwood.fvx.gz", header: header56 as unknown as MeshVolumeHeader } },
-      { "id":"hero-hebe","name":"Hero Hebe","meshUrl":"/assets/hero-garden-blender/hero-hebe.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-hebe.fvx.gz", header: header57 as unknown as MeshVolumeHeader } },
-      { "id":"hero-grass","name":"Hero Grass","meshUrl":"/assets/hero-garden-blender/hero-grass.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-grass.fvx.gz", header: header58 as unknown as MeshVolumeHeader } },
-      { "id":"hero-rosette","name":"Hero Rosette","meshUrl":"/assets/hero-garden-blender/hero-rosette.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-rosette.fvx.gz", header: header59 as unknown as MeshVolumeHeader } },
-      { "id":"hero-hose-and-nozzle","name":"Hero Hose And Nozzle","meshUrl":"/assets/hero-garden-blender/hero-hose-and-nozzle.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-hose-and-nozzle.fvx.gz", header: header60 as unknown as MeshVolumeHeader } },
+      { "id":"hero-pond-and-ground","name":"Hero Pond And Ground","meshUrl":"/assets/hero-garden-blender/hero-pond-and-ground.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pond-and-ground.fvx.gz", header: header35 as unknown as MeshVolumeHeader } },
+      { "id":"hero-ground-tile","name":"Hero Ground Tile","meshUrl":"/assets/hero-garden-blender/hero-ground-tile.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-ground-tile.fvx.gz", header: header36 as unknown as MeshVolumeHeader } },
+      { "id":"hero-ground-surround","name":"Hero Ground Surround","meshUrl":"/assets/hero-garden-blender/hero-ground-surround.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-ground-surround.fvx.gz", header: header37 as unknown as MeshVolumeHeader } },
+      { "id":"hero-boulder-0","name":"Hero Boulder 0","meshUrl":"/assets/hero-garden-blender/hero-boulder-0.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-boulder-0.fvx.gz", header: header38 as unknown as MeshVolumeHeader } },
+      { "id":"hero-boulder-1","name":"Hero Boulder 1","meshUrl":"/assets/hero-garden-blender/hero-boulder-1.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-boulder-1.fvx.gz", header: header39 as unknown as MeshVolumeHeader } },
+      { "id":"hero-boulder-2","name":"Hero Boulder 2","meshUrl":"/assets/hero-garden-blender/hero-boulder-2.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-boulder-2.fvx.gz", header: header40 as unknown as MeshVolumeHeader } },
+      { "id":"hero-boulder-3","name":"Hero Boulder 3","meshUrl":"/assets/hero-garden-blender/hero-boulder-3.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-boulder-3.fvx.gz", header: header41 as unknown as MeshVolumeHeader } },
+      { "id":"hero-stepping-0","name":"Hero Stepping 0","meshUrl":"/assets/hero-garden-blender/hero-stepping-0.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-stepping-0.fvx.gz", header: header42 as unknown as MeshVolumeHeader } },
+      { "id":"hero-stepping-1","name":"Hero Stepping 1","meshUrl":"/assets/hero-garden-blender/hero-stepping-1.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-stepping-1.fvx.gz", header: header43 as unknown as MeshVolumeHeader } },
+      { "id":"hero-stepping-2","name":"Hero Stepping 2","meshUrl":"/assets/hero-garden-blender/hero-stepping-2.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-stepping-2.fvx.gz", header: header44 as unknown as MeshVolumeHeader } },
+      { "id":"hero-stepping-3","name":"Hero Stepping 3","meshUrl":"/assets/hero-garden-blender/hero-stepping-3.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-stepping-3.fvx.gz", header: header45 as unknown as MeshVolumeHeader } },
+      { "id":"hero-stepping-4","name":"Hero Stepping 4","meshUrl":"/assets/hero-garden-blender/hero-stepping-4.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-stepping-4.fvx.gz", header: header46 as unknown as MeshVolumeHeader } },
+      { "id":"hero-pebble-0","name":"Hero Pebble 0","meshUrl":"/assets/hero-garden-blender/hero-pebble-0.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pebble-0.fvx.gz", header: header47 as unknown as MeshVolumeHeader } },
+      { "id":"hero-pebble-1","name":"Hero Pebble 1","meshUrl":"/assets/hero-garden-blender/hero-pebble-1.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pebble-1.fvx.gz", header: header48 as unknown as MeshVolumeHeader } },
+      { "id":"hero-pebble-2","name":"Hero Pebble 2","meshUrl":"/assets/hero-garden-blender/hero-pebble-2.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pebble-2.fvx.gz", header: header49 as unknown as MeshVolumeHeader } },
+      { "id":"hero-pebble-3","name":"Hero Pebble 3","meshUrl":"/assets/hero-garden-blender/hero-pebble-3.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pebble-3.fvx.gz", header: header50 as unknown as MeshVolumeHeader } },
+      { "id":"hero-oak","name":"Hero Oak","meshUrl":"/assets/hero-garden-blender/hero-oak.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-oak.fvx.gz", header: header51 as unknown as MeshVolumeHeader } },
+      { "id":"hero-birch","name":"Hero Birch","meshUrl":"/assets/hero-garden-blender/hero-birch.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-birch.fvx.gz", header: header52 as unknown as MeshVolumeHeader } },
+      { "id":"hero-pine","name":"Hero Pine","meshUrl":"/assets/hero-garden-blender/hero-pine.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-pine.fvx.gz", header: header53 as unknown as MeshVolumeHeader } },
+      { "id":"hero-willow","name":"Hero Willow","meshUrl":"/assets/hero-garden-blender/hero-willow.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-willow.fvx.gz", header: header54 as unknown as MeshVolumeHeader } },
+      { "id":"hero-azalea","name":"Hero Azalea","meshUrl":"/assets/hero-garden-blender/hero-azalea.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-azalea.fvx.gz", header: header55 as unknown as MeshVolumeHeader } },
+      { "id":"hero-juniper","name":"Hero Juniper","meshUrl":"/assets/hero-garden-blender/hero-juniper.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-juniper.fvx.gz", header: header56 as unknown as MeshVolumeHeader } },
+      { "id":"hero-boxwood","name":"Hero Boxwood","meshUrl":"/assets/hero-garden-blender/hero-boxwood.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-boxwood.fvx.gz", header: header57 as unknown as MeshVolumeHeader } },
+      { "id":"hero-hebe","name":"Hero Hebe","meshUrl":"/assets/hero-garden-blender/hero-hebe.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-hebe.fvx.gz", header: header58 as unknown as MeshVolumeHeader } },
+      { "id":"hero-grass","name":"Hero Grass","meshUrl":"/assets/hero-garden-blender/hero-grass.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-grass.fvx.gz", header: header59 as unknown as MeshVolumeHeader } },
+      { "id":"hero-rosette","name":"Hero Rosette","meshUrl":"/assets/hero-garden-blender/hero-rosette.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-rosette.fvx.gz", header: header60 as unknown as MeshVolumeHeader } },
+      { "id":"hero-hose-and-nozzle","name":"Hero Hose And Nozzle","meshUrl":"/assets/hero-garden-blender/hero-hose-and-nozzle.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-hose-and-nozzle.fvx.gz", header: header61 as unknown as MeshVolumeHeader } },
     ] },
   { id: "paddleboats", label: "Paddleboats", sources: ["assets/paddleboats/paddleboats.blend"], assets: [
       { "id":"paddleboat","name":"Paddleboat","meshUrl":"/assets/paddleboats/paddleboat.glb","sourceFiles":["assets/paddleboats/paddleboats.blend"] },
@@ -184,48 +188,48 @@ export const bundledAssetPlugins = [
       { "id":"test-basin","name":"Test Basin","meshUrl":"/assets/paddleboats/test-basin.glb","sourceFiles":["assets/paddleboats/paddleboats.blend"] },
     ] },
   { id: "pool-neighborhood", label: "Pool Neighborhood", sources: ["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], assets: [
-      { "id":"terrace-host","name":"Terrace Host","meshUrl":"/assets/pool-neighborhood/terrace-host.glb","sourceFiles":["assets/pool-neighborhood/terrace-host.blend"], volume: { url: "/assets/pool-neighborhood/terrace-host.fvx.gz", header: header61 as unknown as MeshVolumeHeader } },
-      { "id":"terrace-reader","name":"Terrace Reader","meshUrl":"/assets/pool-neighborhood/terrace-reader.glb","sourceFiles":["assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/terrace-reader.fvx.gz", header: header62 as unknown as MeshVolumeHeader } },
-      { "id":"garden-pavilion","name":"Garden Pavilion","meshUrl":"/assets/pool-neighborhood/garden-pavilion.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/garden-pavilion.fvx.gz", header: header63 as unknown as MeshVolumeHeader } },
-      { "id":"neighbor-cottage","name":"Neighbor Cottage","meshUrl":"/assets/pool-neighborhood/neighbor-cottage.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/neighbor-cottage.fvx.gz", header: header64 as unknown as MeshVolumeHeader } },
-      { "id":"neighborhood-ground","name":"Neighborhood Ground","meshUrl":"/assets/pool-neighborhood/neighborhood-ground.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/neighborhood-ground.fvx.gz", header: header65 as unknown as MeshVolumeHeader } },
-      { "id":"wooded-horizon","name":"Wooded Horizon","meshUrl":"/assets/pool-neighborhood/wooded-horizon.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/wooded-horizon.fvx.gz", header: header66 as unknown as MeshVolumeHeader } },
-      { "id":"lavender-border","name":"Lavender Border","meshUrl":"/assets/pool-neighborhood/lavender-border.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/lavender-border.fvx.gz", header: header67 as unknown as MeshVolumeHeader } },
-      { "id":"terrace-festoon","name":"Terrace Festoon","meshUrl":"/assets/pool-neighborhood/terrace-festoon.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/terrace-festoon.fvx.gz", header: header68 as unknown as MeshVolumeHeader } },
-      { "id":"valley-farmland","name":"Valley Farmland","meshUrl":"/assets/pool-neighborhood/valley-farmland.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/valley-farmland.fvx.gz", header: header69 as unknown as MeshVolumeHeader } },
-      { "id":"lane-bungalow","name":"Lane Bungalow","meshUrl":"/assets/pool-neighborhood/lane-bungalow.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/lane-bungalow.fvx.gz", header: header70 as unknown as MeshVolumeHeader } },
-      { "id":"hill-saltbox","name":"Hill Saltbox","meshUrl":"/assets/pool-neighborhood/hill-saltbox.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/hill-saltbox.fvx.gz", header: header71 as unknown as MeshVolumeHeader } },
+      { "id":"terrace-host","name":"Terrace Host","meshUrl":"/assets/pool-neighborhood/terrace-host.glb","sourceFiles":["assets/pool-neighborhood/terrace-host.blend"], volume: { url: "/assets/pool-neighborhood/terrace-host.fvx.gz", header: header62 as unknown as MeshVolumeHeader } },
+      { "id":"terrace-reader","name":"Terrace Reader","meshUrl":"/assets/pool-neighborhood/terrace-reader.glb","sourceFiles":["assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/terrace-reader.fvx.gz", header: header63 as unknown as MeshVolumeHeader } },
+      { "id":"garden-pavilion","name":"Garden Pavilion","meshUrl":"/assets/pool-neighborhood/garden-pavilion.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/garden-pavilion.fvx.gz", header: header64 as unknown as MeshVolumeHeader } },
+      { "id":"neighbor-cottage","name":"Neighbor Cottage","meshUrl":"/assets/pool-neighborhood/neighbor-cottage.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/neighbor-cottage.fvx.gz", header: header65 as unknown as MeshVolumeHeader } },
+      { "id":"neighborhood-ground","name":"Neighborhood Ground","meshUrl":"/assets/pool-neighborhood/neighborhood-ground.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/neighborhood-ground.fvx.gz", header: header66 as unknown as MeshVolumeHeader } },
+      { "id":"wooded-horizon","name":"Wooded Horizon","meshUrl":"/assets/pool-neighborhood/wooded-horizon.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/wooded-horizon.fvx.gz", header: header67 as unknown as MeshVolumeHeader } },
+      { "id":"lavender-border","name":"Lavender Border","meshUrl":"/assets/pool-neighborhood/lavender-border.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/lavender-border.fvx.gz", header: header68 as unknown as MeshVolumeHeader } },
+      { "id":"terrace-festoon","name":"Terrace Festoon","meshUrl":"/assets/pool-neighborhood/terrace-festoon.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/terrace-festoon.fvx.gz", header: header69 as unknown as MeshVolumeHeader } },
+      { "id":"valley-farmland","name":"Valley Farmland","meshUrl":"/assets/pool-neighborhood/valley-farmland.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/valley-farmland.fvx.gz", header: header70 as unknown as MeshVolumeHeader } },
+      { "id":"lane-bungalow","name":"Lane Bungalow","meshUrl":"/assets/pool-neighborhood/lane-bungalow.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/lane-bungalow.fvx.gz", header: header71 as unknown as MeshVolumeHeader } },
+      { "id":"hill-saltbox","name":"Hill Saltbox","meshUrl":"/assets/pool-neighborhood/hill-saltbox.glb","sourceFiles":["assets/pool-neighborhood/neighborhood.blend","assets/pool-neighborhood/terrace-host.blend","assets/pool-neighborhood/terrace-reader.blend"], volume: { url: "/assets/pool-neighborhood/hill-saltbox.fvx.gz", header: header72 as unknown as MeshVolumeHeader } },
     ] },
   { id: "pool-party", label: "Pool Party", sources: ["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], assets: [
-      { "id":"teak-lounger","name":"Teak Lounger","meshUrl":"/assets/pool-party/teak-lounger.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/teak-lounger.fvx.gz", header: header72 as unknown as MeshVolumeHeader } },
-      { "id":"garden-parasol","name":"Garden Parasol","meshUrl":"/assets/pool-party/garden-parasol.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/garden-parasol.fvx.gz", header: header73 as unknown as MeshVolumeHeader } },
-      { "id":"insulated-cooler","name":"Insulated Cooler","meshUrl":"/assets/pool-party/insulated-cooler.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/insulated-cooler.fvx.gz", header: header74 as unknown as MeshVolumeHeader } },
-      { "id":"refreshment-set","name":"Refreshment Set","meshUrl":"/assets/pool-party/refreshment-set.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/refreshment-set.fvx.gz", header: header75 as unknown as MeshVolumeHeader } },
-      { "id":"diving-board-ladder","name":"Diving Board Ladder","meshUrl":"/assets/pool-party/diving-board-ladder.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/diving-board-ladder.fvx.gz", header: header76 as unknown as MeshVolumeHeader } },
-      { "id":"pool-stainless-ladder","name":"Pool Stainless Ladder","meshUrl":"/assets/pool-party/pool-stainless-ladder.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/pool-stainless-ladder.fvx.gz", header: header77 as unknown as MeshVolumeHeader } },
-      { "id":"honed-travertine-paver","name":"Honed Travertine Paver","meshUrl":"/assets/pool-party/honed-travertine-paver.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/honed-travertine-paver.fvx.gz", header: header78 as unknown as MeshVolumeHeader } },
-      { "id":"living-turf","name":"Living Turf","meshUrl":"/assets/pool-party/living-turf.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/living-turf.fvx.gz", header: header79 as unknown as MeshVolumeHeader } },
-      { "id":"cedar-fence-panel","name":"Cedar Fence Panel","meshUrl":"/assets/pool-party/cedar-fence-panel.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/cedar-fence-panel.fvx.gz", header: header80 as unknown as MeshVolumeHeader } },
-      { "id":"stucco-window-bay","name":"Stucco Window Bay","meshUrl":"/assets/pool-party/stucco-window-bay.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/stucco-window-bay.fvx.gz", header: header81 as unknown as MeshVolumeHeader } },
-      { "id":"limestone-coping","name":"Limestone Coping","meshUrl":"/assets/pool-party/limestone-coping.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/limestone-coping.fvx.gz", header: header82 as unknown as MeshVolumeHeader } },
-      { "id":"limestone-coping-corner","name":"Limestone Coping Corner","meshUrl":"/assets/pool-party/limestone-coping-corner.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/limestone-coping-corner.fvx.gz", header: header83 as unknown as MeshVolumeHeader } },
-      { "id":"ceramic-waterline","name":"Ceramic Waterline","meshUrl":"/assets/pool-party/ceramic-waterline.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/ceramic-waterline.fvx.gz", header: header84 as unknown as MeshVolumeHeader } },
-      { "id":"teak-serving-table","name":"Teak Serving Table","meshUrl":"/assets/pool-party/teak-serving-table.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/teak-serving-table.fvx.gz", header: header85 as unknown as MeshVolumeHeader } },
+      { "id":"teak-lounger","name":"Teak Lounger","meshUrl":"/assets/pool-party/teak-lounger.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/teak-lounger.fvx.gz", header: header73 as unknown as MeshVolumeHeader } },
+      { "id":"garden-parasol","name":"Garden Parasol","meshUrl":"/assets/pool-party/garden-parasol.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/garden-parasol.fvx.gz", header: header74 as unknown as MeshVolumeHeader } },
+      { "id":"insulated-cooler","name":"Insulated Cooler","meshUrl":"/assets/pool-party/insulated-cooler.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/insulated-cooler.fvx.gz", header: header75 as unknown as MeshVolumeHeader } },
+      { "id":"refreshment-set","name":"Refreshment Set","meshUrl":"/assets/pool-party/refreshment-set.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/refreshment-set.fvx.gz", header: header76 as unknown as MeshVolumeHeader } },
+      { "id":"diving-board-ladder","name":"Diving Board Ladder","meshUrl":"/assets/pool-party/diving-board-ladder.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/diving-board-ladder.fvx.gz", header: header77 as unknown as MeshVolumeHeader } },
+      { "id":"pool-stainless-ladder","name":"Pool Stainless Ladder","meshUrl":"/assets/pool-party/pool-stainless-ladder.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/pool-stainless-ladder.fvx.gz", header: header78 as unknown as MeshVolumeHeader } },
+      { "id":"honed-travertine-paver","name":"Honed Travertine Paver","meshUrl":"/assets/pool-party/honed-travertine-paver.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/honed-travertine-paver.fvx.gz", header: header79 as unknown as MeshVolumeHeader } },
+      { "id":"living-turf","name":"Living Turf","meshUrl":"/assets/pool-party/living-turf.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/living-turf.fvx.gz", header: header80 as unknown as MeshVolumeHeader } },
+      { "id":"cedar-fence-panel","name":"Cedar Fence Panel","meshUrl":"/assets/pool-party/cedar-fence-panel.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/cedar-fence-panel.fvx.gz", header: header81 as unknown as MeshVolumeHeader } },
+      { "id":"stucco-window-bay","name":"Stucco Window Bay","meshUrl":"/assets/pool-party/stucco-window-bay.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/stucco-window-bay.fvx.gz", header: header82 as unknown as MeshVolumeHeader } },
+      { "id":"limestone-coping","name":"Limestone Coping","meshUrl":"/assets/pool-party/limestone-coping.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/limestone-coping.fvx.gz", header: header83 as unknown as MeshVolumeHeader } },
+      { "id":"limestone-coping-corner","name":"Limestone Coping Corner","meshUrl":"/assets/pool-party/limestone-coping-corner.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/limestone-coping-corner.fvx.gz", header: header84 as unknown as MeshVolumeHeader } },
+      { "id":"ceramic-waterline","name":"Ceramic Waterline","meshUrl":"/assets/pool-party/ceramic-waterline.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/ceramic-waterline.fvx.gz", header: header85 as unknown as MeshVolumeHeader } },
+      { "id":"teak-serving-table","name":"Teak Serving Table","meshUrl":"/assets/pool-party/teak-serving-table.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/teak-serving-table.fvx.gz", header: header86 as unknown as MeshVolumeHeader } },
     ] },
   { id: "tokyo-rain", label: "Tokyo rain · Blender authored street", sources: ["assets/tokyo-rain/tokyo-rain.blend"], assets: [
-      { "id":"tokyo-shopfront-left","name":"Tokyo Shopfront Left","meshUrl":"/assets/tokyo-rain/tokyo-shopfront-left.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-shopfront-left.fvx.gz", header: header86 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-blade-left","name":"Tokyo Blade Left","meshUrl":"/assets/tokyo-rain/tokyo-blade-left.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-left.fvx.gz", header: header87 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-lights-left","name":"Tokyo Lights Left","meshUrl":"/assets/tokyo-rain/tokyo-lights-left.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-lights-left.fvx.gz", header: header88 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-shopfront-right","name":"Tokyo Shopfront Right","meshUrl":"/assets/tokyo-rain/tokyo-shopfront-right.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-shopfront-right.fvx.gz", header: header89 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-blade-right","name":"Tokyo Blade Right","meshUrl":"/assets/tokyo-rain/tokyo-blade-right.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-right.fvx.gz", header: header90 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-lights-right","name":"Tokyo Lights Right","meshUrl":"/assets/tokyo-rain/tokyo-lights-right.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-lights-right.fvx.gz", header: header91 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-lantern","name":"Tokyo Lantern","meshUrl":"/assets/tokyo-rain/tokyo-lantern.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-lantern.fvx.gz", header: header92 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-blade-left-1","name":"Tokyo Blade Left 1","meshUrl":"/assets/tokyo-rain/tokyo-blade-left-1.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-left-1.fvx.gz", header: header93 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-blade-left-2","name":"Tokyo Blade Left 2","meshUrl":"/assets/tokyo-rain/tokyo-blade-left-2.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-left-2.fvx.gz", header: header94 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-blade-right-1","name":"Tokyo Blade Right 1","meshUrl":"/assets/tokyo-rain/tokyo-blade-right-1.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-right-1.fvx.gz", header: header95 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-blade-right-2","name":"Tokyo Blade Right 2","meshUrl":"/assets/tokyo-rain/tokyo-blade-right-2.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-right-2.fvx.gz", header: header96 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-shopfront-closed-right","name":"Tokyo Shopfront Closed Right","meshUrl":"/assets/tokyo-rain/tokyo-shopfront-closed-right.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-shopfront-closed-right.fvx.gz", header: header97 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-cyclist","name":"Tokyo Cyclist","meshUrl":"/assets/tokyo-rain/tokyo-cyclist.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-cyclist.fvx.gz", header: header98 as unknown as MeshVolumeHeader } },
-      { "id":"tokyo-vending","name":"Tokyo Vending","meshUrl":"/assets/tokyo-rain/tokyo-vending.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-vending.fvx.gz", header: header99 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-shopfront-left","name":"Tokyo Shopfront Left","meshUrl":"/assets/tokyo-rain/tokyo-shopfront-left.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-shopfront-left.fvx.gz", header: header87 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-blade-left","name":"Tokyo Blade Left","meshUrl":"/assets/tokyo-rain/tokyo-blade-left.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-left.fvx.gz", header: header88 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-lights-left","name":"Tokyo Lights Left","meshUrl":"/assets/tokyo-rain/tokyo-lights-left.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-lights-left.fvx.gz", header: header89 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-shopfront-right","name":"Tokyo Shopfront Right","meshUrl":"/assets/tokyo-rain/tokyo-shopfront-right.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-shopfront-right.fvx.gz", header: header90 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-blade-right","name":"Tokyo Blade Right","meshUrl":"/assets/tokyo-rain/tokyo-blade-right.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-right.fvx.gz", header: header91 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-lights-right","name":"Tokyo Lights Right","meshUrl":"/assets/tokyo-rain/tokyo-lights-right.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-lights-right.fvx.gz", header: header92 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-lantern","name":"Tokyo Lantern","meshUrl":"/assets/tokyo-rain/tokyo-lantern.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-lantern.fvx.gz", header: header93 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-blade-left-1","name":"Tokyo Blade Left 1","meshUrl":"/assets/tokyo-rain/tokyo-blade-left-1.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-left-1.fvx.gz", header: header94 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-blade-left-2","name":"Tokyo Blade Left 2","meshUrl":"/assets/tokyo-rain/tokyo-blade-left-2.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-left-2.fvx.gz", header: header95 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-blade-right-1","name":"Tokyo Blade Right 1","meshUrl":"/assets/tokyo-rain/tokyo-blade-right-1.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-right-1.fvx.gz", header: header96 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-blade-right-2","name":"Tokyo Blade Right 2","meshUrl":"/assets/tokyo-rain/tokyo-blade-right-2.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-blade-right-2.fvx.gz", header: header97 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-shopfront-closed-right","name":"Tokyo Shopfront Closed Right","meshUrl":"/assets/tokyo-rain/tokyo-shopfront-closed-right.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-shopfront-closed-right.fvx.gz", header: header98 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-cyclist","name":"Tokyo Cyclist","meshUrl":"/assets/tokyo-rain/tokyo-cyclist.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-cyclist.fvx.gz", header: header99 as unknown as MeshVolumeHeader } },
+      { "id":"tokyo-vending","name":"Tokyo Vending","meshUrl":"/assets/tokyo-rain/tokyo-vending.glb","sourceFiles":["assets/tokyo-rain/tokyo-rain.blend"], volume: { url: "/assets/tokyo-rain/tokyo-vending.fvx.gz", header: header100 as unknown as MeshVolumeHeader } },
     ] },
 ] satisfies readonly AssetPlugin[];

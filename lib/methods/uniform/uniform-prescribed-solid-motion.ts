@@ -33,6 +33,9 @@ export class UniformPrescribedSolidMotion {
       o.w = body.orientation.w; o.x = body.orientation.x; o.y = body.orientation.y; o.z = body.orientation.z;
       pose.held = body.held; pose.fixed = fixed; pose.sample = sample;
       result[i] = body;
+      // Launcher velocities are integrated on the shared clock. Differencing
+      // the return to a muzzle would inject an artificial impulse into water.
+      if (body.description.launcher) continue;
       if ((body.description.prescribedMotion || body.description.poseTrack) && fixed) {
         result[i] = samplePrescribedRigidBody(body, time_s, dt);
         continue;

@@ -7,6 +7,7 @@ import { SVO_RENDER_TUNING_PRESETS, type SvoRenderTuning } from "./svo-render-tu
 /** What a tuning key resets to in this scene: the balanced rung, at the scene's own refinement depth. */
 export function svoSceneTuningDefaults(renderProfile: SceneRenderProfile | undefined): SvoRenderTuning {
   return renderProfile ? { ...SVO_RENDER_TUNING_PRESETS.balanced,
+    shadowBiasCells: sceneRenderTuning(renderProfile).shadowBiasCells,
     resolutionScale: sceneRenderTuning(renderProfile).resolutionScale,
     environmentRefinementDepth: sceneRenderTuning(renderProfile).environmentRefinementDepth,
   } : SVO_RENDER_TUNING_PRESETS.balanced;

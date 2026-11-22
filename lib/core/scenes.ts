@@ -1,3 +1,4 @@
+import { createGalleonsScene, galleonsCamera } from "./galleons-scene";
 import { PADDLEBOATS_SCENE_ID, createPaddleboatsScene, paddleboatsCamera, paddleboatsWidgets } from "./paddleboats-scene";
 import { createInteractivePlayground } from "../interaction/playground";
 import type { SceneRenderProfile } from "./scene-render-profile";
@@ -1825,6 +1826,14 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     renderProfile: { environmentRefinementDepth: 0 },
     build: createTokyoRainScene,
     camera: tokyoRainCamera,
+  }),
+  defineScene({
+    id: "galleon-broadside", name: "Galleons · broadside",
+    blurb: "Jackdaw and Kestrel trade broadsides under shortened topsails. Follow each shot across the swell and inspect the holes it cuts in the planking.",
+    audience: "explore", shelf: "Water landscapes", environment: "garden", containerShell: "authored",
+    presentationMode: "full-scene", build: createGalleonsScene, camera: galleonsCamera,
+    methodProfile: { ...NBFLIP_METHOD_PROFILE, overrides: { rigidCoupling: "on" } },
+    renderProfile: { environmentRefinementDepth: 2, shadowBiasCells: .10, edgeAntialiasing: true, fluidSurfaceRenderMode: "shaded", fluidParticleDisplay: "off" },
   }),
   defineScene({
     id: BEACH_SCENE_ID,

@@ -106,6 +106,7 @@ export function rigidMotorRecords(descriptions: readonly RigidBodyDescription[],
       const drive=drives[index];if(!drive)throw new Error(`Missing motor drive for ${description.id}`);
       motorData.set([m.pivot_m.x,m.pivot_m.y,m.pivot_m.z,parent+1,m.offset_m.x,m.offset_m.y,m.offset_m.z,m.phase_rad + drive.phaseOffset_rad,
         m.axis.x,m.axis.y,m.axis.z,m.angularSpeed_rad_s * drive.strength,m.orientation.w,m.orientation.x,m.orientation.y,m.orientation.z,m.startTime_s,m.rampUp_s,0,0],at);}
+    if (description.launcher) motorData[at + 18] = 1;
     if(skin)motorData.set([...skin.half,skin.shape],at+20);
     motorData.set(axles[index]!,at+RIGID_MOTOR_AXLE_FLOAT);
   });
@@ -606,7 +607,7 @@ fn publish(index: u32) {
   let body=bodies[index];let physicalShape=rigidShapeTag(body);let shape=select(physicalShape,-physicalShape-1,physicalShape<0);
   let skin=motors[index].renderHalfShape;
   let half=select(rigidShapeRenderHalf(shape,body.dimensions.xyz),skin.xyz,skin.w>0.0);
-  let color=rigidShapePalette(shape);
+  let color=select(rigidShapePalette(shape),vec3f(.044,.048,.054),motors[index].timing.z>0.5);
   renderBodies[index]=RenderBody(vec4f(body.positionShape.xyz,select(body.dimensions.w,length(half),skin.w>0.0)),vec4f(half,select(select(f32(shape),${ROUNDED_PLATE_RENDER_TAG}.0,shape==5),skin.w,skin.w>0.0)),body.orientation,vec4f(color,body.material.w));
 }
 fn motionQuaternionXyzw(qWxyz:vec4f)->vec4f{return vec4f(qWxyz.yzw,qWxyz.x);}
@@ -1180,7 +1181,7 @@ export class WebGPURigidBodySystem {
       stateWords[o+29]=nextMotionGenerations[index];
       const half = sceneShapeRenderHalfExtent_m(body.description.shape, d);
       const skin=rigidAppearanceSkin(body.description), renderHalf=skin?.half??half;
-      render.set([body.position_m.x,body.position_m.y,body.position_m.z,skin?.radius??state[o+7],renderHalf[0],renderHalf[1],renderHalf[2],skin?.shape??(body.description.shape==="rounded-plate"?ROUNDED_PLATE_RENDER_TAG:shape),q.w,q.x,q.y,q.z,...palette[shape],selection],index*GPU_RIGID_RENDER_FLOATS);
+      render.set([body.position_m.x,body.position_m.y,body.position_m.z,skin?.radius??state[o+7],renderHalf[0],renderHalf[1],renderHalf[2],skin?.shape??(body.description.shape==="rounded-plate"?ROUNDED_PLATE_RENDER_TAG:shape),q.w,q.x,q.y,q.z,...(body.description.launcher ? [.044,.048,.054] : palette[shape]),selection],index*GPU_RIGID_RENDER_FLOATS);
       const volume = primitiveVolume(body.description.shape, body.description.dimensions_m);
       const waterline = this.scene.container.fillFraction * this.scene.container.height_m;
       if (body.description.shape === "sphere") {

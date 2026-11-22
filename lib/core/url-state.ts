@@ -657,6 +657,8 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
       features.fluidSurfaceRenderMode = preset.renderProfile.fluidSurfaceRenderMode;
     }
     features.svoRenderTuning = { ...features.svoRenderTuning,
+      ...(preset.renderProfile.shadowBiasCells !== undefined ? { shadowBiasCells: numberParam(
+        query, "svoShadowBias", preset.renderProfile.shadowBiasCells, 0, .25) } : {}),
       ...(preset.renderProfile.resolutionScale !== undefined ? { resolutionScale: numberParam(
         query, "svoResolution", preset.renderProfile.resolutionScale, .35, 2) } : {}),
       environmentRefinementDepth: Math.trunc(numberParam(
@@ -798,6 +800,10 @@ export function serializeQueryState(
     if (renderProfile.fluidSurfaceRenderMode) {
       if (uiState.fluidSurfaceRenderMode === renderProfile.fluidSurfaceRenderMode) query.delete("fluidSurface");
       else query.set("fluidSurface", uiState.fluidSurfaceRenderMode);
+    }
+    if (renderProfile.shadowBiasCells !== undefined) {
+      if (uiState.svoRenderTuning.shadowBiasCells === renderProfile.shadowBiasCells) query.delete("svoShadowBias");
+      else query.set("svoShadowBias", String(uiState.svoRenderTuning.shadowBiasCells));
     }
     if (renderProfile.resolutionScale !== undefined) {
       if (uiState.svoRenderTuning.resolutionScale === renderProfile.resolutionScale) query.delete("svoResolution");

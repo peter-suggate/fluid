@@ -1,0 +1,5 @@
+{
+  "collection": { "id": "galleons", "label": "Pirate galleons" },
+  "source": "broadside.blend",
+  "assets": [{ "id": "sailing-galleon", "mesh": "sailing-galleon.glb", "volume": "sailing-galleon.fvx.gz" }]
+}

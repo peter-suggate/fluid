@@ -10,7 +10,8 @@ export const lightingQuery = queryRecord<LightingQueryState>({
   svoConeTracingMode: choiceQuery("svoCones", DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode, ["cones", "exact", "raster-ao", "off"]),
   svoLatticeVisibilityEnabled: booleanQuery("svoLattice", DEFAULT_SVO_LIGHTING_OPTIONS.latticeVisibilityEnabled),
 });
-export const lightingTuningQuery = queryRecord<Pick<SvoRenderTuning, "maximumShadedLights" | "waterShadowsEnabled" | "rasterCoarseAoStrength" | "rasterFarAoTaps" | "rasterStillViewReuse" | "rasterShadowResolution">>({
+export const lightingTuningQuery = queryRecord<Pick<SvoRenderTuning, "shadowBiasCells" | "maximumShadedLights" | "waterShadowsEnabled" | "rasterCoarseAoStrength" | "rasterFarAoTaps" | "rasterStillViewReuse" | "rasterShadowResolution">>({
+  shadowBiasCells: numberQuery("svoShadowBias", DEFAULT_SVO_RENDER_TUNING.shadowBiasCells, 0, .25),
   rasterShadowResolution: { key: "svoShadowResolution", initial: DEFAULT_SVO_RENDER_TUNING.rasterShadowResolution, read: raw => raw === "4096" ? 4096 : 2048, write: value => { if(value !== 2048 && value !== 4096) throw new Error(`Invalid shadow resolution: ${value}`); return String(value); } },
   maximumShadedLights: numberQuery("svoLightSamples", DEFAULT_SVO_RENDER_TUNING.maximumShadedLights, 1, 32),
   rasterStillViewReuse: booleanQuery("svoStillReuse", DEFAULT_SVO_RENDER_TUNING.rasterStillViewReuse),

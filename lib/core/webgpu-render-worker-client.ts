@@ -3,7 +3,7 @@ import { publishSceneClothSurfaces, clearSceneClothSurfaces } from "../cloth/sce
 import type { ClothGrab, ClothSurfacePublication } from "../cloth/types";
 import type { FluidStepRequest } from "../interaction/runtime/physics";
 import type { FluidExchange } from "../interaction/contracts";
-import { registerMeshAssetDistanceField } from "./imported-assets/asset-library";
+import { meshAssetDistanceFieldReady, registerMeshAssetDistanceField, sceneMeshAssetIds } from "./imported-assets/asset-library";
 import type { MeshVolumeDistanceField } from "./imported-assets/mesh-volume";
 import { adoptEnvironmentProxyCatalog, useRemoteEnvironmentCatalogs, cachedEnvironmentProxyCatalog, reuseEnvironmentProxyCatalog, markEnvironmentCatalogRemote, type EnvironmentProxyCatalog } from "./voxel-environments";
 import type { LiveFluidEdit, LiveFluidEditResult } from "./live-fluid-edit";
@@ -540,6 +540,8 @@ export class WebGPURenderWorkerClient {
     // worker keeps every other part the object it already has. The first
     // document, another document altogether, and one published while edits are
     // unanswered cross whole.
+    const needsSceneryCatalog = () => !cachedEnvironmentProxyCatalog(scene)
+      || sceneMeshAssetIds(scene).some(id => !meshAssetDistanceFieldReady(id));
     const changes = held && documentDelta(held, scene);
     if (held && changes) {
       const touches = (part: string) => changes.some((entry) => entry.path[0] === part);
@@ -557,11 +559,11 @@ export class WebGPURenderWorkerClient {
       // Named the way a solid edit names its base.
       const base = { revision: heldRevision, patchCount: held.solidVoxels.length, stamp: solidWorldContentStamp(held) };
       this.post({ type: "update-render-scene", revision, base, entries: changes, terrainContentStamp: stamp,
-        needsSceneryCatalog: !cachedEnvironmentProxyCatalog(scene) });
+        needsSceneryCatalog: needsSceneryCatalog() });
       return revision;
     }
     this.post({ type: "set-render-scene", revision, scene, terrainContentStamp: this.terrainStamp(scene.terrain),
-      needsSceneryCatalog: !cachedEnvironmentProxyCatalog(scene) });
+      needsSceneryCatalog: needsSceneryCatalog() });
     return revision;
   }
 

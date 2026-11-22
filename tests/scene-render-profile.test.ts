@@ -27,6 +27,19 @@ test("forest render defaults travel through definition, preset, card and saved d
     "an explicitly chosen global default is still an override");
 });
 
+test("galleon shadows use the scene bias and preserve an explicit global value on reload", () => {
+  const id = "galleon-broadside";
+  const scene = sceneDocument(getSceneDefinition(id));
+  const ui = parseUIQueryState("", id);
+  assert.equal(ui.svoRenderTuning.shadowBiasCells, .10);
+  for (const bias of [.10, DEFAULT_SVO_RENDER_TUNING.shadowBiasCells]) {
+    const changed = { ...ui, svoRenderTuning: { ...ui.svoRenderTuning, shadowBiasCells: bias } };
+    const link = serializeQueryState("", { scene, presetId: id }, parseMethodQueryState(""), changed);
+    assert.equal(new URLSearchParams(link).get("svoShadowBias"), bias === .10 ? null : String(bias));
+    assert.equal(parseUIQueryState(link, id).svoRenderTuning.shadowBiasCells, bias);
+  }
+});
+
 test("forest URL defaults and explicit refinement overrides survive canonical serialization", () => {
   const profile = definition.renderProfile!;
   const normal = parseUIQueryState("", definition.id);

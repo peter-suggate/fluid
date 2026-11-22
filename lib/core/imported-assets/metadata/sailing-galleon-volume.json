@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "asset": "sailing-galleon",
+  "origin": [
+    -10.15,
+    -4.850000000000001,
+    -20.1
+  ],
+  "dimensions": [
+    208,
+    432,
+    472
+  ],
+  "cellSize": 0.1,
+  "brickCount": 9058,
+  "brickCells": 8,
+  "units": "metres",
+  "upAxis": "Y",
+  "bandWidth": 0.2,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Tar-black pennant",
+      "baseColorLinear": [
+        0.009134056977927685,
+        0.008023192174732685,
+        0.006512091029435396
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0
+    },
+    {
+      "name": "galleon_body0",
+      "baseColorLinear": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "roughness": 1,
+      "metallic": 0
+    },
+    {
+      "name": "window",
+      "baseColorLinear": [
+        0.019999999552965164,
+        0.02500000037252903,
+        0.02500000037252903
+      ],
+      "roughness": 0.05999999865889549,
+      "metallic": 0
+    },
+    {
+      "name": "lamp",
+      "baseColorLinear": [
+        0.8500000238418579,
+        0.75,
+        0.550000011920929
+      ],
+      "roughness": 0.15000000596046448,
+      "metallic": 0
+    },
+    {
+      "name": "rope",
+      "baseColorLinear": [
+        0.027320891618728638,
+        0.017641954123973846,
+        0.01032982300966978
+      ],
+      "roughness": 0.8999999761581421,
+      "metallic": 0
+    },
+    {
+      "name": "sail",
+      "baseColorLinear": [
+        0.3915725648403168,
+        0.30946895480155945,
+        0.15896086394786835
+      ],
+      "roughness": 0.8500000238418579,
+      "metallic": 0
+    }
+  ],
+  "surfaceMapping": {
+    "url": "/assets/galleons/sailing-galleon.fvm.gz",
+    "sha256": "3f40e20c18fc1c96aa1a09bfbe2a7490680cca3921c874e5b009457d8bd73a8f"
+  }
+}

@@ -81,6 +81,8 @@ export interface RigidBodyDescription {
   motion?: "dynamic" | "static";
   /** A plugin supplies each accepted pose; never bake this body as fixed scenery. */
   kinematic?: boolean;
+  /** Reusable simulated shot. Its authored position is the muzzle in world metres. */
+  launcher?: { start_s: number; period_s: number; velocity_m_s: Vec3; cutRadius_m: number };
   /** Exact local cuts, currently supported for static rounded plates. */
   cuts?: readonly SolidBoxCut[];
   /** Motor-driven static body; the fluid receives its moving boundary velocity. */
@@ -1042,6 +1044,13 @@ export function validateScene(scene: SceneDescription): string[] {
       ids.add(body.id);
       if (!SCENE_SHAPES_BY_CODE.some(shape => shape.name === body.shape)) errors.push(`Unsupported rigid shape ${body.shape}`);
       if(body.kinematic!==undefined&&(typeof body.kinematic!=='boolean'||body.kinematic&&body.motion!=='static'))errors.push('Kinematic pose ownership requires a static body');
+      if (body.launcher !== undefined) {
+        const shot = body.launcher;
+        if (!shot || ![shot.start_s, shot.period_s, shot.cutRadius_m, shot.velocity_m_s?.x, shot.velocity_m_s?.y,
+          shot.velocity_m_s?.z].every(Number.isFinite) || shot.start_s < 0 || shot.period_s <= 0 || shot.cutRadius_m <= 0
+          || body.shape !== "sphere" || !body.kinematic || body.motion !== "static" || body.poseTrack || body.prescribedMotion
+          || body.motorAttachment || scene.interaction?.entities.length) errors.push(`Invalid projectile launcher on ${body.id}`);
+      }
       if(body.cuts){try{validateSolidBoxCuts(body.cuts);}catch(e){errors.push(String(e));}if(body.motion!=='static'||!(body.shape==='rounded-plate'||body.shape==='sphere'&&scene.systems?.fluid===false))errors.push('Solid cuts currently require static or prescribed rounded plates, or such spheres in a dry scene');}
       if (body.appearance !== undefined && !(body.appearance === 'bub' && body.shape === 'capsule')
         && !(['paddleboat-red', 'paddleboat-teal', 'paddleboat-wheel', 'seaweed'].includes(body.appearance) && body.shape === 'box')) errors.push(`Unsupported appearance for body ${body.id}`);
