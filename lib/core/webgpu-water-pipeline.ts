@@ -24,7 +24,7 @@ import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import { ParticleWaterInterface } from "./webgpu-particle-water-interface";
 import type { GPUFluidParticleSource } from "./webgpu-particle-overlay";
-import type { GPUSolverInstance } from "./method-contract";
+import type { GPUDetailSurface, GPUSolverInstance } from "./method-contract";
 import {
   packWaterSceneOptics,
   resolveDisplayGrade,
@@ -1598,9 +1598,12 @@ export const surfaceRasterShader = /* wgsl */ `
 ${waterInterfaceDepthWGSL}
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, cameraBasisPadding:array<vec4f,19>, cameraBasisRight:vec4f }
 struct SurfaceVertex { position:vec4f, normal:vec4f }
-// Up to four world boxes (count in n.x) where this mesh is not drawn: another mesh (a detail engine's) owns them.
-struct SurfaceClip { n:vec4u, lo:array<vec4f,4>, hi:array<vec4f,4> }
+// A detail engine's mask (n.x 1; brick-detail.wgsl.ts), where this mesh is not drawn: the fine engine's mesh owns its
+// on tiles. A bit a tile (x fastest) from word n.y of clipMask, tiles.xyz an axis, origin.xyz the tile grid's corner
+// and origin.w a tile's edge (m).
+struct SurfaceClip { n:vec4u, origin:vec4f, tiles:vec4u }
 @group(0) @binding(2) var<uniform> surfaceClip:SurfaceClip;
+@group(0) @binding(3) var<storage,read> clipMask:array<u32>;
 override interfaceCoverageExpansionPixels:f32=0.0;
 override peelBehindFirstExit:f32=0.0;
 override encodeBackContact:bool=false;
@@ -1621,8 +1624,10 @@ fn project(world:vec3f)->vec4f {
 fn surfaceClipped(index:u32)->bool{
   if(surfaceClip.n.x==0u){return false;}
   let first=index-index%3u;let c=(vertices[first].position.xyz+vertices[first+1u].position.xyz+vertices[first+2u].position.xyz)/3.0;
-  for(var k=0u;k<min(surfaceClip.n.x,4u);k++){if(all(c>surfaceClip.lo[k].xyz)&&all(c<surfaceClip.hi[k].xyz)){return true;}}
-  return false;
+  let t=vec3i(floor((c-surfaceClip.origin.xyz)/surfaceClip.origin.w));let n=vec3i(surfaceClip.tiles.xyz);
+  if(any(t<vec3i(0))||any(t>=n)){return false;}
+  let i=u32(t.x+n.x*(t.y+n.y*t.z));
+  return ((clipMask[surfaceClip.n.y+(i>>5u)]>>(i&31u))&1u)!=0u;
 }
 @vertex fn surfaceVertex(@builtin(vertex_index) index:u32)->Out {
   let v=vertices[index]; var o:Out; o.clip=project(v.position.xyz);
@@ -2375,8 +2380,8 @@ export interface WaterSceneOpticsInput {
   readonly container?: { readonly width_m: number; readonly depth_m: number };
 }
 
-/** SurfaceClip's bytes: the count, then four low and four high corners. */
-const SURFACE_CLIP_BYTES = 16 + 2 * 4 * 16;
+/** SurfaceClip's bytes: n, origin, tiles. */
+const SURFACE_CLIP_BYTES = 3 * 16;
 type SurfaceDraw = { group: GPUBindGroup; vertices: GPUBuffer; indirect: GPUBuffer; offset: number };
 
 export class RasterWaterPipeline {
@@ -2586,7 +2591,10 @@ export class RasterWaterPipeline {
   /** A cosmetic mesh in the same SurfaceVertex layout, drawn after the level set's in every interface pass. */
   private extraSurface?: SurfaceDraw;
   private detailSurfaces: SurfaceDraw[] = [];
-  private detailClipKey = "[]";
+  private detailClipKey = "";
+  /** The detail mask's buffer (a fine engine's dir) the level set's mesh is clipped by, or the 4-byte stand-in. */
+  private surfaceClipMask?: GPUBuffer;
+  private surfaceClipNone?: GPUBuffer;
   /** The level set mesh's clip (the detail boxes) and the extra meshes' (none). */
   private surfaceClipBuffer?: GPUBuffer;
   private surfaceNoClipBuffer?: GPUBuffer;
@@ -2787,8 +2795,10 @@ export class RasterWaterPipeline {
     this.surfaceLayout = this.device.createBindGroupLayout({ label: "Water surface bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
-      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } }
+      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+      { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } }
     ] });
+    this.surfaceClipNone = this.device.createBuffer({ label: "Water surface clip mask (none)", size: 16, usage: GPUBufferUsage.STORAGE });
     this.surfaceClipBuffer = this.device.createBuffer({ label: "Water surface clip", size: SURFACE_CLIP_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.surfaceNoClipBuffer = this.device.createBuffer({ label: "Water surface no clip", size: SURFACE_CLIP_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.surfacePeelLayout = this.device.createBindGroupLayout({ label: "Water rear-interface peel binding", entries: [
@@ -3430,28 +3440,33 @@ export class RasterWaterPipeline {
   }
 
   /**
-   * The detail engines' meshes (brick-detail-surface.ts): each drawn beside the level set's, which is not drawn inside
-   * their boxes (world metres, up to four), so a box shows its own engine's surface alone. Empty: none.
+   * The detail engine's mesh (brick-detail-surface.ts): drawn beside the level set's, which is not drawn on the
+   * engine's on tiles (its mask, GPUDetailSurface.mask), so a tile shows one engine's surface alone. Empty: none.
    */
-  setDetailSurfaces(surfaces: readonly { readonly geometry: { vertices: GPUBuffer; indirect: GPUBuffer; indirectOffset: number }; readonly box_m: readonly [readonly [number, number, number], readonly [number, number, number]] }[]) {
-    if (surfaces.length > 4) throw new Error(`Water surface: ${surfaces.length} detail surfaces, over the clip's 4`);
+  setDetailSurfaces(surfaces: readonly GPUDetailSurface[]) {
+    if (surfaces.length > 1) throw new Error(`Water surface: ${surfaces.length} detail surfaces, over the clip's one mask`);
     const previous = this.detailSurfaces;
     this.detailSurfaces = surfaces.map((s, i) => this.surfaceDraw(s.geometry, previous[i], "Water detail surface")!);
-    const key = JSON.stringify(surfaces.map(s => s.box_m));
-    if (key === this.detailClipKey || !this.surfaceClipBuffer) return;
-    this.detailClipKey = key;
-    const words = new ArrayBuffer(SURFACE_CLIP_BYTES), n = new Uint32Array(words, 0, 4), box = new Float32Array(words, 16);
-    n[0] = surfaces.length;
-    surfaces.forEach((s, i) => { box.set([...s.box_m[0], 0], 4 * i); box.set([...s.box_m[1], 0], 16 + 4 * i); });
+    const m = surfaces[0]?.mask;
+    const key = m ? JSON.stringify([m.word, m.tiles, m.origin_m, m.tile_m]) : "";
+    if ((key === this.detailClipKey && m?.buffer === this.surfaceClipMask) || !this.surfaceClipBuffer) return;
+    this.detailClipKey = key; this.surfaceClipMask = m?.buffer;
+    const words = new ArrayBuffer(SURFACE_CLIP_BYTES), n = new Uint32Array(words, 0, 4), origin = new Float32Array(words, 16, 4), tiles = new Uint32Array(words, 32, 4);
+    if (m) { n.set([1, m.word]); origin.set([...m.origin_m, m.tile_m]); tiles.set(m.tiles); }
     this.device.queue.writeBuffer(this.surfaceClipBuffer, 0, words);
+    this.bindSurfaceGroup();
+  }
+
+  private bindSurfaceGroup() {
+    if (this.surfaceLayout && this.vertexBuffer && this.surfaceClipBuffer && this.surfaceClipNone) this.surfaceBindGroup = this.device.createBindGroup({ layout: this.surfaceLayout, entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.vertexBuffer } }, { binding: 2, resource: { buffer: this.surfaceClipBuffer } }, { binding: 3, resource: { buffer: this.surfaceClipMask ?? this.surfaceClipNone } }] });
   }
 
   private surfaceDraw(geometry: { vertices: GPUBuffer; indirect: GPUBuffer; indirectOffset: number } | undefined, current: SurfaceDraw | undefined, label: string): SurfaceDraw | undefined {
-    if (!geometry || !this.surfaceLayout || !this.surfaceNoClipBuffer) return undefined;
+    if (!geometry || !this.surfaceLayout || !this.surfaceNoClipBuffer || !this.surfaceClipNone) return undefined;
     if (current?.vertices === geometry.vertices && current.indirect === geometry.indirect && current.offset === geometry.indirectOffset) return current;
     return {
       group: this.device.createBindGroup({ label, layout: this.surfaceLayout, entries: [
-        { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: geometry.vertices } }, { binding: 2, resource: { buffer: this.surfaceNoClipBuffer } }] }),
+        { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: geometry.vertices } }, { binding: 2, resource: { buffer: this.surfaceNoClipBuffer } }, { binding: 3, resource: { buffer: this.surfaceClipNone } }] }),
       vertices: geometry.vertices, indirect: geometry.indirect, offset: geometry.indirectOffset,
     };
   }
@@ -3556,7 +3571,7 @@ export class RasterWaterPipeline {
     if (this.prepareLayout && this.indirectBuffer && this.activeCubeBuffer && this.polygoniseDispatchBuffer) this.prepareBindGroup = this.device.createBindGroup({ layout: this.prepareLayout, entries: [
       { binding: 0, resource: { buffer: this.indirectBuffer } }, { binding: 1, resource: { buffer: this.activeCubeBuffer } }, { binding: 2, resource: { buffer: this.polygoniseDispatchBuffer } }
     ] });
-    if (this.surfaceLayout && this.vertexBuffer && this.surfaceClipBuffer) this.surfaceBindGroup = this.device.createBindGroup({ layout: this.surfaceLayout, entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.vertexBuffer } }, { binding: 2, resource: { buffer: this.surfaceClipBuffer } }] });
+    this.bindSurfaceGroup();
     if (this.causticLayout && this.vertexBuffer && this.waterSceneOpticsBuffer && this.causticReceiver) this.causticBindGroup = this.device.createBindGroup({ label: "Water caustic projection inputs", layout: this.causticLayout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.vertexBuffer } },
       { binding: 2, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 3, resource: this.causticReceiver.createView() }
@@ -3901,7 +3916,7 @@ export class RasterWaterPipeline {
     this.lensCamera?.destroy();
     this.frontWorldReflections?.destroy(); this.rearWorldReflections?.destroy();
     this.particleWater?.destroy(); this.particleWater = undefined;
-    this.surfaceClipBuffer?.destroy(); this.surfaceNoClipBuffer?.destroy();
+    this.surfaceClipBuffer?.destroy(); this.surfaceNoClipBuffer?.destroy(); this.surfaceClipNone?.destroy();
     for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.bulkWindowsDispatchBuffer,this.reflectionBounds,this.frontReflections,this.rearReflections,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.fallbackSolidTerrain,this.fallbackSolidUniform,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

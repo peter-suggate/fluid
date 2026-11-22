@@ -68,25 +68,33 @@ export function RegionRow() {
 
 /** The automatic detail factors on offer: none, h / 2 and h / 4. */
 const AUTOMATIC_DETAIL_CHOICES = [
-  { factor: undefined, label: "Off", hint: "Only the boxes drawn as Detail tiers run a nested fine engine." },
-  { factor: 2, label: "Detail \u00d72", hint: "Every thin obstacle the moving liquid strikes (rods, posts) gets a nested engine at half the cell size." },
-  { factor: 4, label: "Detail \u00d74", hint: "Every thin obstacle the moving liquid strikes (rods, posts) gets a nested engine at a quarter of the cell size: costly." },
+  { factor: undefined, label: "Off", hint: "Only the boxes drawn as Detail tiers run the fine engine." },
+  { factor: 2, label: "Detail \u00d72", hint: "The fastest-deforming surface (a splash's crown, a breaking sheet) runs again at half the cell size, within the budget." },
+  { factor: 4, label: "Detail \u00d74", hint: "The fastest-deforming surface runs again at a quarter of the cell size, within the budget: each tile costs eight times \u00d72's." },
 ] as const;
+/** The budgets on offer (parent 4h tiles a step; brick-detail-regions.ts DETAIL_DEFAULT_BUDGET is 512). */
+const AUTOMATIC_DETAIL_BUDGETS = [256, 512, 1024, 2048] as const;
 
 /**
- * Whether the brick engine places detail boxes by itself (`fluid.automaticDetail`, brick-detail-regions.ts): around
- * every thin upstanding obstacle in the liquid's reach, in a scene with energy to splash. A scene setting rather than
- * a box, so it rides beside the region chooser and commits (and undoes) as one scene edit, which rebuilds the solve.
+ * Whether the brick engine runs automatic detail (`fluid.automaticDetail`, brick-detail-regions.ts): every step the
+ * parent's 4h tiles whose surface deforms fastest, at most the budget's, run again at h / factor. A scene setting
+ * rather than a box, so it rides beside the region chooser and commits (and undoes) as one scene edit, which rebuilds
+ * the solve.
  */
 function AutomaticDetailMenu({ scene }: { scene: SceneDescription }) {
   const commit = patchCommitter(useEditorHost<SceneDescription, Partial<SceneDescription>>());
   const [open, setOpen] = useState(false);
   const { claim } = useToolstripSection("automatic-detail", () => setOpen(false));
   const raise = (next: boolean) => { claim(next); setOpen(next); };
-  const current = scene.fluid.automaticDetail?.factor;
+  const current = scene.fluid.automaticDetail?.factor, budget = scene.fluid.automaticDetail?.budget ?? 512;
+  const set = (label: string, next: { factor: 2 | 4; budget?: number } | undefined) => {
+    const { automaticDetail: _previous, ...fluid } = scene.fluid;
+    commit(`Automatic detail ${label}`, { fluid: next ? { ...fluid, automaticDetail: next } : fluid }, { reseed: true });
+  };
+  const label = AUTOMATIC_DETAIL_CHOICES.find((choice) => choice.factor === current)?.label ?? "Off";
   return <ToolstripMenuButton
-    label={`Automatic detail: ${AUTOMATIC_DETAIL_CHOICES.find((choice) => choice.factor === current)?.label ?? "Off"}`}
-    hint="Nested fine engines placed automatically where fast liquid meets thin obstacles."
+    label={`Automatic detail: ${label}${current ? `, ${budget} tiles` : ""}`}
+    hint="A fine engine on the fastest-deforming surface, chosen every step within a budget of tiles."
     open={open}
     testId="automatic-detail"
     onOpen={raise}
@@ -100,10 +108,21 @@ function AutomaticDetailMenu({ scene }: { scene: SceneDescription }) {
       onClick={() => {
         raise(false);
         if (choice.factor === current) return;
-        const { automaticDetail: _previous, ...fluid } = scene.fluid;
-        commit(`Automatic detail ${choice.label}`, { fluid: choice.factor ? { ...fluid, automaticDetail: { factor: choice.factor } } : fluid }, { reseed: true });
+        set(choice.label, choice.factor ? { factor: choice.factor, ...(budget !== 512 ? { budget } : {}) } : undefined);
       }}
     />)}
+    {current ? AUTOMATIC_DETAIL_BUDGETS.map((n) => <ToolstripMenuItem
+      key={`budget-${n}`}
+      label={`Budget ${n} tiles`}
+      title={`At most ${n} of the parent's 4h tiles a step run the fine engine (more detail, more cost).`}
+      active={n === budget}
+      testId={`automatic-detail-budget-${n}`}
+      onClick={() => {
+        raise(false);
+        if (n === budget) return;
+        set(`budget ${n}`, { factor: current, ...(n !== 512 ? { budget: n } : {}) });
+      }}
+    />) : null}
   </ToolstripMenuButton>;
 }
 

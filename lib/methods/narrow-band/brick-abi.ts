@@ -11,7 +11,7 @@
  * words a C slot); 32-word records; lists in slot order with indirect
  * arguments; particle bins per F slot.
  */
-import type { BrickDetailLayout } from "./brick-detail.wgsl";
+import { DETAIL_PLANES, brickDetailMaskWGSL, brickDetailPlaneWords, type BrickDetailLayout } from "./brick-detail.wgsl";
 
 /** Words a brick slot of a channel: 512 cells and 8 words of padding, so the
  * 27 neighbours of a brick do not alias the same cache sets (the arena
@@ -144,6 +144,9 @@ export const REC = { SELF: 13, PARENT: 27, MASK: 28, KEY: 29, CUT: 30, CLASS: 31
 /** FLAGS channel bits (cell, u32). */
 /** KICK0 << a (C FLAGS, still-tank A): uTransfer's gravity rule held on the tile's lower face along a at its last
  * transfer (nbfGravityFace), which the solve applies to a STILL page's held face (u* = F + g dt). */
+/** A detail engine's cell flag (brick-detail.wgsl.ts): OPEN withheld because the cell's mask tile is inactive, restored
+ * when it activates (detailRefresh). Emitted on a detail layout only. */
+export const FLAG_DTL_OUT = 1 << 20;
 export const FLAG = { OPEN: 1, LIQUID: 2, BAND: 4, VALID0: 8, VALID1: 16, VALID2: 32, OWNER_H: 64, KICK0: 1 << 12, STATIC_SHUT: 1 << 13, INSIDE: 1 << 14 } as const;
 
 /** Lists (brick-abi.md §5.5): index, kind. */
@@ -283,10 +286,15 @@ export const BOX_TOKEN = "NB_WALL_BOX";
 // (nbTileInWallBox) and its cell test (nbInWallC: a cell read for its 4h tile's data) read it (nbTileInWallS,
 // nbInWallS). The full-resolution tier's cell test (nbInWallBox) keeps the box: its cells see the voxels through the
 // mask. Without the static tiles nbInWallC is nbInWallBox.
-export const resolveBox = (L: Pick<BrickLayout, "lattice" | "box"> & { readonly staticTiles?: boolean }, code: string) =>
-  code.replaceAll(BOX_TOKEN, boxWGSL(L)).replaceAll("nbInWallBox(", boxPadded(L) ? "nbInBox(" : "nbInLattice(")
-    .replaceAll("nbInWallC(", L.staticTiles ? "nbInWallS(" : boxPadded(L) ? "nbInBox(" : "nbInLattice(")
-    .replaceAll("nbTileInWallBox(", L.staticTiles ? "nbTileInWallS(" : boxPadded(L) ? "nbTileInBox(" : "nbTileInLattice(");
+// A detail engine's walls are its mask's too (brick-detail.wgsl.ts): a cell of an inactive mask tile is past the box
+// (nbInDtl, nbInDtlC, nbTileInDtl), and nbInDtlBox / nbTileInDtlBox name the container's own test.
+export const resolveBox = (L: Pick<BrickLayout, "lattice" | "box"> & { readonly staticTiles?: boolean; readonly detail?: BrickDetailLayout }, code: string) => {
+  const cell = boxPadded(L) ? "nbInBox(" : "nbInLattice(", tile = L.staticTiles ? "nbTileInWallS(" : boxPadded(L) ? "nbTileInBox(" : "nbTileInLattice(";
+  const plain = code.replaceAll(BOX_TOKEN, boxWGSL(L));
+  if (!L.detail) return plain.replaceAll("nbInWallBox(", cell).replaceAll("nbInWallC(", L.staticTiles ? "nbInWallS(" : cell).replaceAll("nbTileInWallBox(", tile);
+  return plain.replaceAll("nbInWallBox(", "nbInDtl(").replaceAll("nbInWallC(", "nbInDtlC(").replaceAll("nbTileInWallBox(", "nbTileInDtl(")
+    .replaceAll("nbInDtlBox(", cell).replaceAll("nbInDtlBoxC(", L.staticTiles ? "nbInWallS(" : cell).replaceAll("nbTileInDtlBox(", tile);
+};
 
 /** The ABI's concrete layout for one scene: every region's word offset and every buffer's size. */
 export class BrickLayout {
@@ -337,7 +345,7 @@ export class BrickLayout {
     readonly words: number;
   };
   /** dir buffer regions (words). */
-  readonly dir: { readonly page: number; readonly child: number; readonly frec: number; readonly crec: number; readonly cmask: number; readonly closed: number; readonly inexact: number; readonly words: number };
+  readonly dir: { readonly page: number; readonly child: number; readonly frec: number; readonly crec: number; readonly cmask: number; readonly closed: number; readonly inexact: number; readonly dtl: number; readonly words: number };
   /** Words of each pool. */
   readonly poolWords: Readonly<Record<PoolName, number>>;
   readonly partsWords: number;
@@ -394,7 +402,9 @@ export class BrickLayout {
     // The static tiles' two planes (closed, then inexact), each a bit a lattice tile.
     const plane = Math.ceil(this.lattice.reduce((a, n) => a * Math.ceil(n / 4), 1) / 32);
     const closed = this.staticTiles ? dtake(2 * plane) : 0;
-    this.dir = { page, child, frec, crec, cmask, closed, inexact: closed + (this.staticTiles ? plane : 0), words: d };
+    // A detail engine's mask planes (brick-detail.wgsl.ts DETAIL_PLANES: on, fresh, core), each a bit a mask tile.
+    const dtl = this.detail ? dtake(DETAIL_PLANES * brickDetailPlaneWords(this.detail)) : 0;
+    this.dir = { page, child, frec, crec, cmask, closed, inexact: closed + (this.staticTiles ? plane : 0), dtl, words: d };
     const fc = (n: number) => n * BRICK_STRIDE * (f + c);
     this.poolWords = { vel: fc(POOLS.vel.length), phi: fc(POOLS.phi.length), pres: fc(POOLS.pres.length), cut: POOLS.cut.length * BRICK_STRIDE * Math.max(k, 1) + Math.max(k, 1) };
     this.partsWords = 2 * particles * this.particleStride;
@@ -487,6 +497,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);
   c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);
   if (L.staticTiles) { c("NB_D_CLOSED", d.closed); c("NB_D_INEXACT", d.inexact); }
+  if (L.detail) { c("NB_D_DTL", d.dtl); c("NB_FLAG_DTL_OUT", FLAG_DTL_OUT); }
   for (const pool of Object.keys(POOLS) as PoolName[]) {
     for (const ch of POOLS[pool]) {
       if (pool === "cut") c(`NB_${pool.toUpperCase()}_${ch}`, L.base(pool, "K", ch));
@@ -535,7 +546,7 @@ fn nbTileClosed(t:vec3i)->bool{return nbStaticTileBit(NB_D_CLOSED,t);}
 // An inexact tile near the voxels: the static need's support.
 fn nbTileInexact(t:vec3i)->bool{return nbStaticTileBit(NB_D_INEXACT,t);}
 fn nbInWallS(c:vec3i)->bool{return all(c>=vec3i(0))&&all(c<${boxWGSL(L)})&&!nbTileClosed(c>>vec3u(2u));}
-fn nbTileInWallS(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<${boxWGSL(L)})&&!nbTileClosed(t);}` : ""}
+fn nbTileInWallS(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<${boxWGSL(L)})&&!nbTileClosed(t);}` : ""}${L.detail ? brickDetailMaskWGSL(L, at => ld(D, at)) : ""}
 `);
   }
   if (options.set) {

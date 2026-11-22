@@ -168,7 +168,7 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     }
     // FLAGS.STATIC_SHUT: a static solid cell (umCellIsOpen's shut), the pressure's poStaticShut.
     let f=NB_PHI_F_FLAGS+NB_STRIDE*s+l;
-    if(!nbStampOpen(frac)){phi[f]=phi[f]&~NB_FLAG_OPEN;}
+    if(!nbStampOpen(frac)){phi[f]=phi[f]&~${L.detail ? "(NB_FLAG_OPEN|NB_FLAG_DTL_OUT)" : "NB_FLAG_OPEN"};}
     if(frac<=1e-5){phi[f]=phi[f]|NB_FLAG_STATIC_SHUT;}
     // FLAGS.INSIDE: the cell's centre in the static solid (umCellInsideSolid), the pressure's θ rule (npBandFace).
     if(nbStaticSolidAt(vec3f(c)+0.5)){phi[f]=phi[f]|NB_FLAG_INSIDE;}
@@ -221,9 +221,11 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     ${terrain ? "if(!cut&&terrainMaybe){cut=nbStampTerrainCut(c);}" : ""}
     if(cut){atomicOr(&wCut,1u);}
     // FLAGS.OPEN: the box rule (setInit) and not a mask voxel${terrain ? ", nor a cell the ground closes (umCellIsOpen)" : ""}.
-    let f=NB_PHI_F_FLAGS+NB_STRIDE*s+l;let open=nbInWallBox(c)&&${field ? "select(!nbStampMaskVoxel(c),nbStampOpen(nbStaticCellOpen(c)),nbStampFieldCell(c))" : "!nbStampMaskVoxel(c)"}${terrain ? "&&(!terrainMaybe||nbStampOpen(nbStaticCellOpen(c)))" : ""};
+    let f=NB_PHI_F_FLAGS+NB_STRIDE*s+l;let open=${L.detail ? "nbInDtlBox(c)" : "nbInWallBox(c)"}&&${field ? "select(!nbStampMaskVoxel(c),nbStampOpen(nbStaticCellOpen(c)),nbStampFieldCell(c))" : "!nbStampMaskVoxel(c)"}${terrain ? "&&(!terrainMaybe||nbStampOpen(nbStaticCellOpen(c)))" : ""};
     // STATIC_SHUT and INSIDE are the K slot's (below): cleared here, set with the slot's FRAC.
-    phi[f]=select(phi[f]&~NB_FLAG_OPEN,phi[f]|NB_FLAG_OPEN,open)&~(NB_FLAG_STATIC_SHUT|NB_FLAG_INSIDE);
+    ${L.detail ? `// A detail engine's cell of an inactive tile withholds OPEN (FLAG_DTL_OUT) until the tile activates.
+    let held=open&&!nbDtlOn(c);
+    phi[f]=(select(phi[f]&~NB_FLAG_OPEN,phi[f]|NB_FLAG_OPEN,open&&!held)&~(NB_FLAG_STATIC_SHUT|NB_FLAG_INSIDE|NB_FLAG_DTL_OUT))|select(0u,NB_FLAG_DTL_OUT,held);` : "phi[f]=select(phi[f]&~NB_FLAG_OPEN,phi[f]|NB_FLAG_OPEN,open)&~(NB_FLAG_STATIC_SHUT|NB_FLAG_INSIDE);"}
   }
   workgroupBarrier();
   if(lid==0u){

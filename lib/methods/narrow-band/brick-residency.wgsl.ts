@@ -113,6 +113,8 @@ export const RES_MARGIN = { own: { tiered: 4, allH: 20 }, ownPages: 20, particle
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
 const dirRW: BrickBinding = { name: "dir", kind: "rw", type: "array<atomic<u32>>" };
+const dirRO: BrickBinding = { name: "dir", kind: "ro", type: "array<u32>" };
+const phiRW: BrickBinding = { name: "phi", kind: "rw", type: "array<u32>" };
 const phiRO: BrickBinding = { name: "phi", kind: "ro", type: "array<u32>" };
 const velRO: BrickBinding = { name: "vel", kind: "ro", type: "array<f32>" };
 
@@ -160,11 +162,11 @@ fn rqBrick(q:vec3i,rpass:u32){
   if(ps<NB_SEAM){
     let cw=NB_D_CHILD+64u*ps+nbBrickLocal(q);let s=atomicLoad(&dir[cw]);
     if(s<NB_SEAM){if(atomicLoad(&nbSet[NB_S_MARK_F+s])==0u){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}return;}
-    if(s==NB_NONE){if(rqTake(cw)){rqAppend(nbKey(q),cw);atomicAdd(&nbSet[NB_H_RES_CLAIMED_F],1u);}return;}
+    if(s==NB_NONE){${L.detail ? "if(!nbDtlBrickKeep(q)){return;}" : ""}if(rqTake(cw)){rqAppend(nbKey(q),cw);atomicAdd(&nbSet[NB_H_RES_CLAIMED_F],1u);}return;}
     if(s!=NB_CLAIM){nbFail(NB_FAIL_UNSUPPORTED,nbKey(q));}
     return;
   }
-  if(ps==NB_NONE){if(rpass==0u&&rqTake(pw)){rqAppend(nbKey(4*(q>>vec3u(2u)))|NB_KEY_PAGE,pw);atomicAdd(&nbSet[NB_H_RES_CLAIMED_C],1u);}return;}
+  if(ps==NB_NONE){${L.detail ? "if(!nbDtlBrickKeep(q)){return;}" : ""}if(rpass==0u&&rqTake(pw)){rqAppend(nbKey(4*(q>>vec3u(2u)))|NB_KEY_PAGE,pw);atomicAdd(&nbSet[NB_H_RES_CLAIMED_C],1u);}return;}
   if(ps!=NB_CLAIM){nbFail(NB_FAIL_UNSUPPORTED,nbKey(q));}
 }
 `;
@@ -371,21 +373,54 @@ fn rmFlowSide(s:u32,a:u32,side:u32)->f32{
     }` : ""}
   }
 }`);
-  // resDetail (a detail engine's, brick-detail.wgsl.ts): the coupled shell's bricks where the parent's liquid is near
-  // (its φ at the brick's centre under NB_DTL_REACH) as one more source after resMark's pass, so the shell holds
-  // storage for the liquid the relaxation brings in. Tiered it keeps or claims their pages alone (pass 0): the parent's
-  // liquid is 4h storage until the census refines it, as a page source's is; all-h, the bricks (both passes, as
-  // resSource's). A workgroup strides the box's bricks; one past the shell's reach is skipped on its distance alone.
+  // resDetail (a detail engine's, brick-detail.wgsl.ts): the shell's and the fresh tiles' storage where the parent's
+  // liquid is near (its φ at the tile's centre under NB_DTL_REACH and a tile), one more source after resMark's pass,
+  // so the shell holds storage for the liquid the relaxation brings in and a fresh tile for the parent's state it
+  // starts from. Tiered it keeps or claims their pages alone (pass 0): the parent's liquid is 4h storage until the
+  // census refines it, as a page source's is; all-h, the tile's bricks (both passes, as resSource's). A workgroup
+  // strides the active tiles (META.ACTIVE of src's keys); a core tile is the engine's own residency's.
   const d = L.detail;
   const resDetail = d ? censusKernel(L, "resDetail", [CFG, setRW, dirRW, BRICK_SOURCE_BINDING], brickDetailWGSL(L) + RQ_WGSL + /* wgsl */`
 @compute @workgroup_size(64) fn resDetail(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) nw:vec3u){
   let rpass=cfg.z;${tiered ? "if(rpass!=0u){return;}" : ""}
-  let ext=vec3u(ceil(NB_DTL_BOX/8.0));let n=ext.x*ext.y*ext.z;
+  let n=min(nbDtlWord(NB_DTL_META),NB_DTL_BUDGET);
   for(var j=wid.x*64u+lane;j<n;j+=64u*nw.x){
-    let q=vec3i(vec3u(j%ext.x,(j/ext.x)%ext.y,j/(ext.x*ext.y)));let centre=8.0*vec3f(q)+vec3f(4.0);
-    if(nbDtlWall(centre)>NB_DTL_SHELL+4.0||nbDtlPhi(centre)>NB_DTL_REACH){continue;}
-    ${tiered ? "let p=q>>vec3u(2u);if(!rqPageSettled(p)){rqPage(p);}" : "if(!rqSettled(q,rpass)){rqBrick(q,rpass);}"}
+    let i=nbDtlWord(NB_DTL_KEYS+j);let T=vec3i(i32(i%u32(NB_DTL_TILES.x)),i32((i/u32(NB_DTL_TILES.x))%u32(NB_DTL_TILES.y)),i32(i/u32(NB_DTL_TILES.x*NB_DTL_TILES.y)));
+    if(nbDtlBit(2u,T)){continue;}
+    let lo=NB_DTL_U*vec3f(T);
+    if(nbDtlPhi(lo+vec3f(0.5*NB_DTL_U))>NB_DTL_REACH+NB_DTL_U){continue;}
+    ${tiered ? "let p=vec3i(lo)>>vec3u(5u);if(!rqPageSettled(p)){rqPage(p);}" : `for(var k=0u;k<${(d.factor / 2) ** 3}u;k++){let q=(vec3i(lo)>>vec3u(3u))+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));if(!rqSettled(q,rpass)){rqBrick(q,rpass);}}`}
   }
 }`) : undefined;
-  return { resMark, resSource, ...(resDetail ? { resDetail } : {}) };
+  // detailRefresh (a detail engine's, the step's first kernel): the cells of the tiles the mask turned this step get their
+  // OPEN back (fresh: FLAG_DTL_OUT set, a container cell that is no static solid's) or withhold it (gone), in their F
+  // slots and their pages' C tiles, so a slot made while its tile was inactive (a ring brick) opens with the tile. A
+  // workgroup a turned tile (META.FRESH of the fresh list, then META.GONE of the gone list).
+  const unit = d ? 4 * d.factor : 0, sub = d ? (unit / 8) ** 3 : 0, subC = d ? (unit / 4) ** 3 : 0;
+  const detailRefresh = d ? censusKernel(L, "detailRefresh", [CFG, setRW, dirRO, phiRW, BRICK_SOURCE_BINDING], brickDetailWGSL(L) + /* wgsl */`
+fn drFlag(at:u32,fresh:bool){
+  let f=phi[at];
+  if(fresh&&(f&NB_FLAG_DTL_OUT)!=0u){phi[at]=(f|NB_FLAG_OPEN)&~NB_FLAG_DTL_OUT;}
+  if(!fresh&&(f&NB_FLAG_OPEN)!=0u){phi[at]=(f&~NB_FLAG_OPEN)|NB_FLAG_DTL_OUT;}
+}
+@compute @workgroup_size(64) fn detailRefresh(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) nw:vec3u){
+  let nf=min(nbDtlWord(NB_DTL_META+${2}u),NB_DTL_BUDGET);let ng=min(nbDtlWord(NB_DTL_META+${3}u),NB_DTL_BUDGET);
+  for(var j=wid.x;j<nf+ng;j+=nw.x){
+    let fresh=j<nf;let i=select(nbDtlWord(NB_DTL_GONEL+j-nf),nbDtlWord(NB_DTL_FRESHL+j),fresh);
+    let T=vec3i(i32(i%u32(NB_DTL_TILES.x)),i32((i/u32(NB_DTL_TILES.x))%u32(NB_DTL_TILES.y)),i32(i/u32(NB_DTL_TILES.x*NB_DTL_TILES.y)));
+    let lo=${unit}*T;
+    for(var k=0u;k<${sub}u;k++){
+      let b=(lo>>vec3u(3u))+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
+      if(!nbBrickInRange(b)){continue;}
+      let s=nbFSlotOfBrick(b);if(s>=NB_SEAM){continue;}
+      for(var l=lane;l<512u;l+=64u){drFlag(NB_PHI_F_FLAGS+NB_STRIDE*s+l,fresh);}
+    }
+    for(var k=lane;k<${subC}u;k+=64u){
+      let t=(lo>>vec3u(2u))+vec3i(i32(k%${unit / 4}u),i32((k/${unit / 4}u)%${unit / 4}u),i32(k/${(unit / 4) ** 2}u));
+      let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){continue;}
+      drFlag(NB_PHI_C_FLAGS+NB_STRIDE*cs+nbLocal(t),fresh);
+    }
+  }
+}`) : undefined;
+  return { resMark, resSource, ...(resDetail ? { resDetail } : {}), ...(detailRefresh ? { detailRefresh } : {}) };
 }

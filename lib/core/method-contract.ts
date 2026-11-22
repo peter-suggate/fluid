@@ -197,7 +197,9 @@ export interface InjectedLiquidBall {
 /** A detail engine's mesh (GPUSolverInstance.detailSurfaces). */
 export interface GPUDetailSurface {
   readonly geometry: { readonly vertices: GPUBuffer; readonly indirect: GPUBuffer; readonly indirectOffset: number };
-  readonly box_m: readonly [readonly [number, number, number], readonly [number, number, number]];
+  /** The engine's mask of on tiles, where the level set's mesh is not drawn: a bit a tile (x fastest) from `word` of
+   * `buffer`, `tiles` an axis, the grid's corner at origin_m, a tile tile_m (m) on an edge. */
+  readonly mask?: { readonly buffer: GPUBuffer; readonly word: number; readonly tiles: readonly [number, number, number]; readonly origin_m: readonly [number, number, number]; readonly tile_m: number };
 }
 
 export interface GPUSolverInstance {

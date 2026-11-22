@@ -2010,7 +2010,7 @@ var<workgroup> wAlpha:f32;
   // restarts nothing.
   // A row's wall side along a (-1 plane 0, +1 plane N, 0 none) on n rows an axis; the tolerance (cfg.w, as pTolR).
   // A detail engine's coupled box faces are prescribed (pressure-composite.wgsl.ts pressureDetailFaces), never walls.
-  const coupled = L.detail?.coupled ?? 0;
+  const coupled = 0 as number;
   const wallSign = /* wgsl */`fn pWallFace(c:vec3i,a:u32,n:i32)->i32{${coupled ? `let m=${coupled}u;if(c[a]==0){return select(-1,0,((m>>(2u*a))&1u)!=0u);}if(c[a]==n-1){return select(1,0,((m>>(2u*a+1u))&1u)!=0u);}return 0;` : "if(c[a]==0){return -1;}if(c[a]==n-1){return 1;}return 0;"}}
 fn pWallTol()->f32{let h=nbRingF(cfg.x,NB_RING_H);return bitcast<f32>(cfg.w)*h*h;}`;
   // audit: the finish's diagnostic count at the final iterate x + alpha p (PH_ALPHA), over F_ALL's row bricks; no state changes.

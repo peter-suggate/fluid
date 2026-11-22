@@ -89,13 +89,13 @@ export interface BrickEngineOptions {
   /** Drops queued while the scene runs (queueDrop: a ball dropped into it, injectLiquidBall). The drop boxes' claim
    * (resSource) is scheduled as with `sources`: 8 workgroups a residency pass that skip an empty box. */
   readonly liveDrops?: boolean;
-  /** A detail engine's coupling to its parent (brick-detail.ts, BrickLayoutOptions.detail): the relaxation shell's
-   * hooks, the parent's nodes after `src`'s stub (written by the parent's exchange), and the shell's claim (resDetail,
-   * 8 workgroups a residency pass). Absent: none. */
+  /** A detail engine's coupling to its parent (brick-detail.ts, BrickLayoutOptions.detail): its mask and the
+   * relaxation shell's hooks, the parent's nodes in `src` (written by the parent's allocator), the shell's claim
+   * (resDetail, 8 workgroups a residency pass) and the mask's turns (detailRefresh, the step's head). Absent: none. */
   readonly detail?: BrickDetailLayout;
   /** With detail: encodes the parent's state into `src` before the boot is queued (brick-detail.ts's exchange), so the
    * boot's residency claims the shell the parent's liquid reaches. */
-  readonly primeDetail?: (buffer: (name: string) => GPUBuffer) => void;
+  readonly primeDetail?: (buffer: (name: string) => GPUBuffer, layout: BrickLayout) => void;
   /** The static voxel mask (brick-static.wgsl.ts brickStaticMask: its words and walls), bound as `solid` and stamped
    * by solidStamp (M3). Absent: the box rule alone, no binding, no stamp. */
   readonly staticMask?: BrickStaticMaskBinding;
@@ -489,7 +489,8 @@ export class BrickEngine {
       { kernel: set.setKRelease, dispatch: list(LIST.F_LEAVE, "G64"), z: 1 },
     ] : [])];
     const headRuns: (readonly [BrickPhase, readonly BrickPlacement[]])[] = censused ? [
-      [T.census, headCensus()], [T.residency, [...residency, ...tail, ...lists(1), ...want]],
+      // A detail engine's mask turns first (brick-residency.wgsl.ts detailRefresh): its cells' OPEN as the mask's.
+      [T.census, [...(res.detailRefresh ? [{ kernel: res.detailRefresh, dispatch: direct(64) }] : []), ...headCensus()]], [T.residency, [...residency, ...tail, ...lists(1), ...want]],
       [T.transfer, tiered ? [...transfer, ...(heat?.cert ?? [])] : certificate], [T.stamp, [...stamp, churnClear]],
     ] : [];
     const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
@@ -603,7 +604,7 @@ export class BrickEngine {
     if (armed) { engine.armed = armed; engine.armedBuffers = [...Object.entries(armed.solver.buffers), ...Object.entries(armed.stages.buffers)]; }
     engine.allocate([...initial, ...boot.pages]);
     engine.record();
-    options.primeDetail?.(name => engine.buffer(name as never));
+    options.primeDetail?.(name => engine.buffer(name as never), layout);
     engine.boot();
     engine.encodeAhead();
     if (editOnly.length) {

@@ -563,12 +563,14 @@ export function gpuSceneSeedKey(scene: SceneDescription, methodId?: string): str
 }
 
 /**
- * The brick engine's nested detail engines (brick-detail.ts): its detail regions (sub-cell minimum) and automatic
- * detail. They are built with the solver, so a change is a re-seed, never a live region edit.
+ * The brick engine's detail engine (brick-detail.ts): its detail regions (sub-cell minimum) and automatic detail (its
+ * factor and budget, which size the fine engine's pools). It is built with the solver, so a change is a re-seed, never
+ * a live region edit.
  */
 function detailEngineKey(scene: SceneDescription): string {
   const regions = sceneDetailRegions(scene).map((r) => `${r.minimumCellSize_cells}:${r.min_m.x},${r.min_m.y},${r.min_m.z}>${r.max_m.x},${r.max_m.y},${r.max_m.z}`).sort();
-  return `${scene.fluid.automaticDetail?.factor ?? 0}|${regions.join("|")}`;
+  const automatic = scene.fluid.automaticDetail;
+  return `${automatic?.factor ?? 0}:${automatic?.budget ?? ""}|${regions.join("|")}`;
 }
 
 /**

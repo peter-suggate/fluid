@@ -145,9 +145,10 @@ export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindi
   const ring = (body.includes("fn fgPhiWord") && !body.includes("fn fgRingAt") ? FG_NO_RING_WGSL : "")
     + (body.includes("fn fsCacheOf") && !body.includes("fn fsCacheRawStaged") ? "\nfn fsCacheRawStaged(T:vec3i,a:u32)->f32{return fsCacheRaw(T,a);}" : "")
     + (body.includes("fn fsUnit(") && !body.includes("fn fsUnitAbsent") ? "\nfn fsUnitAbsent(c:vec3i,a:u32)->f32{return fsTapH(c,a,false);}" : "");
-  // A detail engine's coupled box planes are open faces (brick-detail.wgsl.ts): they carry the parent's velocity, which
-  // the forces relax to and the pressure prescribes (pressure-composite.wgsl.ts pressureDetailFaces).
-  if (L.detail && body.includes(FG_FACE_OPEN)) body = body.replace(FG_FACE_OPEN, `fn fgFaceOpen(c:vec3i,a:u32)->bool{var t=c;t[a]=0;let lo=((${L.detail.coupled}u>>(2u*a))&1u)!=0u;let hi=((${L.detail.coupled}u>>(2u*a+1u))&1u)!=0u;return nbInWallBox(t)&&(c[a]>0||(lo&&c[a]==0))&&(c[a]<NB_WALL_BOX[a]||(hi&&c[a]==NB_WALL_BOX[a]));}`);
+  // A detail engine's faces on its mask's edge are open (brick-detail.wgsl.ts): they carry the parent's velocity, which
+  // the forces relax to and the pressure prescribes (pressure-composite.wgsl.ts pressureDetailFaces). Only the
+  // container's own planes are closed: the face rule tests the container's box, not the mask.
+  if (L.detail && body.includes(FG_FACE_OPEN)) body = body.replace(FG_FACE_OPEN, "fn fgFaceOpen(c:vec3i,a:u32)->bool{var t=c;t[a]=0;return nbInDtlBox(t)&&c[a]>0&&c[a]<NB_WALL_BOX[a];}");
   return {
     label, entry, bindings,
     // The box hook (brick-abi.md §2, M3 padding): the walls and the cell domain at the box, the storage at the lattice.

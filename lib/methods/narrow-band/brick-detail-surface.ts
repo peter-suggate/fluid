@@ -1,16 +1,17 @@
 /**
  * A detail engine's liquid surface (brick-detail.ts), meshed from its presentation for the water's interface passes.
  *
- * The parent's mesh is not drawn inside a detail box (the water's surface clip, webgpu-water-pipeline.ts
- * setDetailSurfaces): the box shows this mesh, the fine engine's own φ = 0 contour at h / factor, so the detail is
- * seen, not only simulated. It is the classic marching-cubes mesh of the presentation's vertex φ (brick-present.ts
+ * The parent's mesh is not drawn on the detail engine's on tiles (the water's surface clip by the mask,
+ * webgpu-water-pipeline.ts setDetailSurfaces): they show this mesh, the fine engine's own φ = 0 contour at h / factor,
+ * so the detail is seen, not only simulated. This mesh is the on tiles' alone (a cube whose cell's tile is on), so the
+ * two meshes split the container by the same tiles. It is the classic marching-cubes mesh of the presentation's vertex φ (brick-present.ts
  * vertexPhi, metres): a cube is a fine cell's eight vertices, and each emitted vertex carries the water's
  * SurfaceVertex layout (world position, w 1: a level-set vertex; the normal, the central-difference gradient of φ
  * interpolated along the edge, outward; film 0), so Shade, Simple and Wire all apply.
  *
- * The box's faces:
- * - a coupled face is open: the fine liquid continues into the parent's, whose mesh meets it there (the relaxation
- *   zone holds the fine φ to the parent's on that face, brick-detail.wgsl.ts);
+ * The mask's faces:
+ * - a face between an on and an off tile is open: the fine liquid continues into the parent's, whose mesh meets it
+ *   there (the relaxation zone holds the fine φ to the parent's on that face, brick-detail.wgsl.ts);
  * - a face on the container's side walls or lid is closed as the parent's mesh is (a vertex past the presented cells
  *   is air there), so the liquid against the glass shows its wall face;
  * - the container's floor is left open, as the parent's mesh leaves it: the water's composite ends a ray at the dry
@@ -41,21 +42,24 @@ export interface BrickDetailSurfaceOptions {
   readonly h_m: number;
   /** Fine vertex 0 in the parent's world (m). */
   readonly origin_m: readonly [number, number, number];
-  /** The coupled (open) faces, bit 2a + side. */
-  readonly coupled: number;
+  /** The mask (brick-detail.wgsl.ts): its tiles an axis, a tile's fine cells on an edge, and the on plane's first
+   * word in the fine engine's dir. */
+  readonly mask: { readonly tiles: readonly [number, number, number]; readonly unit: number; readonly word: number; readonly budget: number };
   /** The air value past the presented cells (m). */
   readonly far_m: number;
 }
 
-/** The vertex pool: six vertices (two triangles) a fine cell of twice the box's three face areas. */
-export function brickDetailSurfaceCapacity(cells: readonly number[], maxBytes: number): number {
+/** The vertex pool: the mask's on tiles' (its budget), six vertices (two triangles) a fine cell of twice a tile's three
+ * face areas, and never more than the lattice's. */
+export function brickDetailSurfaceCapacity(cells: readonly number[], maxBytes: number, mask?: { readonly unit: number; readonly budget: number }): number {
   const [x, y, z] = cells as [number, number, number];
-  return Math.max(3, Math.min(Math.floor(maxBytes / VERTEX_BYTES / 3) * 3, 6 * 2 * (x * y + y * z + x * z)));
+  const tiles = mask ? 6 * 2 * 3 * mask.unit * mask.unit * mask.budget : Infinity;
+  return Math.max(3, Math.min(Math.floor(maxBytes / VERTEX_BYTES / 3) * 3, 6 * 2 * (x * y + y * z + x * z), tiles));
 }
 
 export function brickDetailSurfaceWGSL(o: BrickDetailSurfaceOptions): string {
   // A face is capped (air past it) where it is closed and not the floor.
-  const closed = (a: number, side: number) => ((o.coupled >> (2 * a + side)) & 1) === 0 && !(a === 1 && side === 0);
+  const closed = (a: number, side: number) => !(a === 1 && side === 0);
   const b3 = (side: number) => `vec3<bool>(${[0, 1, 2].map(a => closed(a, side)).join(",")})`;
   const groups = o.cells.map(n => Math.ceil((n + 2) / 8));
   return /* wgsl */`
@@ -68,11 +72,13 @@ const DS_GROUPS:vec3i=vec3i(${groups.join(",")});
 const DS_CLOSED_LO:vec3<bool>=${b3(0)};const DS_CLOSED_HI:vec3<bool>=${b3(1)};
 const DS_H:f32=${o.h_m};const DS_FAR:f32=${o.far_m};
 const DS_ORIGIN:vec3f=vec3f(${o.origin_m.join(",")});
+const DS_TILES:vec3i=vec3i(${o.mask.tiles.join(",")});const DS_SHIFT:u32=${Math.log2(o.mask.unit)}u;const DS_ON:u32=${o.mask.word}u;
 override capacity:u32=3u;
 @group(0) @binding(0) var phi:texture_3d<f32>;
 @group(0) @binding(1) var<storage,read> shown:array<u32>;
 @group(0) @binding(2) var<storage,read_write> args:array<atomic<u32>,8>;
 @group(0) @binding(3) var<storage,read_write> vertices:array<SurfaceVertex>;
+@group(0) @binding(4) var<storage,read> dtl:array<u32>;
 var<workgroup> wgCount:atomic<u32>;
 var<workgroup> wgBase:u32;
 var<workgroup> wgLive:u32;
@@ -87,9 +93,12 @@ fn dsGrad(v:vec3i)->vec3f{
 // The cube's corners in marching-cubes order (the water's windowCell order).
 const DS_CORNER=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
 // Cube c is meshed: inside the presented cells, or one past them on a capped face (its wall face).
+// ... and its cell's tile is on (a cube past the cells takes the tile it caps).
 fn dsCube(c:vec3i)->bool{
   let lo=select(vec3i(0),vec3i(-1),DS_CLOSED_LO);let hi=DS_CELLS+select(vec3i(0),vec3i(1),DS_CLOSED_HI);
-  return all(c>=lo)&&all(c<hi);
+  if(!(all(c>=lo)&&all(c<hi))){return false;}
+  let t=min(clamp(c,vec3i(0),DS_CELLS-vec3i(1))>>vec3u(DS_SHIFT),DS_TILES-vec3i(1));let i=u32(t.x+DS_TILES.x*(t.y+DS_TILES.y*t.z));
+  return ((dtl[DS_ON+(i>>5u)]>>(i&31u))&1u)!=0u;
 }
 fn dsCase(c:vec3i,value:ptr<function,array<f32,8>>)->u32{
   for(var k=0u;k<8u;k++){(*value)[k]=0.5-dsPhi(c+DS_CORNER[k])/DS_H;}
@@ -161,12 +170,12 @@ export class BrickDetailSurface {
     private readonly pipeline: GPUComputePipeline,
     private readonly group: GPUBindGroup,
     private readonly groups: readonly [number, number, number],
-    /** The box in the parent's world (m). */
-    readonly box_m: readonly [readonly [number, number, number], readonly [number, number, number]],
+    /** The mask the parent's mesh is clipped by (GPUDetailSurface.mask). */
+    readonly mask: { readonly buffer: GPUBuffer; readonly word: number; readonly tiles: readonly [number, number, number]; readonly origin_m: readonly [number, number, number]; readonly tile_m: number },
   ) {}
 
-  static async create(device: GPUDevice, presentation: BrickPresentation, o: BrickDetailSurfaceOptions, box_m: BrickDetailSurface["box_m"]): Promise<BrickDetailSurface> {
-    const capacity = brickDetailSurfaceCapacity(o.cells, Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize));
+  static async create(device: GPUDevice, presentation: BrickPresentation, o: BrickDetailSurfaceOptions, dir: GPUBuffer): Promise<BrickDetailSurface> {
+    const capacity = brickDetailSurfaceCapacity(o.cells, Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize), o.mask);
     const module = device.createShaderModule({ label: "nb-brick.detailSurface", code: brickDetailSurfaceWGSL(o) });
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(`Detail surface WGSL: ${errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join("; ")}`);
@@ -175,16 +184,18 @@ export class BrickDetailSurface {
       { binding: 0, visibility: B, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 1, visibility: B, buffer: { type: "read-only-storage" } },
       { binding: 2, visibility: B, buffer: { type: "storage" } },
-      { binding: 3, visibility: B, buffer: { type: "storage" } }] });
+      { binding: 3, visibility: B, buffer: { type: "storage" } },
+      { binding: 4, visibility: B, buffer: { type: "read-only-storage" } }] });
     const pipeline = await device.createComputePipelineAsync({ label: "nb-brick.detailSurface", layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint: "detailSurface", constants: { capacity } } });
     const vertices = device.createBuffer({ label: "nb-brick.detailSurface.vertices", size: VERTEX_BYTES * capacity, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     const args = device.createBuffer({ label: "nb-brick.detailSurface.args", size: ARGS_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     device.queue.writeBuffer(args, 0, new Uint32Array([0, 1, 0, 0, 0, 0, 0, 0]));
     const group = device.createBindGroup({ label: "nb-brick.detailSurface", layout, entries: [
       { binding: 0, resource: presentation.vertexPhi.createView() }, { binding: 1, resource: { buffer: presentation.shown } },
-      { binding: 2, resource: { buffer: args } }, { binding: 3, resource: { buffer: vertices } }] });
+      { binding: 2, resource: { buffer: args } }, { binding: 3, resource: { buffer: vertices } }, { binding: 4, resource: { buffer: dir } }] });
     const groups = o.cells.map(n => Math.ceil((n + 2) / 8)) as unknown as [number, number, number];
-    return new BrickDetailSurface(vertices, args, capacity, pipeline, group, groups, box_m);
+    const mask = { buffer: dir, word: o.mask.word, tiles: o.mask.tiles, origin_m: o.origin_m, tile_m: o.mask.unit * o.h_m };
+    return new BrickDetailSurface(vertices, args, capacity, pipeline, group, groups, mask);
   }
 
   /** The water's draw: the pool and its indirect arguments. */

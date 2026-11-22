@@ -434,7 +434,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     // The same edit opens every detail engine's own cells (its mask is the box's cut of the same patches).
     for (const d of this.details) {
       try { d.foldSolids(scene); } catch (error) {
-        const message = `live voxel edit refused by detail engine ${d.spec.box.origins.join("+")}: ${error instanceof Error ? error.message : String(error)}`;
+        const message = `live voxel edit refused by the detail engine: ${error instanceof Error ? error.message : String(error)}`;
         this.refresh({ simulationFailure: this.failure(message) });
         throw error;
       }

@@ -450,11 +450,11 @@ export interface SceneDescription {
      */
     brickTiers?: { particleBandDepth?: number; openTopHeadroom?: number; openWorldMargin?: number };
     /**
-     * Brick engine: automatic detail regions (brick-detail-regions.ts). Each thin upstanding static obstacle
-     * (a rod, post or pillar) in the liquid's reach, in a scene with energy to splash (liquid above its rest
-     * level, a drop or an inflow), gets a nested detail engine at h / factor around it. Absent: none.
+     * Brick engine: automatic detail (brick-detail-regions.ts). A nested detail engine at h / factor runs on the
+     * parent's 4h tiles whose surface deforms fastest (a splash's crown, a sheet breaking up), chosen every step,
+     * at most `budget` tiles (default 512) plus the authored detail regions'. Absent: none.
      */
-    automaticDetail?: { factor: 2 | 4 };
+    automaticDetail?: { factor: 2 | 4; budget?: number };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -1014,6 +1014,7 @@ export function validateScene(scene: SceneDescription): string[] {
   if (c) errors.push(...validateRefinementRegions(scene.fluid?.refinementRegions, c));
   const automaticDetail = scene.fluid?.automaticDetail;
   if (automaticDetail !== undefined && automaticDetail.factor !== 2 && automaticDetail.factor !== 4) errors.push("Automatic detail factor must be 2 or 4");
+  if (automaticDetail?.budget !== undefined && !(Number.isInteger(automaticDetail.budget) && automaticDetail.budget >= 1 && automaticDetail.budget <= 65536)) errors.push("Automatic detail budget must be a whole number of tiles from 1 to 65536");
   if (!Array.isArray(scene.solidVoxels)) errors.push("Solid voxels must be an array");
   else for (const [index, patch] of scene.solidVoxels.entries()) {
       const before = errors.length;

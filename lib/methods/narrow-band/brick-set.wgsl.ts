@@ -150,13 +150,13 @@ var<workgroup> wNb:array<u32,27>;
       // The residency check (brick-abi.md §5.4, §8): a liquid vertex's 1-ring (every vertex of the cells it bounds)
       // is resident. φ is this step's advected level set on the directory the head committed, so a miss is a reach
       // defect of this step's head: FAIL.REACH with the absent brick's key, never read as air. Only the brick's face
-      // vertices reach a neighbour.
+      // vertices reach a neighbour.${L.detail ? " A detail engine's: only across a cell its mask holds (outside it no physics runs)." : ""}
       if(p<0.0&&(any(c==vec3i(0))||any(c==vec3i(7)))){
         for(var n=0u;n<27u;n++){
           let d=nbNeighbourOffset(n);
           if(any((d<vec3i(0))&(c!=vec3i(0)))||any((d>vec3i(0))&(c!=vec3i(7)))||n==NB_REC_SELF){continue;}
           let w=o+c+d;let nb=(o>>vec3u(3u))+d;
-          if(any(w<vec3i(0))||any(w>NB_LATTICE)||!nbBrickInRange(nb)){continue;}
+          if(any(w<vec3i(0))||any(w>NB_LATTICE)||!nbBrickInRange(nb)${L.detail ? "||!nbDtlOn(o+c+min(d,vec3i(0)))" : ""}){continue;}
           if(wNb[n]>=NB_SEAM){nbFail(NB_FAIL_REACH,nbKey(nb));}
         }
       }
@@ -324,7 +324,9 @@ var<workgroup> wN:atomic<u32>;
 @compute @workgroup_size(64) fn setLeave(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let e=64u*nbGroup(wid)+lid;if(e>=nbListCount(NB_LIST_F_ALL)){return;}
   let s=nbListSlot(NB_LIST_F_ALL,e);
-  if(atomicExchange(&nbSet[NB_S_MARK_F+s],0u)!=0u){return;}
+  ${L.detail ? `// A detail engine's brick its mask no longer keeps (nbDtlBrickKeep) leaves whatever kept it: the band's ring
+  // past the mask's lower side, the bricks of the tiles it turned off.
+  if(atomicExchange(&nbSet[NB_S_MARK_F+s],0u)!=0u&&nbDtlBrickKeep(nbKeyCoord(nbFRec(s,NB_REC_KEY)))){return;}` : "if(atomicExchange(&nbSet[NB_S_MARK_F+s],0u)!=0u){return;}"}
   let r=NB_D_FREC+32u*s;let cs=atomicLoad(&dir[r+NB_REC_PARENT]);let bl=(atomicLoad(&dir[r+NB_REC_MASK])>>8u)&63u;
   atomicStore(&dir[NB_D_CHILD+64u*cs+bl],NB_NONE);
   atomicSub(&dir[NB_D_CREC+32u*cs+NB_REC_C_CHILDREN],1u);
@@ -335,15 +337,22 @@ var<workgroup> wN:atomic<u32>;
 }`);
 
   // setLeavePages: a live page of last step's C_ALL with no F child left and no keep mark (resMark) leaves.
-  const setLeavePages = k("setLeavePages", [CFG, setRW, dirRW], BRICK_SET_HELPERS_WGSL + /* wgsl */`
+  const dU = L.detail ? 4 * L.detail.factor : 0, dN = L.detail ? 32 / dU : 0;
+  const setLeavePages = k("setLeavePages", [CFG, setRW, dirRW], BRICK_SET_HELPERS_WGSL + (L.detail ? /* wgsl */`
+// A page P holds an on tile of the detail mask.
+fn slpMasked(P:vec3i)->bool{
+  for(var k=0u;k<${dN ** 3}u;k++){if(nbDtlOn(32*P+${dU}*vec3i(i32(k%${dN}u),i32((k/${dN}u)%${dN}u),i32(k/${dN * dN}u)))){return true;}}
+  return false;
+}` : "") + /* wgsl */`
 @compute @workgroup_size(64) fn setLeavePages(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let e=64u*nbGroup(wid)+lid;if(e>=nbListCount(NB_LIST_C_ALL)){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,e);let r=NB_D_CREC+32u*cs;
   let kept=atomicExchange(&nbSet[NB_S_MARK_C+cs],0u)!=0u;
   if(kept||atomicLoad(&dir[r+NB_REC_C_CHILDREN])!=0u){return;}
   // A leaving page that held 4h liquid tiles (setMarkPages' LIQUID_TILES, last step) is a reach defect: no source
-  // brick's reach covered liquid (brick-residency.wgsl.ts). FAIL.REACH with its key, never dropped as air.
-  if(atomicLoad(&dir[r+NB_REC_C_LIQUID_TILES])!=0u){nbFail(NB_FAIL_REACH,atomicLoad(&dir[r+NB_REC_KEY]));}
+  // brick's reach covered liquid (brick-residency.wgsl.ts). FAIL.REACH with its key, never dropped as air.${L.detail ? `
+  // A detail engine's page leaves with its liquid once its mask holds none of its tiles (the parent's again).` : ""}
+  if(atomicLoad(&dir[r+NB_REC_C_LIQUID_TILES])!=0u${L.detail ? "&&slpMasked(nbKeyCoord(atomicLoad(&dir[r+NB_REC_KEY])))" : ""}){nbFail(NB_FAIL_REACH,atomicLoad(&dir[r+NB_REC_KEY]));}
   atomicStore(&dir[NB_D_PAGE+nbPageIndex(nbKeyCoord(atomicLoad(&dir[r+NB_REC_KEY])))],NB_NONE);
   atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_LEAVING);
   nbPush(NB_H_TOP_C,NB_S_FREE_C,cs);
@@ -385,7 +394,7 @@ var<workgroup> wN:atomic<u32>;
       ${zero("vel")}
       ${zero("pres")}
       phi[NB_PHI_F_PHI+at]=bitcast<u32>(NB_PHI_AIR_C);phi[NB_PHI_F_PHI1+at]=bitcast<u32>(NB_PHI_AIR_C);
-      phi[NB_PHI_F_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInWallBox(o+nbLocalCoord(l)))|NB_FLAG_OWNER_H;
+      phi[NB_PHI_F_FLAGS+at]=${L.detail ? "nbDtlFlag(o+nbLocalCoord(l))" : "select(0u,NB_FLAG_OPEN,nbInWallBox(o+nbLocalCoord(l)))"}|NB_FLAG_OWNER_H;
     }
   }
   // Entering C slots: a cell a tile (C local = tile index), open inside the lattice. φ is NB_PHI_AIR_C (16 max h, the
@@ -401,7 +410,7 @@ var<workgroup> wN:atomic<u32>;
       ${zeroC("vel")}
       ${zeroC("pres")}
       phi[NB_PHI_C_PHI+at]=bitcast<u32>(NB_PHI_AIR_C);phi[NB_PHI_C_PHI1+at]=bitcast<u32>(NB_PHI_AIR_C);
-      phi[NB_PHI_C_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInWallBox(o+4*nbLocalCoord(l)));
+      phi[NB_PHI_C_FLAGS+at]=${L.detail ? "nbDtlFlag(o+4*nbLocalCoord(l))" : "select(0u,NB_FLAG_OPEN,nbInWallBox(o+4*nbLocalCoord(l)))"};
     }
   }
 }`);

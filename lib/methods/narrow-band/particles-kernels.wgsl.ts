@@ -205,7 +205,9 @@ fn pFatal(code:u32,i:u32){nbFail(NB_FAIL_PARTICLES,0x80000000u|(code<<24u)|(i&0x
 // One destination: the rank in its cell's count, or NONE (an unbinned record latches FAIL.REACH, a defect).
 // The bound's six words (BOUND_F): bound[a] the largest -v_a, bound[3 + a] the largest v_a.
 fn pCount(q:vec3f,speed:array<f32,6>)->u32{
- var bound=speed;let c=pCellOf(q);let s=fgSlot(c);
+ var bound=speed;let c=pCellOf(q);let s=fgSlot(c);${L.detail ? `
+ // A detail engine: a record carried past its mask (no storage there, nbDtlBrickKeep) retires, as nbDetailRetire.
+ if(s==NB_NONE&&!nbDtlOn(c)){return NB_NONE;}` : ""}
  if(s==NB_NONE){atomicAdd(&nbSet[NB_H_P_UNBINNED],1u);nbFail(NB_FAIL_REACH,nbKey(c>>vec3u(3u)));return NB_NONE;}
  for(var k=0u;k<6u;k++){if(bound[k]!=0.0){atomicMax(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*s+k],bitcast<u32>(bound[k]));}}
  return atomicAdd(&fcell[FC_CNT+fgCell(s,c)],1u);

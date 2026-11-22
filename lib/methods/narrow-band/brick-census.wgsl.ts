@@ -1443,7 +1443,7 @@ fn cdBodyHeld(t:vec3i)->bool{
   let t=xTileOf(cs,i);
   // A tile past the box (a lattice padded to whole pages past the container's walls) is no tile, as one past the
   // lattice: it never bands, so no ring brick lies more than a brick past the walls (uCache's window, 0x55430001).
-  if(!(all(t>=vec3i(0))&&all(4*t<${BOX_TOKEN}))){return;}
+  if(!(all(t>=vec3i(0))&&all(4*t<${BOX_TOKEN}))${L.detail ? "||!nbDtlOn(4*t)" : ""}){return;}
   // A tiered step's head with the real D (cfg.z = 1, cfg.w = 3: brick-region-heat.wgsl.ts runs): the activity heat
   // (the old particleHeat, every live tile's: the last heat cooled at 4/s, 2 where the need rule triggers; F's
   // lHeatNow on its own tiles, the same words) and the deep keep. Without it (cfg.w = 1) D = 0: no tile is deep.
@@ -1503,7 +1503,9 @@ ${hold ? "  if(cdHeld(t)){band=true;toCoarse=false;}\n" : ""}${bodies ? "  // Th
     let nb=rlo+vec3i(i32(n&1u),i32((n>>1u)&1u),i32(n>>2u));if(!nbBrickInRange(nb)){continue;}
     let s=nbFSlotOfBrick(nb);
     // Tiered, at a step's head (cfg.w = 1): the band tile's present ring is kept (the brick storage's h ring, §5.4).
-    if(s<NB_SEAM){if(cfg.z==1u&&(cfg.w&1u)!=0u&&atomicLoad(&nbSet[NB_S_MARK_F+s])==0u){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}continue;}
+    if(s<NB_SEAM){if(cfg.z==1u&&(cfg.w&1u)!=0u&&atomicLoad(&nbSet[NB_S_MARK_F+s])==0u){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}continue;}${L.detail ? `
+    // A detail engine stores no brick past its mask's lower side (nbDtlBrickKeep): no ring there, as past a wall.
+    if(!nbDtlBrickKeep(nb)){continue;}` : ""}
     clamped=true;
     if(s!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbKey(nb));continue;}
     // cfg.z = 1 (tiered): the clamp's missing bricks become candidates, each once a page. All-h (cfg.z = 0): WANT is
@@ -1583,7 +1585,7 @@ var<workgroup> wgGo:u32;
   // The ring of the band tile (cdTile's): the bricks of its 27 tiles.
   let rlo=(t-vec3i(1))>>vec3u(1u);
   for(var n=0u;n<8u;n++){
-    let nb=rlo+vec3i(i32(n&1u),i32((n>>1u)&1u),i32(n>>2u));if(!nbBrickInRange(nb)){continue;}
+    let nb=rlo+vec3i(i32(n&1u),i32((n>>1u)&1u),i32(n>>2u));if(!nbBrickInRange(nb)${L.detail ? "||!nbDtlBrickKeep(nb)" : ""}){continue;}
     if(nbFSlotOfBrick(nb)>=NB_SEAM){atomicAnd(&nbSet[w],~bit);nbFail(NB_FAIL_TIER,nbKey(nb));break;}
   }
 }`);
