@@ -701,7 +701,9 @@ fn pSupport(p:Particle){
  let base=vec3i(floor((p.position.xyz-2.0)/4.0));
  for(var j=0u;j<8u;j++){
   let t=base+vec3i(i32(j&1u),i32((j>>1u)&1u),i32(j>>2u));
-  if(!nbInWallBox(4*t)){continue;}
+  if(!nbInWallBox(4*t)${L.detail ? `||!nbDtlBrickKeep(t>>vec3u(1u))` : ""}){continue;}${L.detail ? `
+  // A detail engine stores no brick past its mask's lower sides (nbDtlBrickKeep): support there reads an absent
+  // slot, as the stencils do, and needs no storage.` : ""}
   let b=t>>vec3u(1u);let s=fgBrickSlot(b);
   if(s==NB_NONE){nbFail(NB_FAIL_REACH,nbKey(b));continue;}
   let l=vec3u(t&vec3i(1));let at=NB_S_PSUPPORT+NB_PSUPPORT_WORDS*s;let bit=1u<<(l.x|(l.y<<1u)|(l.z<<2u));
