@@ -146,10 +146,15 @@ test("the parent's shader text is unchanged without a detail layout", () => {
   assert.match(brickDetailWGSL(D), /const NB_DTL_CLO:vec3<bool>=vec3<bool>\(true,false,false\)/);
 });
 
-test("the fine surface: the container's walls closed, the coupled faces open", () => {
+test("the fine surface: side walls and lid capped, the floor and the coupled faces open", () => {
+  // The teaser's box (coupled 59): every face coupled but the floor, which stays open as the parent's mesh leaves it.
   const text = brickDetailSurfaceWGSL({ cells: [200, 272, 368], bricks: [28, 36, 48], h_m: 0.01, origin_m: [0, 0, 0], coupled: 59, far_m: 1 });
-  assert.match(text, /DS_CLOSED_LO:vec3<bool>=vec3<bool>\(false,true,false\)/, "the floor is closed");
+  assert.match(text, /DS_CLOSED_LO:vec3<bool>=vec3<bool>\(false,false,false\)/, "the floor is open");
   assert.match(text, /DS_CLOSED_HI:vec3<bool>=vec3<bool>\(false,false,false\)/);
+  // A box against the low x wall and the lid (coupled: x high, z both): those two capped, the floor still open.
+  const walled = brickDetailSurfaceWGSL({ cells: [64, 64, 64], bricks: [8, 8, 8], h_m: 0.01, origin_m: [0, 0, 0], coupled: 0b110010, far_m: 1 });
+  assert.match(walled, /DS_CLOSED_LO:vec3<bool>=vec3<bool>\(true,false,false\)/);
+  assert.match(walled, /DS_CLOSED_HI:vec3<bool>=vec3<bool>\(false,true,false\)/);
   assert.match(text, /DS_GROUPS:vec3i=vec3i\(26,35,47\)/);
   assert.equal(brickDetailSurfaceCapacity([200, 272, 368], 2 ** 40) % 3, 0, "whole triangles");
   assert.equal(brickDetailSurfaceCapacity([200, 272, 368], 32 * 300), 300, "held to the device's binding");

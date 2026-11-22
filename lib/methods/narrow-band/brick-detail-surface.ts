@@ -11,8 +11,12 @@
  * The box's faces:
  * - a coupled face is open: the fine liquid continues into the parent's, whose mesh meets it there (the relaxation
  *   zone holds the fine φ to the parent's on that face, brick-detail.wgsl.ts);
- * - a face on the container's wall is closed as the parent's mesh is (a vertex past the presented cells is air there),
- *   so the liquid against the wall shows its wall face.
+ * - a face on the container's side walls or lid is closed as the parent's mesh is (a vertex past the presented cells
+ *   is air there), so the liquid against the glass shows its wall face;
+ * - the container's floor is left open, as the parent's mesh leaves it: the water's composite ends a ray at the dry
+ *   scene's opaque surface behind the last free face (verifiedWaterSolidContact), as it does for the static solids
+ *   inside the box, which this mesh, like the parent's, wraps with the level set alone. A floor cap is a free face
+ *   on the floor, which the composite took for an exit into air (the box showed as a flat tinted slab, its rods dry).
  *
  * One workgroup meshes 8³ cubes, offset by one (cube c spans vertices c .. c + 1, c from -1): its vertices lie in the
  * presentation bricks b - 1 and b on each axis, and a brick the presentation did not write this frame holds far air
@@ -50,7 +54,8 @@ export function brickDetailSurfaceCapacity(cells: readonly number[], maxBytes: n
 }
 
 export function brickDetailSurfaceWGSL(o: BrickDetailSurfaceOptions): string {
-  const closed = (a: number, side: number) => ((o.coupled >> (2 * a + side)) & 1) === 0;
+  // A face is capped (air past it) where it is closed and not the floor.
+  const closed = (a: number, side: number) => ((o.coupled >> (2 * a + side)) & 1) === 0 && !(a === 1 && side === 0);
   const b3 = (side: number) => `vec3<bool>(${[0, 1, 2].map(a => closed(a, side)).join(",")})`;
   const groups = o.cells.map(n => Math.ceil((n + 2) / 8));
   return /* wgsl */`
@@ -59,6 +64,7 @@ struct SurfaceVertex { position:vec4f, normal:vec4f }
 const DS_CELLS:vec3i=vec3i(${o.cells.join(",")});
 const DS_BRICKS:vec3i=vec3i(${o.bricks.join(",")});
 const DS_GROUPS:vec3i=vec3i(${groups.join(",")});
+// The capped faces: closed side walls and lid (the floor is open, as a coupled face).
 const DS_CLOSED_LO:vec3<bool>=${b3(0)};const DS_CLOSED_HI:vec3<bool>=${b3(1)};
 const DS_H:f32=${o.h_m};const DS_FAR:f32=${o.far_m};
 const DS_ORIGIN:vec3f=vec3f(${o.origin_m.join(",")});
@@ -70,7 +76,7 @@ override capacity:u32=3u;
 var<workgroup> wgCount:atomic<u32>;
 var<workgroup> wgBase:u32;
 var<workgroup> wgLive:u32;
-// Vertex v's φ (m): past the presented cells, air on a closed face and the edge's value on a coupled one.
+// Vertex v's φ (m): past the presented cells, air on a capped face and the edge's value on any other.
 fn dsPhi(v:vec3i)->f32{
   if(any((v<vec3i(0))&DS_CLOSED_LO)||any((v>DS_CELLS)&DS_CLOSED_HI)){return DS_FAR;}
   return textureLoad(phi,clamp(v,vec3i(0),DS_CELLS),0).x;
@@ -80,7 +86,7 @@ fn dsGrad(v:vec3i)->vec3f{
 }
 // The cube's corners in marching-cubes order (the water's windowCell order).
 const DS_CORNER=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
-// Cube c is meshed: inside the presented cells, or one past them on a closed face (its wall face).
+// Cube c is meshed: inside the presented cells, or one past them on a capped face (its wall face).
 fn dsCube(c:vec3i)->bool{
   let lo=select(vec3i(0),vec3i(-1),DS_CLOSED_LO);let hi=DS_CELLS+select(vec3i(0),vec3i(1),DS_CLOSED_HI);
   return all(c>=lo)&&all(c<hi);
