@@ -179,16 +179,19 @@ export function useFluidPipelineCost(): FluidPipelineCost {
   const running = session.runtime((state) => state.runState === "running");
 
   // Graphs are declared beside their encoders, so loading one loads the solver
-  // module; async keeps an unsupported method from paying for that.
-  const [loaded, setLoaded] = useState<{ readonly methodId: string; readonly graph: FluidPipelineGraph }>();
+  // module; async keeps an unsupported method from paying for that. The
+  // running solver names the graph its trace seams close (one method can run
+  // engines with different steps), so the variant keys the load too.
+  const variant = info?.pipelineGraph;
+  const [loaded, setLoaded] = useState<{ readonly methodId: string; readonly variant?: string; readonly graph: FluidPipelineGraph }>();
   useEffect(() => {
     let cancelled = false;
-    void getMethod(methodId).pipelineGraph?.().then((graph) => {
-      if (!cancelled) setLoaded({ methodId, graph });
+    void getMethod(methodId).pipelineGraph?.(variant).then((graph) => {
+      if (!cancelled) setLoaded({ methodId, variant, graph });
     });
     return () => { cancelled = true; };
-  }, [methodId]);
-  const graph = loaded?.methodId === methodId ? loaded.graph : undefined;
+  }, [methodId, variant]);
+  const graph = loaded?.methodId === methodId && loaded.variant === variant ? loaded.graph : undefined;
 
   useEffect(() => {
     const store = usePerformanceInstrumentationStore.getState();

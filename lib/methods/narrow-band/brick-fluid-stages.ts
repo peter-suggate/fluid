@@ -37,6 +37,7 @@ import { NBF_PARTICLE_SETTINGS, nbfParticleSupported } from "./particles-formula
 import { P_ARGS_RECORDS, P_ENERGY_BUFFER, particleKernels } from "./particles-kernels.wgsl";
 import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
 import { velocityKernels } from "./velocity-kernels.wgsl";
+import { BRICK_PHASE as T, type BrickPhase, type BrickStageSeam } from "./brick-timing";
 
 /** The stage set at a tier mode: all h (tiered false), or reading through the tier owners and writing only owned
  * storage (tiered: the engine then runs the census and the transfer, brick-abi.md §2.5). */
@@ -80,17 +81,33 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   // F word, so it resolves every slot.
   const analysisOf = (after: typeof resolve) => [at(l.lTiles, all), ...dilate(1), at(l.lClear, all), ...coarse("lcClear"), ...after, ...dilate(2), ...near, at(l.lDistance, all)];
   const analysis = analysisOf(l.lResolveD ? [at(l.lResolveD, all)] : resolve), bootAnalysis = analysisOf(resolve);
+  // The step's lists as timed runs (brick-timing.ts): each run is one phase of a sampled step.
+  const runs = (parts: readonly (readonly [BrickPhase, readonly BrickPlacement[]])[]) => ({
+    list: parts.flatMap(([, run]) => run),
+    seams: parts.filter(([, run]) => run.length > 0).map(([phase, run]): BrickStageSeam => ({ phase, count: run.length })),
+  });
+  // Tiered, the re-entry seed (pSeed cfg.w = 2) into the source bank (z = 1: pSrc ^ 1 at z = 1 is part 1's source).
+  // Then the move's arguments (pArgs w = 0: the source's records, so the head's refined tiles' seeds move and bin
+  // this step), which also empty the destination bank, every move (brick-particle-banks.test.ts).
+  const move = runs([[T.moveCaches, [...resolve, ...cache]],
+    [T.move, [at(p.pLiquid, all), ...(tiered ? [at(p.pSeed, all, 1, 2)] : []), args(0, 0), at(p.pSeparate, records), at(p.pMove, records), ...(p.pSolid ? [at(p.pSolid, records)] : [])]]]);
+  const levelSet = runs([
+    [T.levelAdvect, [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...(l.phiSolid ? [at(l.phiSolid, all)] : []), ...coarse("lcAdvect")]],
+    [T.levelUnion, [at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"), ...resolve]],
+    [T.levelAnalysis, [...analysis, ...coarse("lcRetire")]],
+    [T.levelPublish, [at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all), ...(l.lWall ? [at(l.lWall, all)] : [])]],
+  ]);
+  const velocity = runs([[T.velocityAdvect, [at(v.uAdvect, bothAct)]], [T.velocityDeposit, [at(v.pDeposit, all)]],
+    [T.velocityViscous, v.viscous ? [at(v.uViscous, bothAct)] : []], [T.velocityTransfer, [at(v.uTransfer, bothAct)]]]);
+  const tail = runs([[T.tailExtend, [...ext4, at(v.uExtend, all)]], [T.tailParticles, [args(0, 1), at(p.pJoin, records), at(p.pDelta, records)]]]);
   const stages: BrickStages = {
     label: tiered ? "lane F (NB-FLIP tiered)" : "lane F (NB-FLIP all-h)", bringUp: false, tiered,
-    // Tiered, the re-entry seed (pSeed cfg.w = 2) into the source bank (z = 1: pSrc ^ 1 at z = 1 is part 1's source).
-    // Then the move's arguments (pArgs w = 0: the source's records, so the head's refined tiles' seeds move and bin
-    // this step), which also empty the destination bank, every move (brick-particle-banks.test.ts).
-    move: [...resolve, ...cache, at(p.pLiquid, all), ...(tiered ? [at(p.pSeed, all, 1, 2)] : []), args(0, 0), at(p.pSeparate, records), at(p.pMove, records), ...(p.pSolid ? [at(p.pSolid, records)] : [])],
+    move: move.list,
     rebin: rebin(0),
-    levelSet: [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...(l.phiSolid ? [at(l.phiSolid, all)] : []), ...coarse("lcAdvect"), at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"), ...resolve,
-      ...analysis, ...coarse("lcRetire"), at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all), ...(l.lWall ? [at(l.lWall, all)] : [])],
-    velocity: [at(v.uAdvect, bothAct), at(v.pDeposit, all), ...(v.viscous ? [at(v.uViscous, bothAct)] : []), at(v.uTransfer, bothAct)],
-    tail: [...ext4, at(v.uExtend, all), args(0, 1), at(p.pJoin, records), at(p.pDelta, records)],
+    levelSet: levelSet.list,
+    velocity: velocity.list,
+    tail: tail.list,
+    seams: { move: move.seams, levelSet: levelSet.seams, velocity: velocity.seams, tail: tail.seams },
     boot: [...resolve, at(l.lInit, all), ...bootAnalysis, at(v.vGauge, both, 0, 1)],
     // The old host's projected half kick (kickMixedFrame: U <- P(U + g dt/2) before the first frame), then the
     // extension and the initial seeding from the kicked, extended U (the old engine seeds in its first frame from

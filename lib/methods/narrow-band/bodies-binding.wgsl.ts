@@ -1,6 +1,7 @@
 /** Lane P's body bindings for brick kernels (M5 design note §7.2, A3): the `bodies` and `bodyCuts` bindings, the
  * ring's body header readers and gate, the shared pose queries, and setMark's body test (A2). No brick-set import, so
  * E's brick-set.wgsl.ts can take it (bodies-stage.wgsl.ts holds the stamp). */
+import type { GPUStageTimestampRecorder } from "../../core/performance-trace";
 import type { BrickBinding } from "./brick-kernel";
 import { pbBodyShapesWGSL, type PbBodySource } from "./bodies-shapes.wgsl";
 
@@ -76,7 +77,7 @@ export interface BrickBodiesBinding extends BrickBodiesFrame {
   /** §7.1: step `step`'s rigid integration, submitted with its part 2 (after couple): rigidSystem.encode's tables and
    * integrate, then the exchange's clear. Undefined when the coupling is off (the old host's uncoupled bodies: no
    * couple and no integration). */
-  integrate(step: number): GPUCommandBuffer | undefined;
+  integrate(step: number, timed?: () => GPUStageTimestampRecorder): GPUCommandBuffer | undefined;
 }
 
 /** The stamp's brick candidates (bodyStamp's BMASK, §3): the bodies within reach of the brick at cell origin o, the

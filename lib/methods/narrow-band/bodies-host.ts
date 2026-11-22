@@ -19,6 +19,8 @@
  *   at the centre distance n.x - w, the same penetration as staticPlaneContact's to rounding. A scene with no terrain
  *   binds one zero texel, as the old host's.
  * - Save/load/undo: the rigid state is the system's (stateBuffer), not the engine's; save() and restore() copy it. */
+import type { GPUStageTimestampRecorder } from "../../core/performance-trace";
+import { BRICK_PHASE } from "./brick-timing";
 import type { SceneDescription, RigidBodyDescription } from "../../core/model";
 import { sceneHasTerrain } from "../../core/terrain";
 import type { BrickTerrainColumns } from "./brick-terrain.wgsl";
@@ -155,13 +157,18 @@ export class BrickRigidBodies implements BrickBodiesBinding {
     return this.header;
   }
 
-  integrate(step: number): GPUCommandBuffer | undefined {
+  /** `recorder` (a sampled step, BrickEngine.advanceTimed): asked only when the integrator encodes, whose passes
+   * close the rigid phase on it. */
+  integrate(step: number, recorder?: () => GPUStageTimestampRecorder): GPUCommandBuffer | undefined {
     if (!this.coupling || this.header.count === 0) return undefined;
-    const h = this.options.h_m, encoder = this.device.createCommandEncoder({ label: `nb-brick.step${step}.rigid` });
+    const h = this.options.h_m, raw = this.device.createCommandEncoder({ label: `nb-brick.step${step}.rigid` }), timed = recorder?.();
+    timed?.begin();
+    const encoder = timed ? timed.instrument(raw) : raw;
     if (this.tap) encoder.copyBufferToBuffer(this.exchange, 0, this.tap, 0, GPU_RIGID_EXCHANGE_BYTES);
     this.system.encode(encoder, this.options.dt_s, h * h * h, 1, h);
+    if (timed) { timed.completePhase(encoder, BRICK_PHASE.rigid); timed.resolve(raw); }
     encoder.clearBuffer(this.exchange);
-    return encoder.finish();
+    return raw.finish();
   }
 
   /** The setBodyCuts cache (uniform-mixed-solid.wgsl.ts:458-468): the atlas only when the signed cut list changes. */

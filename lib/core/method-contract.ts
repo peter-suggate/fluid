@@ -527,8 +527,13 @@ export interface SimulationMethod {
    * Graphs are declared beside their encoders, so loading one pulls in the
    * solver module; the thunk is what keeps a panel from paying that cost just
    * to ask whether a diagram exists.
+   *
+   * `variant` is the running solver's `info.pipelineGraph`: a method whose
+   * engines encode different steps (NB-FLIP's uniform and brick engines)
+   * serves the graph whose phase labels that solver's trace actually closes.
+   * Absent, the method's default graph.
    */
-  pipelineGraph?(): Promise<FluidPipelineGraph>;
+  pipelineGraph?(variant?: string): Promise<FluidPipelineGraph>;
   /**
    * The live accuracy-for-frame-time strip this method offers.
    *

@@ -24,6 +24,7 @@ import type { BrickSources } from "./brick-source";
 import { ARGS, ARGS_LIST_END, type BrickLayout } from "./brick-abi";
 import { ENGINE_BUFFERS, type BrickPlacement } from "./brick-kernel";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
+import type { BrickStageSeam } from "./brick-timing";
 
 /** F's args region (brick-abi.md §5.5). */
 export const FLUID_ARGS = { FIRST: ARGS.LANE_F, END: ARGS.WORDS } as const;
@@ -65,6 +66,11 @@ export interface BrickStages {
    * triggers of the state it seeds (the old host's activity follows its first census, after the kick).
    */
   readonly kick?: { readonly force: readonly BrickPlacement[]; readonly after: readonly BrickPlacement[]; readonly seed?: readonly BrickPlacement[] };
+  /**
+   * The timing seams of the step's lists (brick-timing.ts): consecutive runs covering each named list exactly, each
+   * timed as its own phase on a sampled step. Absent for a list: one phase for the whole list.
+   */
+  readonly seams?: Partial<Record<"move" | "levelSet" | "velocity" | "tail", readonly BrickStageSeam[]>>;
   /** Lane-owned buffers by name, in words. */
   readonly buffers: Readonly<Record<string, number>>;
   /**

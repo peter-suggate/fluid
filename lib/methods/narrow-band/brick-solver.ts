@@ -50,6 +50,12 @@ import { BrickRigidBodies } from "./bodies-host";
 import { solidWorldForFluidLattice } from "../../core/solid-world";
 import { brickStaticCutBricks } from "./brick-static.wgsl";
 import { brickBoundaryChangedCells, brickBoundaryImage } from "./brick-boundary.wgsl";
+import { GPUStageTimestampRecorder } from "../../core/performance-trace";
+import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
+import { gpuPhysicsPerformanceActivityFrameId } from "../../core/gpu-performance-activity";
+
+/** The sampled advances' cadence (ms, wall), the uniform engine's: one timed step at most this often. */
+const BRICK_PHYSICS_TRACE_CADENCE_MS = 100;
 
 export interface BrickSolverOptions {
   readonly setup: BrickSceneSetup;
@@ -100,6 +106,11 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   private readonly particleFrame: GPUBuffer;
   /** The particle source of each bank (a record a bank: the source is rebuilt by no frame). */
   private readonly particleBanks: readonly [GPUFluidParticleSource, GPUFluidParticleSource];
+  /** The stage timing (SIM panel): a timed step's readback in flight, the last sample's wall time and its id. */
+  private tracePending = false;
+  private lastTraceAt_ms = -Infinity;
+  private traceSampleId = 0;
+  private destroyed = false;
 
   private constructor(private readonly options: BrickSolverOptions, engine: BrickEngine, presentation: BrickPresentation, rigid?: BrickRigidBodies) {
     this.brickEngine = engine; this.brickPresentation = presentation; this.presentEnabled = options.present ?? true;
@@ -109,7 +120,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     const s = options.setup, h = s.h_m;
     this.fluidDomain = { origin_m: s.origin_m, cellSize_m: [h, h, h], dimensions: s.lattice };
     this.denseLevelSetVolumeSource = { vertexPhi: presentation.vertexPhi, contourVertexPhi: true, openFraction: presentation.openFraction, cellSize_m: [h, h, h] };
-    this.info = { ...this.makeInfo(), submittedTime_s: 0, completedTime_s: 0, encodedSteps: 0 };
+    this.info = { ...this.makeInfo(), submittedTime_s: 0, completedTime_s: 0, encodedSteps: 0, pipelineGraph: "brick" };
     const device = engine.device, o = s.origin_m;
     this.particleFrame = device.createBuffer({ label: "nb-brick.particleFrame", size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.particleFrame, 0, new Float32Array([...s.lattice, 0, h, h, h, 0, o[0], o[1], o[2], 0]));
@@ -153,6 +164,8 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
       ...(s.staticMask ? { staticMask: s.staticMask } : {}), ...(s.staticsDeferred ? { staticsDeferred: true } : {}), ...(s.terrain ? { terrain: s.terrain } : {}), ...(s.boundary ? { boundary: s.boundary } : {}),
     });
     const presentation = await BrickPresentation.create(engine, options.farPhi_m, options.setup.presentCells);
+    // The stage timing's closing marker, compiled before any sampled step asks for it (markersReady).
+    await GPUStageTimestampRecorder.prepare(device);
     const solver = new BrickNBFlipSolver(options, engine, presentation, rigid);
     solver.present();
     return solver;
@@ -224,13 +237,55 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     // A held stroke: no step until its pipelines land (simulationReady is false; the app does not ask).
     if (this.brickEngine.editHeld) return false;
     this.rigidBodies?.offer(bodies);
-    try { this.brickEngine.advance(1); } catch (error) {
+    try { if (!this.advanceSampled()) this.brickEngine.advance(1); } catch (error) {
       // A latched FAIL (lagged receipt) refuses further steps: report it, never step on.
       this.refresh({ simulationFailure: this.failure(error instanceof Error ? error.message : String(error)) });
       return false;
     }
     if (this.presentEnabled) this.present();
     this.refresh({ submittedTime_s: submitted + dt, encodedSteps: (this.info.encodedSteps ?? 0) + 1 });
+    return true;
+  }
+
+  /**
+   * One step timed, when the instrumentation is on and the cadence is due (BrickEngine.advanceTimed): its phases
+   * (brick-timing.ts) land in info.physicsTrace once read back, an exact partition of the step's GPU time (part 1,
+   * part 2 and the rigid integrator; the presentation copy is the renderer's, not the step's). False: nothing was
+   * submitted, the caller steps untimed. Hardware timestamps only: no substitute timing is reported.
+   */
+  private advanceSampled(): boolean {
+    const instrumentation = usePerformanceInstrumentationStore.getState();
+    if (!instrumentation.enabled || this.tracePending) return false;
+    const requested = performance.now();
+    if (requested - this.lastTraceAt_ms < BRICK_PHYSICS_TRACE_CADENCE_MS) return false;
+    const device = this.brickEngine.device;
+    if (!GPUStageTimestampRecorder.supported(device) || !GPUStageTimestampRecorder.markersReady(device)) {
+      this.info.physicsTrace = undefined;
+      this.info.physicsTraceUnavailable = "GPU hardware timing is unavailable. No substitute timing is reported.";
+      return false;
+    }
+    const sampleId = ++this.traceSampleId, context = `brick:sim-${(this.info.submittedTime_s ?? 0).toFixed(6)}`;
+    this.tracePending = true; this.lastTraceAt_ms = requested;
+    let segments: GPUStageTimestampRecorder[];
+    try { segments = this.brickEngine.advanceTimed(() => new GPUStageTimestampRecorder(device, sampleId, "physics", context)); }
+    catch (error) { this.tracePending = false; throw error; }
+    this.info.physicsCaptureIdentity = { sampleId, context, frameId: gpuPhysicsPerformanceActivityFrameId({ sampleId, context }) };
+    // A segment may close at zero under the browser's timestamp quantization (the rigid integrator's): its boundaries
+    // are still sampled and ordered, so it reads as a zero, not as an invalid sample.
+    void Promise.all(segments.map(segment => segment.read(true))).then(traces => {
+      const current = usePerformanceInstrumentationStore.getState();
+      if (this.destroyed || !current.enabled || current.enabledAt_ms > requested) return;
+      if (traces.length === 0 || traces.some(trace => !trace)) {
+        this.info.physicsTrace = undefined;
+        this.info.physicsTraceUnavailable = "GPU hardware timing was invalid. No substitute timing is reported.";
+        return;
+      }
+      const complete = traces.map(trace => trace!);
+      this.info.physicsTrace = { ...complete.at(-1)!, total_ms: complete.reduce((sum, trace) => sum + trace.total_ms, 0), phases: complete.flatMap(trace => trace.phases) };
+      this.info.physicsTraceUnavailable = undefined;
+    }).catch(error => {
+      if (!this.destroyed) { this.info.physicsTrace = undefined; this.info.physicsTraceUnavailable = `GPU hardware timing failed: ${String(error)}`; }
+    }).finally(() => { this.tracePending = false; });
     return true;
   }
 
@@ -370,5 +425,5 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   pickRigidBody(origin: RigidBodyState["position_m"], direction: RigidBodyState["position_m"]): Promise<GPURigidBodyPick | undefined> { return this.rigidBodies ? this.rigidBodies.system.pick(origin, direction) : Promise.resolve(undefined); }
   readRigidBodyPoses(): Promise<GPURigidBodyPose[] | undefined> { return this.rigidBodies ? this.rigidBodies.readPoses() : Promise.resolve(undefined); }
 
-  destroy() { this.brickPresentation.destroy(); this.brickEngine.destroy(); this.rigidBodies?.destroy(); this.particleFrame.destroy(); }
+  destroy() { this.destroyed = true; this.brickPresentation.destroy(); this.brickEngine.destroy(); this.rigidBodies?.destroy(); this.particleFrame.destroy(); }
 }

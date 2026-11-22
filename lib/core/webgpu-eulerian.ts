@@ -420,6 +420,9 @@ export interface GPUEulerianInfo {
   };
   /** Latest exhaustive, exclusive GPU physics partition. */
   physicsTrace?: PerformanceTrace;
+  /** The method's stage graph (MethodContract.pipelineGraph's variant) whose phase labels this solver's
+   * `physicsTrace` closes. Absent: the method's default graph. */
+  pipelineGraph?: string;
   spatialPerformance?: SpatialPerformanceReport;
   spatialPerformanceStages?: readonly { id: string; label: string }[];
   spatialPerformanceError?: string;

@@ -36,6 +36,8 @@ import { levelSetReleaseSchedule } from "./levelset-release.wgsl";
 import { brickBodyCoupleKernel, brickBodyKernels } from "./bodies-stage.wgsl";
 import type { BrickBodiesBinding, BrickBodiesHeader } from "./bodies-binding.wgsl";
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
+import { GPUStageTimestampRecorder } from "../../core/performance-trace";
+import { BRICK_PHASE as T, type BrickPhase, type BrickSeam, seamed, stageRuns } from "./brick-timing";
 
 export type Vec3 = readonly [number, number, number];
 /** A box of initial liquid, in cells (vertex coordinates of the lattice). */
@@ -121,7 +123,11 @@ export interface BrickEngineOptions {
   readonly label?: string;
 }
 
-export interface BrickStageSchedule { readonly part1: readonly BrickPlacement[]; readonly part2: readonly BrickPlacement[]; readonly boot: readonly BrickPlacement[] }
+export interface BrickStageSchedule {
+  readonly part1: readonly BrickPlacement[]; readonly part2: readonly BrickPlacement[]; readonly boot: readonly BrickPlacement[];
+  /** Each part's timing seams (brick-timing.ts): ordered runs covering the part exactly, a phase each. */
+  readonly seams: { readonly part1: readonly BrickSeam[]; readonly part2: readonly BrickSeam[] };
+}
 
 const RECEIPTS = 4;
 const FAIL_NAMES = Object.entries(FAIL);
@@ -386,35 +392,36 @@ export class BrickEngine {
       { kernel: set.setLists, dispatch: direct(Math.ceil(Math.max(f, c) / 64)), z },
       { kernel: set.setArgs, dispatch: direct(1) },
     ];
-    const solve: BrickPlacement[] = [
-      ...(solver.before ?? []),
-      { kernel: pres.operator, dispatch: list(LIST.F_ALL, "G1") },
-      ...solver.setup,
-      ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(),
-      ...solver.finish,
+    const solveRuns: (readonly [BrickPhase, readonly BrickPlacement[]])[] = [
+      [T.pressureOperator, [...(solver.before ?? []), { kernel: pres.operator, dispatch: list(LIST.F_ALL, "G1") }]],
+      [T.pressureSolve, [...solver.setup, ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(), ...solver.finish]],
       // project on F_ALL (lane P's contract, 2026-11-15: WARM and the WALLS bits on every F brick; P reads no F_LIQ).
-      { kernel: pres.project, dispatch: list(LIST.F_ALL, "G1") },
+      [T.pressureProject, [{ kernel: pres.project, dispatch: list(LIST.F_ALL, "G1") }]],
     ];
+    const solve: BrickPlacement[] = solveRuns.flatMap(([, run]) => run);
     // The release port's producers (levelset-release.wgsl.ts), where a stage set advects φ: the tile reach words at
     // the old frame plan's point (part 1, after the head, before move), the wall reach before the surface advect.
     const release = stages.levelSet.length ? levelSetReleaseSchedule(layout) : { part1: [], part2: [] };
     // Part 2: the class words and the residency check (setMark), C_LIQ (setMarkPages), the lists rebuilt from them
     // (setArgs with cfg.z = 1 keeps the head's churn counts), then F's level set, velocity, the solve and F's tail.
-    const part2: BrickPlacement[] = [
-      { kernel: set.setMark, dispatch: list(LIST.F_ALL, "G1") },
-      ...(tiered ? [{ kernel: set.setMarkPages, dispatch: list(LIST.C_ALL, "G1") }] : []),
-      { kernel: set.setRecords, dispatch: direct(churnGroups(f, 1)) },
-      { kernel: set.setLists, dispatch: direct(Math.ceil(Math.max(f, c) / 64)) },
-      { kernel: set.setArgs, dispatch: direct(1), z: 1 },
-      ...release.part2,
-      ...stages.levelSet,
-      ...stages.velocity,
-      ...solve,
-      ...stages.tail,
+    const seams2 = seamed<BrickPlacement>([
+      [T.set, [
+        { kernel: set.setMark, dispatch: list(LIST.F_ALL, "G1") },
+        ...(tiered ? [{ kernel: set.setMarkPages, dispatch: list(LIST.C_ALL, "G1") }] : []),
+        { kernel: set.setRecords, dispatch: direct(churnGroups(f, 1)) },
+        { kernel: set.setLists, dispatch: direct(Math.ceil(Math.max(f, c) / 64)) },
+        { kernel: set.setArgs, dispatch: direct(1), z: 1 },
+        ...release.part2,
+      ]],
+      ...stageRuns("levelSet", stages.levelSet, T.levelAnalysis, stages.seams?.levelSet),
+      ...stageRuns("velocity", stages.velocity, T.velocityAdvect, stages.seams?.velocity),
+      ...solveRuns,
+      ...stageRuns("tail", stages.tail, T.tailExtend, stages.seams?.tail),
       // P's couple (M5 §6, §7.1): after F's tail, X final; the rigid integrator follows in its own command buffer.
-      ...(bodies ? [{ kernel: brickBodyCoupleKernel(layout, frame!, bodies), dispatch: list(LIST.F_BODY, "G1") }] : []),
-      { kernel: set.stepEnd, dispatch: direct(1), z: 0 },
-    ];
+      [T.couple, bodies ? [{ kernel: brickBodyCoupleKernel(layout, frame!, bodies), dispatch: list(LIST.F_BODY, "G1") }] : []],
+      [T.stepEnd, [{ kernel: set.stepEnd, dispatch: direct(1), z: 0 }]],
+    ]);
+    const part2: BrickPlacement[] = seams2.list;
     // Part 1's head (brick-abi.md §2.5, §5.4), on the completed step's lists and state, in both engines:
     // - NB-FLIP's frame-head census (all-h too: F's TRIG, and WANT seeds residency);
     // - the residency (brick-residency.wgsl.ts: seep S2j's local per-axis reach of each source brick, ACTIVE tiles or
@@ -471,7 +478,10 @@ export class BrickEngine {
       { kernel: set.setKRelease, dispatch: list(LIST.F_ALL, "G64"), z: 0 },
       { kernel: set.setKRelease, dispatch: list(LIST.F_LEAVE, "G64"), z: 1 },
     ] : [])];
-    const head = censused ? [...headCensus(), ...residency, ...tail, ...lists(1), ...want, ...(tiered ? [...transfer, ...(heat?.cert ?? [])] : certificate), ...stamp, churnClear] : [];
+    const headRuns: (readonly [BrickPhase, readonly BrickPlacement[]])[] = censused ? [
+      [T.census, headCensus()], [T.residency, [...residency, ...tail, ...lists(1), ...want]],
+      [T.transfer, tiered ? [...transfer, ...(heat?.cert ?? [])] : certificate], [T.stamp, [...stamp, churnClear]],
+    ] : [];
     const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
     const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists(2), ...want, ...commit] : census(false);
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,
@@ -493,7 +503,8 @@ export class BrickEngine {
     const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists(2), ...bootHead, ...stamp, ...stages.boot, ...bootMark, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
     // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census, residency and remap), then the release
     // port's reach words (after every head claim, before move), F's move and rebin.
-    return { part1: [...head, ...release.part1, ...stages.move, ...stages.rebin], part2, boot };
+    const seams1 = seamed<BrickPlacement>([...headRuns, [T.moveCaches, release.part1], ...stageRuns("move", stages.move, T.move, stages.seams?.move), [T.rebin, stages.rebin]]);
+    return { part1: seams1.list, part2, boot, seams: { part1: seams1.seams, part2: seams2.seams } };
   }
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {
@@ -804,6 +815,32 @@ export class BrickEngine {
     return enc.finish();
   }
 
+  /**
+   * A sampled step's part (advanceTimed): a compute pass a seam, each seam's phase closed on `recorder` at its pass's
+   * end, so the phases partition the part's GPU time. The dispatches, their order and their bindings are encode()'s.
+   */
+  private encodeTimed(list: readonly Recorded[], seams: readonly BrickSeam[], label: string, recorder: GPUStageTimestampRecorder, receipt?: number): GPUCommandBuffer {
+    if ((seams.at(-1)?.end ?? 0) !== list.length) throw new Error(`Brick engine: ${label}'s seams cover ${seams.at(-1)?.end ?? 0} of ${list.length} dispatches`);
+    const raw = this.device.createCommandEncoder({ label });
+    recorder.begin();
+    const enc = recorder.instrument(raw), args = this.buffers.get("args")!;
+    let from = 0;
+    for (const seam of seams) {
+      const pass = enc.beginComputePass({ label: `${label}.${seam.phase.label}` });
+      for (let i = from; i < seam.end; i++) {
+        const r = list[i]!;
+        pass.setPipeline(r.pipeline); pass.setBindGroup(0, r.group);
+        if ("direct" in r.dispatch) pass.dispatchWorkgroups(...r.dispatch.direct); else pass.dispatchWorkgroupsIndirect(args, 4 * r.dispatch.indirect);
+      }
+      pass.end();
+      recorder.completePhase(enc, seam.phase);
+      from = seam.end;
+    }
+    recorder.resolve(raw);
+    if (receipt !== undefined) raw.copyBufferToBuffer(this.buffers.get("set")!, 0, this.receipts[receipt]!.buffer, 0, 4 * 256);
+    return raw.finish();
+  }
+
   private ringWords(step: number): ArrayBuffer {
     const o = this.options, buf = new ArrayBuffer(4 * RING_WORDS), u = new Uint32Array(buf), f = new Float32Array(buf);
     u[RING.STEP] = step; f[RING.DT] = o.dt_s; f[RING.TIME] = this.time; u[RING.FLAGS] = 0;
@@ -875,24 +912,42 @@ export class BrickEngine {
 
   /** Submit `steps` steps: per step one ring write, part 1, part 2, then the next step encoded ahead. */
   advance(steps = 1) {
+    for (let i = 0; i < steps; i++) this.submitStep();
+  }
+
+  /**
+   * Submit one step timed (the app's sampled advance): part 1, part 2 and the rigid integrator each on a recorder of
+   * `recorder()`, a compute pass a seam (schedule.seams). The step encoded ahead is set aside and the same recorded
+   * dispatches are encoded again with the seams, so the timed step runs exactly the step's work. Returns the resolved
+   * recorders in submission order, a segment a command buffer: each segment's chain stays inside one command buffer,
+   * so no gap between submissions is charged to a phase.
+   */
+  advanceTimed(recorder: () => GPUStageTimestampRecorder): GPUStageTimestampRecorder[] {
+    const segments: GPUStageTimestampRecorder[] = [];
+    try { this.submitStep(() => { const r = recorder(); segments.push(r); return r; }); } catch (error) { segments.forEach(r => r.destroy()); throw error; }
+    return segments;
+  }
+
+  private submitStep(recorder?: () => GPUStageTimestampRecorder) {
     // A held stroke (editHeld) is not in the solid yet: a step now would run on a mask without its cuts.
     if (this.held) throw new Error("Brick engine: a live voxel edit waits on its pipelines (editHeld); await editsReady before stepping");
-    for (let i = 0; i < steps; i++) {
-      if (this.failure) throw new Error(this.failure);
-      const a = this.ahead!, slot = a.step % RING_SLOTS;
-      // A4: the host's body sync, queued after the last step's part 2 and before this step's part 1.
-      if (this.options.bodies) this.bodyHeader = this.options.bodies.sync(a.step);
-      this.device.queue.writeBuffer(this.buffers.get("set")!, 4 * (this.layout.set.ring + RING_WORDS * slot), this.ringWords(a.step));
-      this.device.queue.submit([a.part1]);
-      // §7.1: the rigid integrator after part 2's couple, in the same submit (the host's buffer, encoded now so it
-      // reads this step's roster; undefined with the coupling off).
-      const rigid = this.options.bodies?.integrate(a.step);
-      this.device.queue.submit(rigid ? [a.part2, rigid] : [a.part2]);
-      if (a.receipt >= 0) this.collect(a.receipt, a.step);
-      this.steps++; this.time += this.options.dt_s;
-      if (this.live.length) { const slack = 1e-6 * this.options.dt_s; this.live = this.live.filter(d => d.time_s > this.time + slack); }
-      this.encodeAhead();
-    }
+    if (this.failure) throw new Error(this.failure);
+    const a = this.ahead!, slot = a.step % RING_SLOTS;
+    const rec = recorder ? this.recorded[slot]! : undefined, seams = this.schedule.seams;
+    const part1 = rec ? this.encodeTimed(rec.part1, seams.part1, `nb-brick.step${a.step}.part1`, recorder!()) : a.part1;
+    const part2 = rec ? this.encodeTimed(rec.part2, seams.part2, `nb-brick.step${a.step}.part2`, recorder!(), a.receipt >= 0 ? a.receipt : undefined) : a.part2;
+    // A4: the host's body sync, queued after the last step's part 2 and before this step's part 1.
+    if (this.options.bodies) this.bodyHeader = this.options.bodies.sync(a.step);
+    this.device.queue.writeBuffer(this.buffers.get("set")!, 4 * (this.layout.set.ring + RING_WORDS * slot), this.ringWords(a.step));
+    this.device.queue.submit([part1]);
+    // §7.1: the rigid integrator after part 2's couple, in the same submit (the host's buffer, encoded now so it
+    // reads this step's roster; undefined with the coupling off).
+    const rigid = this.options.bodies?.integrate(a.step, recorder);
+    this.device.queue.submit(rigid ? [part2, rigid] : [part2]);
+    if (a.receipt >= 0) this.collect(a.receipt, a.step);
+    this.steps++; this.time += this.options.dt_s;
+    if (this.live.length) { const slack = 1e-6 * this.options.dt_s; this.live = this.live.filter(d => d.time_s > this.time + slack); }
+    this.encodeAhead();
   }
 
   private collect(index: number, step: number) {
