@@ -27,7 +27,7 @@ import type { BrickLayout } from "./brick-abi";
 import { BrickPresentation } from "./brick-present";
 import { BrickDetailSurface } from "./brick-detail-surface";
 import type { PressureSolverFactory } from "./brick-pressure-slot";
-import type { BrickStagesFactory } from "./brick-stages";
+import { fluidStages } from "./brick-fluid-stages";
 import { brickStaticCutBricks } from "./brick-static.wgsl";
 import { solidWorldForFluidLattice } from "../../core/solid-world";
 import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
@@ -67,12 +67,15 @@ export function brickDetailSpecs(scene: SceneDescription, _setup: BrickSceneSetu
   if (!plan) return [];
   const gaps = brickDetailSceneGaps(scene);
   if (gaps.length) throw new Error(`NB-FLIP brick engine cannot run scene "${scene.sceneId ?? "(unnamed)"}"'s detail: ${gaps.join("; ")}`);
-  const sub = brickDetailSubScene(scene, plan.factor);
-  const fine = brickSceneSetup(sub, values);
-  if (!fine.setup || fine.gaps.length) throw new Error(`NB-FLIP detail engine: ${fine.gaps.join("; ")}`);
   const budget = plan.budget + plan.forced.length;
   if (budget < 1) throw new Error("NB-FLIP detail engine: a budget of no tiles");
   const layout: BrickDetailLayout = { factor: plan.factor, tiles: plan.tiles, budget, slots: budget * (1 + DETAIL_RING) };
+  // The sub-scene's pools are the budget's (it boots empty, so its own rule would size them from no liquid): its K rule
+  // (brickSceneSetup: the bricks the statics cut and the edit slack, at most F) then caps at the budget's F.
+  const base = brickDetailSubScene(scene, plan.factor);
+  const sub: SceneDescription = { ...base, fluid: { ...base.fluid, brickPools: brickDetailPools(layout, 0) } };
+  const fine = brickSceneSetup(sub, values);
+  if (!fine.setup || fine.gaps.length) throw new Error(`NB-FLIP detail engine: ${fine.gaps.join("; ")}`);
   const setup: BrickSceneSetup = { ...fine.setup, capacities: brickDetailPools(layout, fine.setup.capacities.k) };
   return [{ plan, setup, layout, low_m: brickDetailFrame(scene).low_m, farPhi_m: fluidLatticeFarPhi(sub) }];
 }
@@ -129,9 +132,10 @@ export class BrickDetailAlloc {
   destroy() { this.state.destroy(); }
 }
 
-/** What a detail engine shares with its parent's build. */
+/** What a detail engine shares with its parent's build. Not the stages: the fine engine runs all-h (fluidStages), as
+ * its mask holds only tiles at the surface's deformation, where a 4h tier would own nothing and its census, coarse
+ * level set and multigrid's coarse rows were a third of the fine step at a small budget. */
 export interface BrickDetailBuild {
-  readonly stages: BrickStagesFactory;
   readonly solver: PressureSolverFactory;
   readonly values: Readonly<Record<string, unknown>>;
 }
@@ -148,7 +152,7 @@ export class BrickDetail {
       lattice: s.lattice, ...(s.box ? { box: s.box } : {}), ...(s.openTop ? { openTop: true } : {}), ...(s.openSides ? { openSides: true } : {}),
       farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity,
       // No volume budget of its own: the fine engine's liquid is the parent's, held to it by the relaxation.
-      solver: build.solver, stages: build.stages, values: build.values, label: s.sceneId,
+      solver: build.solver, stages: fluidStages, values: build.values, label: s.sceneId,
       fluid: { density_kg_m3: s.density_kg_m3, viscosity_Pa_s: s.viscosity_Pa_s, surfaceTension_N_m: s.surfaceTension_N_m },
       particles: { bandDepth: s.particleBandDepth },
       ...(s.staticMask ? { staticMask: s.staticMask } : {}), ...(s.staticsDeferred ? { staticsDeferred: true } : {}),

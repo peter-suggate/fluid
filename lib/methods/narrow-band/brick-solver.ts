@@ -172,7 +172,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     });
     const presentation = await BrickPresentation.create(engine, options.farPhi_m, options.setup.presentCells);
     const details: BrickDetail[] = [];
-    try { for (const spec of options.detail ?? []) details.push(await BrickDetail.create(device, engine, spec, { stages: options.stages, solver: options.solver, values: options.values })); }
+    try { for (const spec of options.detail ?? []) details.push(await BrickDetail.create(device, engine, spec, { solver: options.solver, values: options.values })); }
     catch (error) { details.forEach(d => d.destroy()); presentation.destroy(); engine.destroy(); rigid?.destroy(); throw error; }
     // The stage timing's closing marker, compiled before any sampled step asks for it (markersReady).
     await GPUStageTimestampRecorder.prepare(device);

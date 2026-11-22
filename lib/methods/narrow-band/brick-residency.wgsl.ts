@@ -377,7 +377,8 @@ fn rmFlowSide(s:u32,a:u32,side:u32)->f32{
   // liquid is near (its φ at the tile's centre under NB_DTL_REACH and a tile), one more source after resMark's pass,
   // so the shell holds storage for the liquid the relaxation brings in and a fresh tile for the parent's state it
   // starts from. Tiered it keeps or claims their pages alone (pass 0): the parent's liquid is 4h storage until the
-  // census refines it, as a page source's is; all-h, the tile's bricks (both passes, as resSource's). A workgroup
+  // census refines it, as a page source's is; all-h, the tile's bricks and the layer past its + sides (its upper
+  // faces and vertices, nbDtlBrickKeep), both passes as resSource's, so setMark's 1-ring holds. A workgroup
   // strides the active tiles (META.ACTIVE of src's keys); a core tile is the engine's own residency's.
   const d = L.detail;
   const resDetail = d ? censusKernel(L, "resDetail", [CFG, setRW, dirRW, BRICK_SOURCE_BINDING], brickDetailWGSL(L) + RQ_WGSL + /* wgsl */`
@@ -389,7 +390,7 @@ fn rmFlowSide(s:u32,a:u32,side:u32)->f32{
     if(nbDtlBit(2u,T)){continue;}
     let lo=NB_DTL_U*vec3f(T);
     if(nbDtlPhi(lo+vec3f(0.5*NB_DTL_U))>NB_DTL_REACH+NB_DTL_U){continue;}
-    ${tiered ? "let p=vec3i(lo)>>vec3u(5u);if(!rqPageSettled(p)){rqPage(p);}" : `for(var k=0u;k<${(d.factor / 2) ** 3}u;k++){let q=(vec3i(lo)>>vec3u(3u))+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));if(!rqSettled(q,rpass)){rqBrick(q,rpass);}}`}
+    ${tiered ? "let p=vec3i(lo)>>vec3u(5u);if(!rqPageSettled(p)){rqPage(p);}" : `for(var k=0u;k<${(d.factor / 2 + 1) ** 3}u;k++){let q=(vec3i(lo)>>vec3u(3u))+vec3i(i32(k%${d.factor / 2 + 1}u),i32((k/${d.factor / 2 + 1}u)%${d.factor / 2 + 1}u),i32(k/${(d.factor / 2 + 1) ** 2}u));if(nbBrickInRange(q)&&!rqSettled(q,rpass)){rqBrick(q,rpass);}}`}
   }
 }`) : undefined;
   // detailRefresh (a detail engine's, the step's first kernel): the cells of the tiles the mask turned this step get their

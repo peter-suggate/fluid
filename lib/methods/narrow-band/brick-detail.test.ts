@@ -30,6 +30,7 @@ import { detailRegionRefusal, refinementRegionLattice, validateRefinementRegions
 import { refinementRegionFromRecord, refinementRegionRecord, studioRegionSpaceForMethod } from "../../core/editor-refinement-region";
 import { sceneEditRequiresReset } from "../../core/webgpu-renderer";
 import { brickSceneSetup } from "./brick-scene";
+import { BRICK_STATIC_EDIT_K, brickStaticCutBricks } from "./brick-static.wgsl";
 import { brickDetailPools, brickDetailSpecs, DETAIL_RING } from "./brick-detail";
 import { brickDetailPlan, DETAIL_DEFAULT_BUDGET } from "./brick-detail-regions";
 import { brickDetailSceneGaps, brickDetailSubScene } from "./brick-detail-scene";
@@ -113,6 +114,20 @@ test("the stores follow the budget, never the container", () => {
   const p64 = brickDetailPools({ factor: 2, budget: 64 }, 64), p512 = brickDetailPools({ factor: 2, budget: 512 }, 64), q512 = brickDetailPools({ factor: 4, budget: 512 }, 64);
   assert.ok(p512.f >= 512 * 8 && q512.f >= 512 * 27 && p64.f < p512.f);
   assert.ok(p512.c <= p512.f && p512.k <= p512.f);
+  // K follows the solids the budget's F bricks may cut, not the empty sub-scene's own (liquid-sized) pool: the
+  // teaser's rods cut more fine bricks than that pool's 128 (2026-11-23, POOL_K at step ~60 on the teaser).
+  const cut = brickStaticCutBricks(small.setup.staticMask!);
+  assert.equal(small.setup.capacities.k, Math.min(small.setup.capacities.f, cut + BRICK_STATIC_EDIT_K), "K: the cut bricks and the edit slack, at most F");
+  assert.ok(small.setup.capacities.k > 128, `the teaser's rods need more than 128 K slots (${small.setup.capacities.k})`);
+});
+
+test("the fine residency claims a reached tile's keep block (all-h): its bricks and the layer past its + sides", () => {
+  for (const factor of [2, 4] as const) {
+    const detail: BrickDetailLayout = { factor, tiles: [64 / (4 * factor), 64 / (4 * factor), 64 / (4 * factor)], budget: 64, slots: 192 };
+    const L = new BrickLayout({ lattice: [64, 64, 64], box: [64, 64, 64], f: 512, c: 8, b: 16, k: 0, particles: 1024, detail });
+    const code = brickResidencyKernels(L).resDetail!.code;
+    assert.ok(code.includes(`k<${(factor / 2 + 1) ** 3}u`), `factor ${factor}: (factor/2 + 1)^3 bricks a tile, as nbDtlBrickKeep and the F pool`);
+  }
 });
 
 test("the fine scene: the container at h / factor, empty, the solids scaled", () => {
