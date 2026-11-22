@@ -4,11 +4,12 @@ import "../lib/methods";
 import { proceduralSolidField } from "../lib/core/procedural-solid";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
+import { VOXEL_MATERIAL_IDS } from "../lib/core/voxel-scene";
 import { parseScene, serializeScene, validateScene, type SceneDescription } from "../lib/core/model";
 import {
   NBFLIP_DAM_CYLINDERS, NBFLIP_DAM_GRID, NBFLIP_DAM_SCENE_ID, NBFLIP_METHOD_PROFILE,
   NBFLIP_POUR_GRID, NBFLIP_POUR_SCENE_ID, NBFLIP_SIMPLE_DAM_GRID, NBFLIP_SIMPLE_DAM_SCENE_ID,
-  NBFLIP_TEASER_CYLINDER_COUNT, NBFLIP_TEASER_GRID, NBFLIP_TEASER_LATTICE, NBFLIP_TEASER_SCENE_ID,
+  NBFLIP_TEASER_CYLINDER_COUNT, NBFLIP_TEASER_GRID, NBFLIP_TEASER_SCENE_ID,
   NBFLIP_WAVES_GRID, NBFLIP_WAVES_SCENE_ID, nbflipTeaserCylinderCentre,
 } from "../lib/core/nbflip-paper-scenes";
 
@@ -46,32 +47,32 @@ const cells = (scene: SceneDescription, point_m: { x: number; y: number; z: numb
   return [point_m.x / h + nx / 2, point_m.y / h, point_m.z / h + nz / 2];
 };
 
-test("NB-FLIP Figure 9 stands the published 200^3 box behind solid, with seven cylinders", () => {
-  const scene = paperScene(NBFLIP_TEASER_SCENE_ID), margin = (NBFLIP_TEASER_LATTICE[0] - NBFLIP_TEASER_GRID[0]) / 2;
+test("NB-FLIP Figure 9 is the published 200^3 tank, its walls the container's, with seven cylinders", () => {
+  const scene = paperScene(NBFLIP_TEASER_SCENE_ID);
   assert.deepEqual(NBFLIP_TEASER_GRID, [200, 200, 200]);
-  assert.deepEqual(lattice(scene), [...NBFLIP_TEASER_LATTICE]);
+  assert.deepEqual(lattice(scene), [...NBFLIP_TEASER_GRID]);
   assert.ok(Math.abs(fall(scene) - 0.6 * (24 / 60) ** 2) < 1e-12, "the footage's physical scale at 60 Hz");
   assert.equal(scene.numerics.fixedDt_s, 1 / 60);
   assert.equal(scene.numerics.maxDt_s, 1 / 60);
   assert.equal(scene.duration_s, 248 * (1 / 24), "the physical take duration is unchanged");
-  // The liquid's box is the published grid: solid begins exactly outside it.
-  for (const y of [0, 100, 199]) {
-    assert.ok(solid(scene, [margin - 1, y, 112]) && !solid(scene, [margin, y, margin]));
-    assert.ok(solid(scene, [margin + 200, y, 112]) && !solid(scene, [margin + 199, y, margin + 199]));
-    assert.ok(solid(scene, [112, y, margin - 1]) && solid(scene, [112, y, margin + 200]));
-  }
-  assert.ok(solid(scene, [112, 200, 112]) && !solid(scene, [112, 199, 112]), "the ceiling is at the grid's height");
+  // The tank's walls are the container's: its shell lies outside the box, the only solid inside is the cylinders,
+  // and nothing is cut away.
+  const inside = (patch: SceneDescription["solidVoxels"][number]) => patch.minimum.every((low, axis) => low < NBFLIP_TEASER_GRID[axis]!)
+    && patch.maximumExclusive.every((high) => high > 0);
+  assert.ok(scene.solidVoxels.filter(inside).every((patch) => patch.operation === "fill" && patch.materialId === VOXEL_MATERIAL_IDS.cylinder));
+  assert.equal(scene.cutaway, undefined);
+  for (const y of [0, 100, 199]) assert.ok(!solid(scene, [0, y, 0]) && !solid(scene, [199, y, 199]) && !solid(scene, [199, y, 0]));
   // The pool and the dam, in cells of the published grid.
-  assert.equal(scene.container.fillFraction * NBFLIP_TEASER_LATTICE[1], 40);
+  assert.equal(scene.container.fillFraction * NBFLIP_TEASER_GRID[1], 40);
   const [dam] = scene.fluid.initialLiquidVolumes!;
   assert.ok(dam && dam.shape === "box");
   const low = cells(scene, dam.min_m), high = cells(scene, dam.max_m);
   for (const axis of [0, 1, 2]) {
-    assert.ok(Math.abs(low[axis]! - [margin, 40, margin][axis]!) < 1e-9 && Math.abs(high[axis]! - [margin + 60, 120, margin + 60][axis]!) < 1e-9);
+    assert.ok(Math.abs(low[axis]! - [0, 40, 0][axis]!) < 1e-9 && Math.abs(high[axis]! - [60, 120, 60][axis]!) < 1e-9);
   }
   // Each cylinder is solid on its axis to one cell above the dam and open beside it.
   for (let index = 0; index < NBFLIP_TEASER_CYLINDER_COUNT; index++) {
-    const [x, z] = nbflipTeaserCylinderCentre(index).map((value) => Math.floor(value + margin)) as [number, number];
+    const [x, z] = nbflipTeaserCylinderCentre(index).map(Math.floor) as [number, number];
     assert.ok(solid(scene, [x, 0, z]) && solid(scene, [x, 120, z]) && !solid(scene, [x, 121, z]), `cylinder ${index}`);
     assert.ok(solid(scene, [x + 4, 60, z]) && !solid(scene, [x + 6, 60, z]) && !solid(scene, [x, 60, z + 6]), `cylinder ${index} has radius 5`);
   }

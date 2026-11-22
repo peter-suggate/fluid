@@ -429,12 +429,6 @@ export function nbflipLettersCamera(): Partial<CameraState> {
 
 /** Table 1: "Fig. 9 / Teaser, 200^3". */
 export const NBFLIP_TEASER_GRID = [200, 200, 200] as const;
-/**
- * The solver's grid. Its pressure hierarchy halves the 4h lattice until that
- * is a few cells across, which 200 = 8 x 25 does not allow and 224 = 32 x 7
- * does: the published box stands in the middle of this one, behind solid.
- */
-export const NBFLIP_TEASER_LATTICE = [224, 224, 224] as const;
 export const NBFLIP_TEASER_CELL_SIZE_M = cellSizeForFall_m(mantaflowFall(NBFLIP_TEASER_GRID));
 /** Rest depth of the pool, in cells. */
 export const NBFLIP_TEASER_POOL_CELLS = 40;
@@ -452,17 +446,19 @@ export const nbflipTeaserCylinderCentre = (index: number): readonly [x: number, 
 
 export function createNbflipTeaser(): SceneDescription {
   const grid = NBFLIP_TEASER_GRID, h = NBFLIP_TEASER_CELL_SIZE_M, [damX, damY, damZ] = NBFLIP_TEASER_DAM_CELLS;
-  const scene = nbflipDomain(NBFLIP_TEASER_SCENE_ID, grid, h, NBFLIP_TEASER_FRAMES, NBFLIP_TEASER_POOL_CELLS, NBFLIP_TEASER_LATTICE);
+  // The container is the published box and its walls are the tank's own (the
+  // brick engine pads 200 to whole pages behind them), so the only solid
+  // voxels are the cylinders: no shell of solid around the box to stamp, cut
+  // or draw.
+  const scene = nbflipDomain(NBFLIP_TEASER_SCENE_ID, grid, h, NBFLIP_TEASER_FRAMES, NBFLIP_TEASER_POOL_CELLS);
   // Run at the UI's 60 Hz step. The footage still defines physical scale and
   // take duration; increasing the sampling rate does not shorten the take.
   scene.numerics = { ...scene.numerics, fixedDt_s: 1 / 60, maxDt_s: 1 / 60 };
-  const [marginX, marginZ] = latticeMargin(grid, NBFLIP_TEASER_LATTICE);
   scene.fluid.initialLiquidVolumes = [liquidBox(grid, h, [0, NBFLIP_TEASER_POOL_CELLS, 0], [damX, damY, damZ])];
   for (let index = 0; index < NBFLIP_TEASER_CYLINDER_COUNT; index++) {
     const [x, z] = nbflipTeaserCylinderCentre(index);
-    scene.solidVoxels.push(...cylinderVoxels(x + marginX, z + marginZ, NBFLIP_TEASER_CYLINDER_RADIUS_CELLS, NBFLIP_TEASER_CYLINDER_HEIGHT_CELLS));
+    scene.solidVoxels.push(...cylinderVoxels(x, z, NBFLIP_TEASER_CYLINDER_RADIUS_CELLS, NBFLIP_TEASER_CYLINDER_HEIGHT_CELLS));
   }
-  scene.cutaway = { eye_m: footageEye(nbflipTeaserCamera()) };
   return scene;
 }
 

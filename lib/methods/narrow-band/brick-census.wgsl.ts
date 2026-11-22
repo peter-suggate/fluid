@@ -1440,7 +1440,9 @@ fn cdBodyHeld(t:vec3i)->bool{
 }
 ` : ""}fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   let t=xTileOf(cs,i);
-  if(!nbTileInLattice(t)){return;}
+  // A tile past the box (a lattice padded to whole pages past the container's walls) is no tile, as one past the
+  // lattice: it never bands, so no ring brick lies more than a brick past the walls (uCache's window, 0x55430001).
+  if(!(all(t>=vec3i(0))&&all(4*t<${BOX_TOKEN}))){return;}
   // A tiered step's head with the real D (cfg.z = 1, cfg.w = 3: brick-region-heat.wgsl.ts runs): the activity heat
   // (the old particleHeat, every live tile's: the last heat cooled at 4/s, 2 where the need rule triggers; F's
   // lHeatNow on its own tiles, the same words) and the deep keep. Without it (cfg.w = 1) D = 0: no tile is deep.
