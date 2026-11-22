@@ -11,8 +11,12 @@ import type { SceneDescription } from "../../core/model";
 import { refinementRegionCellBounds, refinementRegionDetailFactor, refinementRegionLattice, sceneDetailRegions } from "../../core/refinement-regions";
 import type { Vec3 } from "./brick-engine";
 
-/** The automatic detail's default budget (mask tiles: parent 4h tiles; a fine brick each at ×2, eight at ×4). */
-export const DETAIL_DEFAULT_BUDGET = 512;
+/**
+ * The automatic detail's default budget (mask tiles: parent 4h tiles; a fine brick each at ×2, eight at ×4). 128 holds
+ * a crown's rim (cm12-figure-6) and the teaser's rod splashes at about a tenth of the parent's step on the teaser; the
+ * fine engine's floor (~5 ms, launch-latency-bound dispatches) dominates below it (2026-11-23).
+ */
+export const DETAIL_DEFAULT_BUDGET = 128;
 
 export interface DetailPlan {
   /** The fine engine's refinement: h / factor. */

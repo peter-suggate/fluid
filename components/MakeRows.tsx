@@ -9,6 +9,7 @@ import { ToolstripMenuButton, ToolstripMenuItem, useToolstripSection } from "./t
 import { useEditorHost } from "../lib/core/session/host-context";
 import { patchCommitter } from "./EntityOptions";
 import type { SceneDescription } from "../lib/core/model";
+import { DETAIL_DEFAULT_BUDGET } from "../lib/methods/narrow-band/brick-detail-regions";
 import { studioRegionSpaceForMethod } from "../lib/core/editor-refinement-region";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { voxelToolGroups } from "../lib/core/editor-voxel-tool-actions";
@@ -72,8 +73,8 @@ const AUTOMATIC_DETAIL_CHOICES = [
   { factor: 2, label: "Detail \u00d72", hint: "The fastest-deforming surface (a splash's crown, a breaking sheet) runs again at half the cell size, within the budget." },
   { factor: 4, label: "Detail \u00d74", hint: "The fastest-deforming surface runs again at a quarter of the cell size, within the budget: each tile costs eight times \u00d72's." },
 ] as const;
-/** The budgets on offer (parent 4h tiles a step; brick-detail-regions.ts DETAIL_DEFAULT_BUDGET is 512). */
-const AUTOMATIC_DETAIL_BUDGETS = [256, 512, 1024, 2048] as const;
+/** The budgets on offer (parent 4h tiles a step; the default, DETAIL_DEFAULT_BUDGET, is the second). */
+const AUTOMATIC_DETAIL_BUDGETS = [64, DETAIL_DEFAULT_BUDGET, 256, 512, 1024] as const;
 
 /**
  * Whether the brick engine runs automatic detail (`fluid.automaticDetail`, brick-detail-regions.ts): every step the
@@ -86,7 +87,7 @@ function AutomaticDetailMenu({ scene }: { scene: SceneDescription }) {
   const [open, setOpen] = useState(false);
   const { claim } = useToolstripSection("automatic-detail", () => setOpen(false));
   const raise = (next: boolean) => { claim(next); setOpen(next); };
-  const current = scene.fluid.automaticDetail?.factor, budget = scene.fluid.automaticDetail?.budget ?? 512;
+  const current = scene.fluid.automaticDetail?.factor, budget = scene.fluid.automaticDetail?.budget ?? DETAIL_DEFAULT_BUDGET;
   const set = (label: string, next: { factor: 2 | 4; budget?: number } | undefined) => {
     const { automaticDetail: _previous, ...fluid } = scene.fluid;
     commit(`Automatic detail ${label}`, { fluid: next ? { ...fluid, automaticDetail: next } : fluid }, { reseed: true });
@@ -108,7 +109,7 @@ function AutomaticDetailMenu({ scene }: { scene: SceneDescription }) {
       onClick={() => {
         raise(false);
         if (choice.factor === current) return;
-        set(choice.label, choice.factor ? { factor: choice.factor, ...(budget !== 512 ? { budget } : {}) } : undefined);
+        set(choice.label, choice.factor ? { factor: choice.factor, ...(budget !== DETAIL_DEFAULT_BUDGET ? { budget } : {}) } : undefined);
       }}
     />)}
     {current ? AUTOMATIC_DETAIL_BUDGETS.map((n) => <ToolstripMenuItem
@@ -120,7 +121,7 @@ function AutomaticDetailMenu({ scene }: { scene: SceneDescription }) {
       onClick={() => {
         raise(false);
         if (n === budget) return;
-        set(`budget ${n}`, { factor: current, ...(n !== 512 ? { budget: n } : {}) });
+        set(`budget ${n}`, { factor: current, ...(n !== DETAIL_DEFAULT_BUDGET ? { budget: n } : {}) });
       }}
     />) : null}
   </ToolstripMenuButton>;

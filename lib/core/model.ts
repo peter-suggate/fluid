@@ -452,7 +452,7 @@ export interface SceneDescription {
     /**
      * Brick engine: automatic detail (brick-detail-regions.ts). A nested detail engine at h / factor runs on the
      * parent's 4h tiles whose surface deforms fastest (a splash's crown, a sheet breaking up), chosen every step,
-     * at most `budget` tiles (default 512) plus the authored detail regions'. Absent: none.
+     * at most `budget` tiles (default 128) plus the authored detail regions'. Absent: none.
      */
     automaticDetail?: { factor: 2 | 4; budget?: number };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
