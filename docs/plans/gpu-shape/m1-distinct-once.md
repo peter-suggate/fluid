@@ -413,3 +413,62 @@ m6-residency.md has not landed):
 - pmgCoarsenTop and pmgTopCycle are 1024-lane, few-group passes. Their cost is serial latency, not residency.
 
 No candidate remains for this pattern.
+
+## Register diet: lAdvect, nbOperator, pMove (lane A2, 2026-11-24, sixth task)
+
+**Verdict: no exact variant crossed a cap step, so nothing was timed and there is no lib change.**
+
+The baselines come from regcap on the 8a50eb74 dumps:
+
+| kernel | cap |
+|---|---|
+| lAdvect | 384 |
+| nbOperator | 576 (dam), 512 (paddleboats) |
+| pMove | 576 (dam), 512 (paddleboats) |
+
+The work is in fluid-scratch/gpu-shape/m1a2/t4/: rc.py (one substitution, one cap) and edit-*.py.
+
+**lAdvect: the departure cubic holds the peak, through two independent copies.** Removing either copy alone leaves
+384; removing both gives 448.
+- lStencilCubic: the eight lsSlot values are live across the 64 taps, with a three-level select a tap.
+  - edit-lpack.py packs them two to a u32 (16 bits: an F slot is under NB_FCAP ≤ 10240 in the four scenes).
+  - With the fallback removed, this gives 448 on dam and paddleboats (384 without the packing).
+- nbfCubicLimited, the fallback when lStencil misses: 64 lPhi0 taps, each a directory walk plus fgPhi's tiered
+  path inlined. Stubbing only fgPhi in lPhi0 gives 448. Inside it, the absent vertex's eight-corner C interpolant is
+  what counts (Read4 alone: 448).
+- These exact rewrites all stay at 384:
+  - lPhiAbsent: fgPhi as it resolves where no slot holds v, without the repeated walks;
+  - a pairwise interpolant sum;
+  - wy and wz recomputed where used;
+  - opaque loop bounds;
+  - the fallback read through the packed stencil slots.
+- So 448 needs the fallback out of the kernel (fission). Its frequency was not measured, and +17% threads at the
+  ~0.6 elasticity is about the 10% go line.
+
+**nbOperator: no single region.**
+- The six-face loop, the eight-vertex guard, and poStart at both sites (own cell and face halo) each hold 576 on
+  their own.
+- The pieces only cross together, and not exactly. On a trivial face loop:
+  - guard and halo start removed: 704;
+  - plus the own start: 832.
+- These exact rewrites all stay at 576:
+  - one poStart call site (a loop over halo then own);
+  - K/KU stored in the loop instead of two live vec3;
+  - pairwise poCentreG and poRootPhi4 with no array of 8;
+  - the rate load moved late.
+
+**pMove: the peak is spread over the post-G2P part.**
+- Truncations, with p filed: cut before G2P 832; cut before the drift 640; cut before the endpoint 576.
+- No call family crosses alone:
+  - all three fgSampleVel;
+  - fgDepth and the separation shift;
+  - pHeat;
+  - pMassDepth;
+  - the merge;
+  - the split;
+  - pCount.
+- Reloading `sep` late: 576.
+
+**Caveat.** The caps move against what each edit removes (for example, pMove's merge removed: 512, and an
+early-return probe: 512). So single-cap readings near a step are allocation noise. The conclusions above rest on
+consistent multi-edit results.
