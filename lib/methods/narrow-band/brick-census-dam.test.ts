@@ -204,6 +204,11 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       defWords[at + 3] = bitsOf(c === "width" ? 0 : c === "negative" ? -4 : hOld(t) ? 1 : 4);
       // TC's wet bit (R2 demotes only a tile its certificate saw liquid in): on a hashed 3/4 of the tiles.
       defWords[CENSUS.STRIDE * cs + CENSUS.TC + 16 * local8(t) + 8] = (Math.imul(i + 1, 0x9e3779b1) >>> 29) & 3 ? 1 : 0;
+      // TC word 15 (R2's velocity test; the deformation stands in again) and the mean velocity (R2's importance): still,
+      // but vertical at twice the importance budget (dt |u| / 4h = 0.16) on a hashed 1/8 of the tiles.
+      const tc = CENSUS.STRIDE * cs + CENSUS.TC + 16 * local8(t), r = Math.imul(i + 7, 0x85ebca6b) >>> 0;
+      defWords[tc + 15] = bitsOf(planDeformation(t)); defWords[tc] = bitsOf(0); defWords[tc + 2] = bitsOf(0);
+      defWords[tc + 1] = bitsOf((r >>> 29) === 0 ? fr(0.16 * 4 * h / dt) : 0);
     }
     e.write("census", 0, defWords);
     // The old engine's split vertices (4-aligned h-closure vertices whose base disagrees with the h
@@ -341,32 +346,63 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       if (m === 1) replayedRegions++;
       if ((m === 1) !== modeR.has(rKey(R))) modeWrong++;
     }
-    // R2 (lane E, a stated deviation): at a step's head a calm band tile is 4h, dt error / h <= 0.08 (ncCalm) on the
-    // certificate copy this census read (the supplied DEF words); an unknown copy (stale key, width <= 0) is never calm.
+    // R2 (lane E, a stated deviation; 2026-11-23 at the 4h owner's scale): at a step's head a band tile is 4h where its
+    // certificate copy (the supplied DEF words) is valid and either saw no liquid or dt e / h <= 0.08 on TC word 15
+    // (ncCalm); no thin trigger in this census's FIN; an h tile's curvature shift (4/3) h div n of the tile mean normals
+    // <= 0.08 (ncCurveShift: an h tile's normal its VOL word, which brick-census.test.ts pins, a 4h tile's the gradient
+    // of its 8 stored corners); and dt |u.n| / 4h <= 0.08 over the tile and the faces whose surface runs on into it or moves towards it
+    // (ncSurfaceQuiet).
     const f32w = (u: number) => new Float32Array(new Uint32Array([u]).buffer)[0]!;
     const calm = (cs: number, l: number) => { const o = S * cs + CENSUS.DEF + 4 * l;
-      if (cens[o + 2] !== pageKeys.get(cs)! + 1 || !(f32w(cens[o + 3]!) > 0) || (cens[S * cs + CENSUS.TC + 16 * l + 8]! & 1) === 0) return false;
-      const e = f32w(cens[o + 1]!); return e < 3.402823e38 && fr(fr(fr(meta.dt) * e) / fr(meta.h)) <= fr(0.08); };
-    // R2's shape guard: calm means 4h represents both the velocity and the shape, so a tile whose FIN (this census's)
-    // carries its shape or thin trigger is never calm.
-    const shaped = (cs: number, l: number) => (rCensus[S * cs + CENSUS.FIN + l]! & (((1 << 16) | (1 << 17)) >>> 0)) !== 0;
-    let calmDemoted = 0, calmHeld = 0, shapeGuarded = 0;
+      if (cens[o + 2] !== pageKeys.get(cs)! + 1 || !(f32w(cens[o + 3]!) > 0)) return false;
+      if ((cens[S * cs + CENSUS.TC + 16 * l + 8]! & 1) === 0) return true;
+      const e = f32w(cens[S * cs + CENSUS.TC + 16 * l + 15]!); return e < 3.402823e38 && fr(fr(fr(meta.dt) * e) / fr(meta.h)) <= fr(0.08); };
+    const thin = (cs: number, l: number) => (rCensus[S * cs + CENSUS.FIN + l]! & (1 << 17)) !== 0;
+    const unpack = (w: number) => [0, 8, 16, 24].map(b => Math.max(((((w >>> b) & 255) << 24) >> 24) / 127, -1));
+    const corner = (q: V3) => { const v = cBuf.get("PHI")![BRICK_STRIDE * s.pages.get(key(shr(q, 3)))! + local8(q)]!; return fr(v * h); };
+    const tileNormal = (q: V3): number[] => {
+      if (!q.every(v => v >= 0 && v < T)) return [0, 0, 0, 0];
+      const cs = s.pages.get(key(shr(q, 3)))!, l = local8(q);
+      if (hOld(q)) { if ((rCensus[S * cs + CENSUS.FIN + l]! & CROSSES) === 0) return [0, 0, 0, 0]; const w = rCensus[S * cs + CENSUS.VOL + l]!; return w === 0 ? [0, 0, 0, 0] : unpack(w); }
+      const v = Array.from({ length: 8 }, (_, k) => corner([q[0] + (k & 1), q[1] + ((k >> 1) & 1), q[2] + (k >> 2)]));
+      if (!(Math.min(...v) < 0 && Math.max(...v) >= 0)) return [0, 0, 0, 0];
+      const g = [v[1]! + v[3]! + v[5]! + v[7]! - v[0]! - v[2]! - v[4]! - v[6]!, v[2]! + v[3]! + v[6]! + v[7]! - v[0]! - v[1]! - v[4]! - v[5]!, v[4]! + v[5]! + v[6]! + v[7]! - v[0]! - v[1]! - v[2]! - v[3]!];
+      const m = Math.hypot(...g); return m > 0 ? [g[0]! / m, g[1]! / m, g[2]! / m, 1] : [0, 0, 0, 0];
+    };
+    const curveShift = (t: V3, cs: number, l: number) => {
+      const w = rCensus[S * cs + CENSUS.VOL + l]!; if (w === 0) return 0;
+      const n0 = unpack(w); let div = 0;
+      for (let a = 0; a < 3; a++) {
+        const lo = [...t] as V3, hi = [...t] as V3; lo[a]--; hi[a]++; const nl = tileNormal(lo), nh = tileNormal(hi);
+        if (nl[3]! > 0.5 && nh[3]! > 0.5) div += 0.5 * (nh[a]! - nl[a]!); else if (nh[3]! > 0.5) div += nh[a]! - n0[a]!; else if (nl[3]! > 0.5) div += n0[a]! - nl[a]!;
+      }
+      return Math.abs(div) / 3;
+    };
+    const rate = (q: V3, e: number[] = [0, 0, 0]) => {
+      const n = tileNormal(q); if (n[3]! < 0.5) return 0;
+      const o = S * s.pages.get(key(shr(q, 3)))! + CENSUS.TC + 16 * local8(q);
+      const v = f32w(cens[o]!) * n[0]! + f32w(cens[o + 1]!) * n[1]! + f32w(cens[o + 2]!) * n[2]!, d = n[0]! * e[0]! + n[1]! * e[1]! + n[2]! * e[2]!;
+      return Math.abs(d) <= 0.75 || v * d > 0 ? Math.abs(v) : 0;
+    };
+    const quiet = (t: V3) => { let r = rate(t); for (let a = 0; a < 3; a++) { const lo = [...t] as V3, hi = [...t] as V3, e = [0, 0, 0]; e[a] = 1; lo[a]--; hi[a]++; r = Math.max(r, rate(lo, e), rate(hi, e.map(x => -x))); } return dt * r / (4 * h) <= 0.08; };
+    let calmDemoted = 0, calmHeld = 0, shapeGuarded = 0, curveKept = 0, loudKept = 0;
     for (let i = 0; i < n; i++) {
       const t = coord(i), cs = s.pages.get(key(shr(t, 3)))!, l = local8(t);
       const want = (rSet[L.set.want + 16 * cs + (l >> 5)]! >>> (l & 31)) & 1;
       // The hysteresis: a calm h tile only at its second calm head (calmPrev), a calm 4h tile at once.
-      const calmRaw = fx.decided[i] && calm(cs, l), isCalm = calmRaw && !shaped(cs, l); if (calmRaw && !isCalm) shapeGuarded++;
+      const calmRaw = fx.decided[i] && calm(cs, l), notThin = calmRaw && !thin(cs, l), flat = notThin && (!hOld(t) || curveShift(t, cs, l) <= 0.08), isCalm = flat && quiet(t);
+      if (calmRaw && !notThin) shapeGuarded++; if (notThin && !flat) curveKept++; if (flat && !isCalm) loudKept++;
       const expected = isCalm && (!hOld(t) || calmPrev(cs, l)) ? 0 : fx.decided[i];
       if (expected !== fx.decided[i]) calmDemoted++; else if (isCalm) calmHeld++;
       if (want !== expected) { wantWrong++; if (wantMiss.length < 16) wantMiss.push(`${t}${fx.deep[i] ? " deep" : ""}${splitTiles.has(i) ? " split-near" : ""}: ${want} vs ${expected}`); }
       else if (fx.mode[i] === 1) deepWant++;
     }
-    const replay = { oldReplayedRegions: modeR.size, oldReplayedTiles: 64 * modeR.size, replayedRegions, modeWrong, replayedTilesWantEqual: deepWant, wantWrong, wantMiss, calmDemoted, calmHeld, shapeGuarded };
+    const replay = { oldReplayedRegions: modeR.size, oldReplayedTiles: 64 * modeR.size, replayedRegions, modeWrong, replayedTilesWantEqual: deepWant, wantWrong, wantMiss, calmDemoted, calmHeld, shapeGuarded, curveKept, loudKept };
     console.log(JSON.stringify({ ...report, replay }, null, 1));
     e.destroy();
     assert.equal(modeWrong, 0, "every region replays as the old engine's did");
     assert.equal(wantWrong, 0, `WANT with replay is the old WANT: ${wantMiss.join("; ")}`);
-    assert.ok(calmDemoted > 0 && shapeGuarded > 0, `R2's branches reached: ${calmDemoted} demoted, ${shapeGuarded} kept by the shape guard`);
+    assert.ok(calmDemoted > 0 && curveKept > 0 && loudKept > 0, `R2's branches reached: ${calmDemoted} demoted, ${shapeGuarded} thin, ${curveKept} curved, ${loudKept} loud`);
     // ---- Verdicts: on the tiles that are not deep COLD, every field exact under one φ choice or the other (or near a split vertex), and the reach.
     for (const [k, v] of hard) assert.equal(v.length, 0, `${k}: ${v.length} non-deep tiles differ under both φ choices, away from a split vertex: ${v.slice(0, 16).map(i => coord(i).join(",")).join("; ")}`);
     for (const r of results) assert.equal(r.counters.reach[0], r.counters.reach[1], `the reach (${r.variant})`);

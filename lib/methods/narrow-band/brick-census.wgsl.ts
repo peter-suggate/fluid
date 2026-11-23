@@ -68,13 +68,15 @@
  *   the old engine's h storage of a band tile is resident by construction, ours is the ring. The residency rule
  *   itself (pageSeed and lrAsk) is brick-residency.wgsl.ts, which reads this census's NEAR, FIN and WANT words.
  * - R2 (lane E, the user's aggressive fine-tile retirement, 2026-11-16): at a tiered head with the real D a band tile
- *   whose last certificate is calm is 4h, joined or not (ncCalm: the 4h model represents the tile's velocity within
- *   the 4h owner's budget, dt error / h <= UNIFORM_TILE_UPDATE_BUDGET_H, the certificate's error word). Calm means 4h
- *   represents both the velocity and the shape: a tile whose FIN carries its shape or thin trigger is never calm,
- *   and an h tile is calm only where demoting it moves its surface by at most the same budget on average,
- *   |V_4h − V_h| ≤ UNIFORM_TILE_UPDATE_BUDGET_H · max(A, 1) (VOL; the coordinator's ruling 2026-11-17, lane F's
- *   criterion and Float64 oracle: a plane gives 0, a ball of radius r about −(16/12)(2/r) cells, so a curved calm
- *   surface 4h would shrink stays h; the probe's ball, r 14.42, lost 4.3% in 10 steps at rest without it).
+ *   whose last certificate is calm is 4h, joined or not. Every test is measured at the 4h owner's scale from tile
+ *   means, the same on either tier (2026-11-23: per-cell maxima read the h particles' own cell-scale noise as detail,
+ *   so flat water kept itself h): ncCalm, the second difference of the tile mean velocities within the transport
+ *   budget, dt error / h <= UNIFORM_TILE_UPDATE_BUDGET_H; ncCurveShift, the shift a 4h surface's curvature makes,
+ *   (4/3) h div n of the tile mean normals, within the same budget (the coordinator's ruling 2026-11-17 and lane F's
+ *   oracle: a plane 0, a ball of radius r (16/12)(2/r) cells; the probe's ball, r 14.42, lost 4.3% in 10 steps at
+ *   rest without it); ncSurfaceQuiet, the surface's normal speed about the tile within the budget of a 4h cell a step
+ *   (the importance: only moving surface, a wave's faces or a splash, is worth h); and no thin trigger (4h cannot
+ *   hold a sheet: falling-water-torus lost all its liquid by step 10 without it, 2026-11-17).
  * - Counters: the old census words that feed no decision are not kept; the kept ones are H.CENSUS_*.
  */
 import { ARGS, BOX_TOKEN, BrickLayout, H, LIST, brickAbiWGSL, resolveBox } from "./brick-abi";
@@ -145,11 +147,10 @@ export const CENSUS = {
  *   hysteresis (lane E, coordinator 2026-11-16). Bit i is whether tile i was a calm band tile (ncCalm) at the last
  *   tiered head, written at every tiered head only; CALM_KEY r is the page key + 1 its workgroup wrote them under, so a
  *   reused slot's bits are unknown, and unknown is not calm;
- * - VOL, a word a tile (f32): R2's volume test (lane E, the coordinator's ruling 2026-11-17), censusFine's for an
- *   h-owned tile at every tiered census: δ = (V_4h − V_h) / max(A, 1) cells, V_h the six-tetrahedron fill of the
- *   tile's 64 cells (level-set-fill.wgsl.ts), V_4h = 64 · the fill of its 8 corners (what demotion keeps), A its cells
- *   whose centre φ (the mean of their 8 vertices) is under half a cell (the smeared-delta area, cells²); 0 for a tile
- *   with no crossing cell. Read only where the tile is h-owned (a 4h tile's word is stale);
+ * - VOL, a word a tile (pack4x8snorm): R2's curvature test, censusFine's for an h-owned tile at every tiered census:
+ *   the tile's mean surface normal (the mean of its crossing cells' unit trilinear normals) with w = 1, 0 for a tile
+ *   with no crossing cell. Read only where the tile is h-owned (a 4h tile's word is stale: ncTileNormal takes a 4h
+ *   tile's from its corners);
  * - RCROSS and RGAP, as CROSS and GAP: the tile's crossing cells and gap as its classification stored them (the old
  *   CC_RECORD words), before censusImportance edits CROSS and GAP in place. A replayed tile publishes them. */
 export const RG = {
@@ -991,14 +992,75 @@ fn ncError(t:vec3i,s:u32,i:u32)->f32{
   if(census[o+2u]!=nbCRec(s,NB_REC_KEY)+1u||bitcast<f32>(census[o+3u])<=0.0){return NC_PLAN_MAX;}
   return bitcast<f32>(census[o+1u]);
 }
+// R2's curvature test (the coordinator's ruling 2026-11-17 bounds the volume a demotion loses; 2026-11-23 measured at
+// the 4h owner's scale): a 4h surface's curvature moves it by (4/3) h κ a step (lane F's oracle: a ball of radius r,
+// (16/12)(2/r) cells), κ = div n of the tile mean normals 4h apart. A tile's normal is the mean of its crossing cells'
+// unit normals (an h tile: censusFine's VOL word), or the gradient of its 8 corners (a 4h tile), so the h particles'
+// cell-scale roughness averages out of it while a 4h-scale curve does not. An axis with no crossing neighbour is
+// one-sided; with none, 0. Tier-invariant: the h tile's own normal is its mean normal either way.
+fn ncTileNormal(q:vec3i)->vec4f{
+  if(!nbTileInLattice(q)){return vec4f(0.0);}
+  let s=ncPageSlot(q>>vec3u(3u));if(s==NB_NONE){return vec4f(0.0);}
+  let i=ncTileLocal(q);
+  if(nbTileH(s,i)){
+    if((ncFin(s,i)&NC_CROSSES)==0u){return vec4f(0.0);}
+    let w=census[NC_S*s+${CENSUS.VOL}u+i];if(w==0u){return vec4f(0.0);}
+    return unpack4x8snorm(w);
+  }
+  var v:array<f32,8>;var lo=3.0e38;var hi=-3.0e38;
+  for(var k=0u;k<8u;k++){v[k]=ncLoadCorner(4*q+4*vec3i(ncCorner(k,2u)));lo=min(lo,v[k]);hi=max(hi,v[k]);}
+  if(!(lo<0.0&&hi>=0.0)){return vec4f(0.0);}
+  let g=vec3f(v[1]+v[3]+v[5]+v[7]-v[0]-v[2]-v[4]-v[6],v[2]+v[3]+v[6]+v[7]-v[0]-v[1]-v[4]-v[5],v[4]+v[5]+v[6]+v[7]-v[0]-v[1]-v[2]-v[3]);
+  let m=length(g);if(!(m>0.0)){return vec4f(0.0);}
+  return vec4f(g/m,1.0);
+}
+// The surface's normal speed at tile q (m/s) seen from the tile across direction e (unit, from q towards it): |its mean
+// velocity (TC, the certificate's) . its mean normal| where the surface runs on into that tile (|n . e| <= 3/4: a
+// crest's faces cover the crest) or moves towards it ((u . n)(n . e) > 0: a rising surface covers the air above, a
+// falling one the liquid below); 0 otherwise, and where no surface crosses q. e = 0 is q itself. Still or sliding flat
+// water reads 0; a passing wave's faces read c times their slope; a rippled sheet's surface does not cover the air
+// above where it falls away from it.
+fn ncNormalRate(q:vec3i,e:vec3f)->f32{
+  let n=ncTileNormal(q);if(n.w<0.5){return 0.0;}
+  let s=ncPageSlot(q>>vec3u(3u));let o=NC_S*s+${CENSUS.TC}u+16u*ncTileLocal(q);
+  let u=vec3f(bitcast<f32>(census[o]),bitcast<f32>(census[o+1u]),bitcast<f32>(census[o+2u]));
+  let v=dot(u,n.xyz);let d=dot(n.xyz,e);
+  if(!(abs(d)<=0.75||v*d>0.0)){return 0.0;}
+  let r=abs(v);return select(0.0,r,r<3.0e38);
+}
+// R2's importance (2026-11-23, the user's "only the wave should have fine particles"): a tile is calm only where the
+// surface about it moves along its normal by at most the transport budget of its 4h owner's cell a step: its own rate
+// and its 6 face neighbours' towards it (ncNormalRate). A long swell's surface rises and falls slowly (c times a small
+// slope); a wave's faces move 4h-cell fractions a step.
+fn ncSurfaceQuiet(t:vec3i)->bool{
+  var r=ncNormalRate(t,vec3f(0.0));
+  for(var a=0u;a<3u;a++){var e=vec3i(0);e[a]=1;let f=vec3f(e);r=max(r,max(ncNormalRate(t-e,f),ncNormalRate(t+e,-f)));}
+  return ncDt()*r/(4.0*ncH())<=${UNIFORM_TILE_UPDATE_BUDGET_H};
+}
+fn ncCurveShift(t:vec3i,s:u32,i:u32)->f32{
+  let w=census[NC_S*s+${CENSUS.VOL}u+i];if(w==0u){return 0.0;}
+  let n0=unpack4x8snorm(w);var div=0.0;
+  for(var a=0u;a<3u;a++){
+    var e=vec3i(0);e[a]=1;let lo=ncTileNormal(t-e);let hi=ncTileNormal(t+e);
+    if(lo.w>0.5&&hi.w>0.5){div+=0.5*(hi[a]-lo[a]);}
+    else if(hi.w>0.5){div+=hi[a]-n0[a];}
+    else if(lo.w>0.5){div+=n0[a]-lo[a];}
+  }
+  // div n = div / 4h; the shift (4/3) h div n, cells.
+  return abs(div)/3.0;
+}
 fn ncCalm(t:vec3i,s:u32,i:u32)->bool{
-  // Tier-invariant (lane E, coordinator 2026-11-16): an h tile reads the error it would read as a 4h owner (TC word 15,
-  // the region heat's width-4 tileErrorOf under the same DEF validity), so a demoted tile is not re-refined by a
-  // stricter test; a 4h tile's DEF error is already the width-4 one.
+  // Tier-invariant and at the 4h owner's scale (2026-11-23): both tiers read TC word 15, the second difference of the
+  // tile mean velocities 4h apart (certError's), the interpolation error of the 4h model itself. Each mean averages the
+  // tile's samples, so the h particles' cell-scale velocity noise (which the largest of 64 per-cell defects read as
+  // error, keeping flat water h) does not count. A tile whose valid certificate saw no liquid (a dry band tile above
+  // the surface) has no velocity of its own to represent: it is calm on the velocity test, and the caller's surface
+  // importance (ncSurfaceQuiet, over its neighbours) decides it. No certificate is never calm.
   var e=ncError(t,s,i);
-  if(e<NC_PLAN_MAX&&nbTileH(s,i)){e=max(e,bitcast<f32>(census[NC_S*s+${CENSUS.TC}u+16u*i+15u]));}
-  if(!(e<NC_PLAN_MAX)||(census[NC_S*s+${CENSUS.TC}u+16u*i+8u]&1u)==0u){return false;}
-  return ncDt()*e/ncH()<=${UNIFORM_TILE_UPDATE_BUDGET_H};
+  if(!(e<NC_PLAN_MAX)){return false;}
+  if((census[NC_S*s+${CENSUS.TC}u+16u*i+8u]&1u)==0u){return true;}
+  e=bitcast<f32>(census[NC_S*s+${CENSUS.TC}u+16u*i+15u]);
+  return e<NC_PLAN_MAX&&ncDt()*e/ncH()<=${UNIFORM_TILE_UPDATE_BUDGET_H};
 }
 `;
 
@@ -1048,23 +1110,28 @@ var<workgroup> tileReach:array<atomic<u32>,6>;
 var<workgroup> tileError:atomic<u32>;
 var<workgroup> tileDeep:array<atomic<u32>,2>;
 var<workgroup> mixedTile:atomic<u32>;
-// R2's volume test (VOL): the tile's 64 cell fills (fixed point, 2^-20 of a cell) and its smeared-delta area.
-var<workgroup> cfVolH:atomic<u32>;
-var<workgroup> cfArea:atomic<u32>;
-// Every lane, its cell: the six-tetrahedron fill of its 8 staged vertices, and whether its centre φ (their mean) is
-// within half a cell of the surface.
-fn cfVolumeCell(lane:u32){
-  let l=ncCorner(lane,4u);var v:array<f32,8>;var m=0.0;
-  for(var k=0u;k<8u;k++){let q=l+ncCorner(k,2u);v[k]=ncTileRaw[q.x+5u*q.y+25u*q.z];m+=v[k];}
-  atomicAdd(&cfVolH,u32(round(fill(v)*1048576.0)));
-  if(abs(0.125*m)<0.5*ncH()){atomicAdd(&cfArea,1u);}
+// R2's curvature test (VOL): the tile's mean surface normal, the sum of its crossing cells' unit normals (fixed point,
+// 2^-12) and their count.
+var<workgroup> cfNormal:array<atomic<i32>,3>;
+var<workgroup> cfNormals:atomic<u32>;
+// Every lane, its cell: where its 8 staged vertices change sign, the unit normal of their trilinear gradient at the cell
+// centre.
+fn cfNormalCell(lane:u32){
+  let l=ncCorner(lane,4u);var v:array<f32,8>;var lo=3.0e38;var hi=-3.0e38;
+  for(var k=0u;k<8u;k++){let q=l+ncCorner(k,2u);v[k]=ncTileRaw[q.x+5u*q.y+25u*q.z];lo=min(lo,v[k]);hi=max(hi,v[k]);}
+  if(!(lo<0.0&&hi>=0.0)){return;}
+  let g=vec3f(v[1]+v[3]+v[5]+v[7]-v[0]-v[2]-v[4]-v[6],v[2]+v[3]+v[6]+v[7]-v[0]-v[1]-v[4]-v[5],v[4]+v[5]+v[6]+v[7]-v[0]-v[1]-v[2]-v[3]);
+  let m=length(g);if(!(m>0.0)){return;}
+  let n=g/m;
+  for(var a=0u;a<3u;a++){atomicAdd(&cfNormal[a],i32(round(n[a]*4096.0)));}
+  atomicAdd(&cfNormals,1u);
 }
-// Lane 0, after the cells: δ = (V_4h − V_h) / max(A, 1), V_4h = 64 · the fill of the tile's 8 corners.
-fn cfVolumeShift()->f32{
-  var c:array<f32,8>;
-  for(var k=0u;k<8u;k++){let q=4u*ncCorner(k,2u);c[k]=ncTileRaw[q.x+5u*q.y+25u*q.z];}
-  let vh=f32(atomicLoad(&cfVolH))/1048576.0;
-  return (64.0*fill(c)-vh)/max(f32(atomicLoad(&cfArea)),1.0);
+// Lane 0, after the cells: the tile's mean normal as pack4x8snorm(n, 1), 0 where no cell crosses.
+fn cfTileNormal()->u32{
+  if(atomicLoad(&cfNormals)==0u){return 0u;}
+  let g=vec3f(f32(atomicLoad(&cfNormal[0])),f32(atomicLoad(&cfNormal[1])),f32(atomicLoad(&cfNormal[2])));
+  let m=length(g);if(!(m>0.0)){return 0u;}
+  return pack4x8snorm(vec4f(g/m,1.0));
 }
 // The tile's faces (US), staged once: axis a, plane p (0..4, 4t[a] + p), and the cell across (u = a + 1, v = a + 2):
 // 80a + 16p + 4v + u. Every face a cell of the tile reads (its low face, plane p, and its high face, plane p + 1).
@@ -1146,7 +1213,7 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
     if(lane==0u){
       atomicStore(&mixedTile,0u);for(var q=0u;q<2u;q++){atomicStore(&tileCrossing[q],0u);atomicStore(&tileDeep[q],0u);}
       for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}
-      atomicStore(&tileError,0u);atomicStore(&cfVolH,0u);atomicStore(&cfArea,0u);atomicStore(&ncTileSigned,0);atomicStore(&ncTileCrossings,0u);atomicStore(&ncTileCurve,0);atomicStore(&ncTileCurves,0u);atomicStore(&ncTileCorner,0u);
+      atomicStore(&tileError,0u);for(var a=0u;a<3u;a++){atomicStore(&cfNormal[a],0);}atomicStore(&cfNormals,0u);atomicStore(&ncTileSigned,0);atomicStore(&ncTileCrossings,0u);atomicStore(&ncTileCurve,0);atomicStore(&ncTileCurves,0u);atomicStore(&ncTileCorner,0u);
     }
     cfStage(t,lane);
     workgroupBarrier();
@@ -1161,7 +1228,7 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
     if(lane==0u){wgFlag=atomicLoad(&mixedTile);}
     let crossing=(workgroupUniformLoad(&wgFlag)&2u)!=0u;
     let shaping=crossing&&NC_TOL>0.0;
-    ${tiered ? "if(crossing){cfVolumeCell(lane);}" : ""}
+    ${tiered ? "if(crossing){cfNormalCell(lane);}" : ""}
     if(shaping){atomicMax(&tileError,bitcast<u32>(ncSurfaceDisplacement(t,lane)));}
     if((atomicLoad(&mixedTile)&2u)!=0u){let deep=ncDepthSample(t,lane);for(var q=0u;q<2u;q++){atomicMax(&tileDeep[q],deep[q]);}}
     workgroupBarrier();
@@ -1175,7 +1242,7 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
       c.deep=vec2u(atomicLoad(&tileDeep[0]),atomicLoad(&tileDeep[1]));
       let r=ncFinishTile(t,1u,c);
       ncStoreClass(nbCSlotOfPage(t>>vec3u(3u)),nbTileIndex(t),c,r,1u);
-      ${tiered ? `census[NC_S*nbCSlotOfPage(t>>vec3u(3u))+${CENSUS.VOL}u+nbTileIndex(t)]=bitcast<u32>(select(0.0,cfVolumeShift(),crossing));` : ""}
+      ${tiered ? `census[NC_S*nbCSlotOfPage(t>>vec3u(3u))+${CENSUS.VOL}u+nbTileIndex(t)]=select(0u,cfTileNormal(),crossing);` : ""}
       atomicMax(&wgReach,r.reach);if((c.flags&2u)!=0u){atomicAdd(&wgCrossing,1u);}
     }
   }
@@ -1473,14 +1540,15 @@ fn cdBodyHeld(t:vec3i)->bool{
   // The hysteresis (coordinator 2026-11-16, "the shortest hysteresis that doesn't flicker"): an h tile (CMASK) is 4h
   // only at its second consecutive calm head (CALM, valid under its workgroup's CALM_KEY); a 4h tile calm now stays 4h.
   // Refining has none: a tile that is not calm bands at once.
-  // Calm means 4h represents both the tile's velocity (ncCalm, the certificate's error) and its shape: a tile whose FIN
-  // carries its shape or thin trigger (the census's own test of whether 4h holds the geometry) is never calm, so R2 never
-  // demotes a surface 4h cannot carry (falling-water-torus lost all its liquid by step 10 without this, 2026-11-17).
+  // Calm means 4h represents the tile's velocity (ncCalm) and its surface's curvature (ncCurveShift), the surface about
+  // it is quiet (ncSurfaceQuiet), and it carries no thin trigger, so R2 never demotes a sheet 4h cannot carry
+  // (falling-water-torus lost all its liquid by step 10 without this, 2026-11-17). The max-norm shape trigger is not
+  // read: it measures the h surface's cell-scale roughness, which the h particles make themselves.
   var toCoarse=false;
   // A source tile is not calm: the drop's liquid arrives this step, after the certificate (lane F's M4).
-  // And an h tile is calm only where demotion keeps its volume within the budget (VOL, censusFine's δ this census).
-  let kept=!nbTileH(cs,i)||abs(bitcast<f32>(census[o+${CENSUS.VOL}u+i]))<=${UNIFORM_TILE_UPDATE_BUDGET_H};
-  if(band&&head&&!source&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&kept&&ncCalm(t,cs,i)){
+  // And an h tile is calm only where its 4h-scale curvature keeps its volume within the budget (ncCurveShift).
+  if(band&&head&&!source&&(ncFin(cs,i)&ncTriggerBit(NC_THIN_K))==0u&&ncCalm(t,cs,i)
+     &&(!nbTileH(cs,i)||ncCurveShift(t,cs,i)<=${UNIFORM_TILE_UPDATE_BUDGET_H})&&ncSurfaceQuiet(t)){
     atomicOr(&wgCalm[lane>>5u],bit);
     let known=census[o+${CENSUS.CALM_KEY}u+(i>>6u)]==nbCRec(cs,NB_REC_KEY)+1u;
     toCoarse=!nbTileH(cs,i)||(known&&(census[o+${CENSUS.CALM}u+word]&bit)!=0u);

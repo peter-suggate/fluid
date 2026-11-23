@@ -461,7 +461,7 @@ fn ceMean(T:vec3i)->vec3f{
     let cls=select(0u,select(1u,2u,(bits&2u)!=0u),(support&3u)!=0u);
     // tileErrorOf (l.357).
     let defect=bitcast<f32>(census[o+3u]);let dry=defect==-1.0;
-    var error=select(defect,0.0,dry);var error4=error;let centre=vec3f(bitcast<f32>(census[o]),bitcast<f32>(census[o+1u]),bitcast<f32>(census[o+2u]));
+    var error=select(defect,0.0,dry);var error4=0.0;let centre=vec3f(bitcast<f32>(census[o]),bitcast<f32>(census[o+1u]),bitcast<f32>(census[o+2u]));
     var gradient=0.0;let speed=bitcast<f32>(census[o+4u]);var carried=speed;
     for(var axis=0u;axis<3u;axis++){
       var dd=vec3i(0);dd[axis]=1;let lo=t-dd;let hi=t+dd;
