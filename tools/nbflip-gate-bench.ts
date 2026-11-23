@@ -151,11 +151,14 @@ try {
     if (nbStats && mode === "fenced" && isSample(step)) probe?.requestNarrowBandVolumeProbe?.();
     while (!s.advanceTo(step * dt, bodies(step * dt))) {
       if (!s.framePending) {
-        // The engine's failMixedFrame message (simulationPipelineError), when a failed frame is why it refused.
-        const why = (s.info as { simulationPipelineError?: unknown }).simulationPipelineError;
-        // The engine's admission state, for a refusal with no failure (its clock, a deferred admission, frames in flight).
-        const e = s as unknown as Record<string, unknown>;
-        const state = { requested_s: step * dt, lastTime_s: e.lastTime, fixedStep_s: e.fixedStep_s, disposed: e.disposed, failure: String(e.pressureFrameFailure ?? ""), admission: e.mixedPipelineAdmission !== undefined, inFlight: e.mixedFramesInFlight, encodedSteps: (s.info as { encodedSteps?: unknown }).encodedSteps, completed_s: (s.info as { completedTime_s?: unknown }).completedTime_s };
+        // Why the engine refused: the uniform engine's failMixedFrame message (simulationPipelineError), the brick
+        // engine's latched failure (simulationFailure: a FAIL word from a lagged receipt, or an advance that threw).
+        const info = s.info as { simulationPipelineError?: unknown; simulationFailure?: { code?: unknown; message?: unknown; frame?: unknown; operands?: unknown; rawWords?: unknown } };
+        const f = info.simulationFailure;
+        const why = info.simulationPipelineError ?? (f ? JSON.stringify({ code: f.code, message: f.message, frame: f.frame, operands: f.operands, rawWords: f.rawWords }) : undefined);
+        // The admission state, for a refusal with neither: the clock, a held edit (brick), the uniform engine's own.
+        const e = s as unknown as Record<string, unknown>, engine = e.brickEngine as { editHeld?: unknown } | undefined;
+        const state = { requested_s: step * dt, submitted_s: (s.info as { submittedTime_s?: unknown }).submittedTime_s, editHeld: engine?.editHeld, lastTime_s: e.lastTime, disposed: e.disposed, admission: e.mixedPipelineAdmission !== undefined, encodedSteps: (s.info as { encodedSteps?: unknown }).encodedSteps, completed_s: (s.info as { completedTime_s?: unknown }).completedTime_s };
         throw new Error(`Step ${step} refused with no frame pending${why ? `: ${String(why).slice(0, 2000)}` : ""} ${JSON.stringify(state)}`);
       }
       await new Promise<void>(r => setImmediate(r));
