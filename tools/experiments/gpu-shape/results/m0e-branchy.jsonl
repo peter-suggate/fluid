@@ -1,0 +1,12 @@
+{"kind":"setup","device":"Metal driver on macOS Version 26.6.2 (Build 25G83)","N":16,"dirKB":68,"dataMB":16}
+{"kind":"branchy","variant":"free","L":32,"G":1,"us4":56.625,"us12":129.57,"perRoundUs":9.118125,"gpuErrors":0}
+{"kind":"branchy","variant":"guard","L":32,"G":1,"us4":114.613,"us12":146.359,"perRoundUs":3.968250000000001,"gpuErrors":0}
+{"kind":"branchy","variant":"exit","L":32,"G":1,"us4":83.116,"us12":219.934,"perRoundUs":17.102249999999998,"gpuErrors":0}
+{"kind":"branchy","variant":"owner","L":32,"G":1,"us4":28.206,"us12":60.58,"perRoundUs":4.046749999999999,"gpuErrors":0}
+{"kind":"branchy","variant":"serial","L":32,"G":1,"us4":93.619,"us12":315.106,"perRoundUs":27.685875,"gpuErrors":0}
+{"kind":"branchy","variant":"free","L":256,"G":32,"us4":246.235,"us12":344.396,"perRoundUs":12.270125,"gpuErrors":0}
+{"kind":"branchy","variant":"guard","L":256,"G":32,"us4":104.16,"us12":288.653,"perRoundUs":23.061625000000003,"gpuErrors":0}
+{"kind":"branchy","variant":"exit","L":256,"G":32,"us4":123.87,"us12":420.814,"perRoundUs":37.118,"gpuErrors":0}
+{"kind":"branchy","variant":"owner","L":256,"G":32,"us4":130.119,"us12":487.143,"perRoundUs":44.628,"gpuErrors":0}
+{"kind":"branchy","variant":"serial","L":256,"G":32,"us4":189.866,"us12":676.146,"perRoundUs":60.785,"gpuErrors":0}
+{"kind":"done","gpuErrors":0}
