@@ -39,9 +39,10 @@ fn nbfP2GFraction(p:vec3f,axis:u32,base:vec3i)->vec3f{var offset=vec3f(0.5);offs
 // A node's share (w = wx wyz m) as the fixed-point words pbAdd adds: momentum (i32) and weight (u32).
 fn nbfP2GMomentumWord(w:f32,u:f32)->i32{return i32(round(w*u*PB_MOMENTUM));}
 fn nbfP2GWeightWord(w:f32)->u32{return u32(round(w*PB_WEIGHT));}
-// A sample's deposit (pbScatter): mass m at p (cells) with velocity u, onto each axis' 3^3 face nodes.
-fn nbfP2GScatter(p:vec3f,u:vec3f,mass:f32){
- for(var axis=0u;axis<3u;axis++){
+// A sample's deposit (pbScatter): mass m at p (cells) with velocity u, onto the 3^3 face nodes of axes a0 to a1 - 1
+// (nbfP2GScatter: each axis).
+fn nbfP2GScatterAxes(p:vec3f,u:vec3f,mass:f32,a0:u32,a1:u32){
+ for(var axis=a0;axis<a1;axis++){
   let base=nbfP2GBase(p,axis);let f=nbfP2GFraction(p,axis,base);
   let wx=pbQuadratic(f.x);let wy=pbQuadratic(f.y);let wz=pbQuadratic(f.z);
   for(var z=0;z<3;z++){for(var y=0;y<3;y++){let wyz=wy[y]*wz[z];for(var x=0;x<3;x++){
@@ -50,6 +51,7 @@ fn nbfP2GScatter(p:vec3f,u:vec3f,mass:f32){
   }}}
  }
 }
+fn nbfP2GScatter(p:vec3f,u:vec3f,mass:f32){nbfP2GScatterAxes(p,u,mass,0u,3u);}
 // A +face's depth: the four corners on its plane (corner bit along axis clear), in the eight-corner order.
 fn nbfFaceDepth(low:vec3u,axis:u32)->f32{
  var depth=0.0;

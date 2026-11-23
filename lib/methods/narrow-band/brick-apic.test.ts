@@ -78,7 +78,7 @@ test("every kernel of an APIC layout reads the APIC record, and no FLIP kernel c
     const code = (label: string) => apic.filter(k => k.label === label).map(k => k.code).join("\n");
     assert.ok(code("pMove").includes("let rows=pApicSample(q);") && code("pMove").includes("fn nbfApicRow("), "G2P takes the rows");
     assert.ok(!code("pMove").includes("nbfG2P(v,p.before.xyz"), "no FLIP blend under APIC");
-    assert.ok(code("pDeposit").includes("nbfP2GScatterApic(q,s.velocity.xyz,nbApicRows(s),nbParticleMass(s));"), "P2G deposits the affine velocity");
+    assert.ok(code("pDeposit").includes("nbfP2GScatterApicAxes(q,s.velocity.xyz,nbApicRows(s),nbParticleMass(s),pdA0,pdA1);"), "P2G deposits the affine velocity");
     assert.ok(!code("pDelta").includes("nbfDeltaSample(q)"), "APIC records take no FLIP delta");
     if (tiered) assert.ok(code("uTransfer").includes("momentum+=m*w*(s.velocity[a]+dot(nbApicRowOf(s,a),r));"), "the 4h gather takes the affine velocity");
   }

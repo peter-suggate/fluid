@@ -105,10 +105,11 @@ fn nbfApicRow(p:vec3f,axis:u32)->vec4f{
 // An APIC record's rows are finite (the old G2P's guard).
 fn nbfApicFinite(c:array<vec3f,3>,bound:f32)->bool{return all(abs(c[0])<vec3f(bound))&&all(abs(c[1])<vec3f(bound))&&all(abs(c[2])<vec3f(bound));}
 `;
-/** The APIC deposit (needs nbfP2GWGSL and its nbxDeposit): nbfP2GScatter with each node's affine velocity. */
+/** The APIC deposit (needs nbfP2GWGSL and its nbxDeposit): nbfP2GScatter with each node's affine velocity
+ * (nbfP2GScatterApicAxes: axes a0 to a1 - 1, as nbfP2GScatterAxes). */
 export const nbfP2GApicWGSL = /* wgsl */`
-fn nbfP2GScatterApic(p:vec3f,u:vec3f,c:array<vec3f,3>,mass:f32){
- for(var axis=0u;axis<3u;axis++){
+fn nbfP2GScatterApicAxes(p:vec3f,u:vec3f,c:array<vec3f,3>,mass:f32,a0:u32,a1:u32){
+ for(var axis=a0;axis<a1;axis++){
   let base=nbfP2GBase(p,axis);let f=nbfP2GFraction(p,axis,base);
   let wx=pbQuadratic(f.x);let wy=pbQuadratic(f.y);let wz=pbQuadratic(f.z);
   for(var z=0;z<3;z++){for(var y=0;y<3;y++){let wyz=wy[y]*wz[z];for(var x=0;x<3;x++){
@@ -118,6 +119,7 @@ fn nbfP2GScatterApic(p:vec3f,u:vec3f,c:array<vec3f,3>,mass:f32){
   }}}
  }
 }
+fn nbfP2GScatterApic(p:vec3f,u:vec3f,c:array<vec3f,3>,mass:f32){nbfP2GScatterApicAxes(p,u,c,mass,0u,3u);}
 `;
 
 /** nbfParticleFormulasWGSL with the band bandDepth cells deep (the scene's brickTiers.particleBandDepth): records

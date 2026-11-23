@@ -562,24 +562,30 @@ fn fsCacheRawStaged(T:vec3i,a:u32)->f32{let r=T-ucLow;return wRaw[64u*a+u32(r.x+
 }`) : undefined;
 
   // pDeposit (transferDeposit): a workgroup a brick, over its bin in the bank the rebin wrote. The faces its
-  // records reach: along the axis cells o-1..o+9 (11), across o-1..o+8 (10).
+  // records reach: along the axis cells o-1..o+9 (11), across o-1..o+8 (10). Two rounds over the records, face axes
+  // 0-1 then 2 (pdA0 to pdA1 - 1): two axes' windows (17.6 KB) let three workgroups share a core's 64 KB, where all
+  // three (26.4 KB) held two (GPU-shape M6); round 1 reads round 0's support bits back. The sums are integer
+  // atomics, so the rounds change no word.
   const pDeposit = k("pDeposit", [CFG, FB.set, FB.dir, FB.phiRO, FB.parts, FB.fdep], [FG_SLOT_WINDOW_WGSL, FG_PHI_WGSL, FG_RING_WGSL(11, { write: (j, x) => `atomicStore(&wMom[${j}],bitcast<u32>(${x}))`, read: j => `bitcast<f32>(atomicLoad(&wMom[${j}]))` }), nbfParticleRecordFor(L), V_WGSL].join("\n") + /* wgsl */`
 const PD_WINDOW:u32=1100u;
-var<workgroup> wMom:array<atomic<u32>,3300>;
-var<workgroup> wWeight:array<atomic<u32>,3300>;
+// A round's momentum (2 x PD_WINDOW words), then its weight (from 2200).
+var<workgroup> wMom:array<atomic<u32>,4400>;
+var<private> pdA0:u32;var<private> pdA1:u32;
 var<workgroup> wLiquid:array<atomic<u32>,32>;
+// Round 0's support (gridSupported) of the brick's first 4096 records, for round 1.
+var<workgroup> wSupported:array<atomic<u32>,128>;
 var<private> pdOrigin:vec3i;
 var<workgroup> sCount:u32;
 fn pdExtent(a:u32)->vec3i{var d=vec3i(10);d[a]=11;return d;}
 fn pdSlot(a:u32,f:vec3i)->u32{
  let d=pdExtent(a);let r=f-pdOrigin+vec3i(1);
  if(any(r<vec3i(0))||any(r>=d)){return 0xffffffffu;}
- return a*PD_WINDOW+u32((r.z*d.y+r.y)*d.x+r.x);
+ return (a-pdA0)*PD_WINDOW+u32((r.z*d.y+r.y)*d.x+r.x);
 }
-fn pdFace(s:u32)->vec3i{let a=s/PD_WINDOW;let r=i32(s%PD_WINDOW);let d=pdExtent(a);return vec3i(r%d.x,(r/d.x)%d.y,r/(d.x*d.y))-vec3i(1)+pdOrigin;}
+fn pdFace(s:u32)->vec3i{let a=pdA0+s/PD_WINDOW;let r=i32(s%PD_WINDOW);let d=pdExtent(a);return vec3i(r%d.x,(r/d.x)%d.y,r/(d.x*d.y))-vec3i(1)+pdOrigin;}
 fn nbxDeposit(axis:u32,node:vec3i,momentum:i32,weight:u32){
  var f=node;f[axis]+=1;let s=pdSlot(axis,f);if(s==0xffffffffu){return;}
- atomicAdd(&wMom[s],bitcast<u32>(momentum));atomicAdd(&wWeight[s],weight);
+ atomicAdd(&wMom[s],bitcast<u32>(momentum));atomicAdd(&wMom[2200u+s],weight);
 }
 fn nbxTransferHeat(tile:u32)->vec2f{return vec2f(0.0);}
 fn nbxTransferDepth(vertex:vec3u)->f32{return 0.0;}
@@ -595,6 +601,7 @@ fn pdLiquidAt(c:vec3i)->bool{
  if(lid==0u){sCount=count;}
  if(workgroupUniformLoad(&sCount)==0u){return;}
  if(lid<32u){atomicStore(&wLiquid[lid],0u);}
+ if(lid<128u){atomicStore(&wSupported[lid],0u);}
  fgWindowStage(pdOrigin>>vec3u(3u),lid,256u);
  workgroupBarrier();
  // The vertex ring of o-1..o+9 (11^3, in wMom before the deposit uses it) for gridLiquidCell over cells o-1..o+8.
@@ -606,27 +613,35 @@ fn pdLiquidAt(c:vec3i)->bool{
  }
  workgroupBarrier();
  fgRingClose();
- for(var j=lid;j<3300u;j+=256u){atomicStore(&wMom[j],0u);atomicStore(&wWeight[j],0u);}
- workgroupBarrier();
- let bank=(cfg.y^cfg.z^1u)&1u;
- for(var j=lid;j<count;j+=256u){
-  let i=bank*NB_PCAP+start+j;let s=parts[i];if(!nbLive(s)){continue;}
-  // gridSupported: a liquid cell among the eight about q - 0.5 of weight over 1e-6.
-  let q=s.position.xyz;let fraction=fract(q-0.5);let b=vec3i(floor(q-0.5));
-  var supported=false;
-  for(var k=0u;k<8u;k++){
-   let bit=vec3u(k&1u,(k>>1u)&1u,k>>2u);let w=select(vec3f(1)-fraction,fraction,bit!=vec3u(0));
-   supported=supported||(w.x*w.y*w.z>1e-6&&pdLiquidAt(b+vec3i(bit)));
+ for(var pdRound=0u;pdRound<2u;pdRound++){
+  pdA0=2u*pdRound;pdA1=select(2u,3u,pdRound==1u);
+  for(var j=lid;j<4400u;j+=256u){atomicStore(&wMom[j],0u);}
+  workgroupBarrier();
+  let bank=(cfg.y^cfg.z^1u)&1u;
+  for(var j=lid;j<count;j+=256u){
+   let i=bank*NB_PCAP+start+j;let s=parts[i];if(!nbLive(s)){continue;}
+   // gridSupported: a liquid cell among the eight about q - 0.5 of weight over 1e-6.
+   let q=s.position.xyz;let fraction=fract(q-0.5);let b=vec3i(floor(q-0.5));
+   var supported=false;
+   if(pdRound==1u&&j<4096u){supported=((atomicLoad(&wSupported[j>>5u])>>(j&31u))&1u)!=0u;}
+   else{
+    for(var k=0u;k<8u;k++){
+     let bit=vec3u(k&1u,(k>>1u)&1u,k>>2u);let w=select(vec3f(1)-fraction,fraction,bit!=vec3u(0));
+     supported=supported||(w.x*w.y*w.z>1e-6&&pdLiquidAt(b+vec3i(bit)));
+    }
+    if(supported&&j<4096u){atomicOr(&wSupported[j>>5u],1u<<(j&31u));}
+   }
+   if(pdRound==0u){parts[i].before.w=nbParticleRestate(s,nbParticleAge(s),select(1.0,0.0,supported));}
+   if(supported){${L.apic ? "nbfP2GScatterApicAxes(q,s.velocity.xyz,nbApicRows(s),nbParticleMass(s),pdA0,pdA1);" : "nbfP2GScatterAxes(q,s.velocity.xyz,nbParticleMass(s),pdA0,pdA1);"}}
   }
-  parts[i].before.w=nbParticleRestate(s,nbParticleAge(s),select(1.0,0.0,supported));
-  if(supported){${L.apic ? "nbfP2GScatterApic(q,s.velocity.xyz,nbApicRows(s),nbParticleMass(s));" : "nbfP2GScatter(q,s.velocity.xyz,nbParticleMass(s));"}}
- }
- workgroupBarrier();
- for(var j=lid;j<3300u;j+=256u){
-  let w=atomicLoad(&wWeight[j]);if(w==0u){continue;}
-  let f=pdFace(j);let a=j/PD_WINDOW;let fs=fgSlot(f);if(fs==NB_NONE){continue;}
-  let at=6u*(512u*fs+nbLocal(f))+2u*a;
-  atomicAdd(&fdep[at],atomicLoad(&wMom[j]));atomicAdd(&fdep[at+1u],w);
+  workgroupBarrier();
+  for(var j=lid;j<PD_WINDOW*(pdA1-pdA0);j+=256u){
+   let w=atomicLoad(&wMom[2200u+j]);if(w==0u){continue;}
+   let f=pdFace(j);let a=pdA0+j/PD_WINDOW;let fs=fgSlot(f);if(fs==NB_NONE){continue;}
+   let at=6u*(512u*fs+nbLocal(f))+2u*a;
+   atomicAdd(&fdep[at],atomicLoad(&wMom[j]));atomicAdd(&fdep[at+1u],w);
+  }
+  workgroupBarrier();
  }
 }`);
 
