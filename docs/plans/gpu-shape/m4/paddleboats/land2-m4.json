@@ -1,0 +1,72 @@
+{
+ "scene": "paddleboats",
+ "key": "paddleboats",
+ "head": "67c09e96",
+ "warmup": 100,
+ "R": 7,
+ "CR": 3,
+ "steps": 100,
+ "date": "2026-11-23T20:25:35.464Z",
+ "status": " M lib/cloth/contact/ogc-detector-wgsl.ts\n M lib/cloth/contact/ogc-detector.ts\n M lib/cloth/contact/ogc-wgsl.ts\n M lib/cloth/gpu-solver-wgsl.ts\n M lib/cloth/system.ts\n M lib/core/webgpu-water-pipeline.ts\n M lib/methods/narrow-band/brick-census.wgsl.ts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n?? tools/experiments/gpu-shape/m4.mts\n?? tools/experiments/gpu-shape/stepab.mts\n",
+ "placements": {
+  "9": {
+   "label": "censusDecide",
+   "part": 1,
+   "dispatch": {
+    "indirect": 141
+   },
+   "variants": {},
+   "rw": [
+    "set",
+    "census"
+   ],
+   "exact": {
+    "base": {
+     "words": 0,
+     "first": -1
+    },
+    "ref": {
+     "words": 0,
+     "first": -1
+    }
+   },
+   "us": {
+    "base": {
+     "min": 1644.6,
+     "med": 1648.808,
+     "samples": [
+      1668.557,
+      1647.891,
+      1649.016,
+      1644.6,
+      1648.808,
+      1650.809,
+      1646.808
+     ]
+    },
+    "ref": {
+     "min": 1739.807,
+     "med": 1768.223,
+     "samples": [
+      1739.807,
+      1768.223,
+      1802.18,
+      1753.683,
+      1814.182,
+      1765.14,
+      1774.182
+     ]
+    }
+   }
+  }
+ },
+ "timeProbes": [
+  76.082,
+  76.249,
+  76.333,
+  76.206,
+  76.291,
+  76.29,
+  76.373
+ ]
+}

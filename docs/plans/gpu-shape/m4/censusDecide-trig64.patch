@@ -1,0 +1,60 @@
+diff --git a/lib/methods/narrow-band/brick-census.wgsl.ts b/lib/methods/narrow-band/brick-census.wgsl.ts
+index a2d85bcc..f9215969 100644
+--- a/lib/methods/narrow-band/brick-census.wgsl.ts
++++ b/lib/methods/narrow-band/brick-census.wgsl.ts
+@@ -1472,6 +1472,7 @@ fn ciTile(cs:u32,i:u32,lane:u32){
+   const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRW, BRICK_SOURCE_BINDING, ...(bodies ? [BODIES_RO, BODY_CUTS_RO] : [])], BRICK_SOURCE_WGSL + (L.detail ? brickDetailWGSL(L) : "") + OWNER + HOOKS + CENSUS_FORMULAS + PLAN + REGION + (bodies ? pbBrickBodiesWGSL(bodies) + PB_BRICK_MARK_WGSL + PB_BRICK_CANDIDATES_WGSL : "") + /* wgsl */`
+ var<workgroup> wgWant:array<atomic<u32>,2>;
+ var<workgroup> wgCount:array<atomic<u32>,4>;
++var<workgroup> wgTrig:array<atomic<u32>,8>;
+ var<workgroup> wgDec:array<atomic<u32>,2>;
+ var<workgroup> wgStat:array<atomic<u32>,2>;
+ var<workgroup> wgCalm:array<atomic<u32>,2>;
+@@ -1596,7 +1597,7 @@ var<workgroup> wgGo:u32;
+   if(lane==0u){wgGo=select(0u,1u,e<nbListCount(NB_LIST_C_ALL));}if(workgroupUniformLoad(&wgGo)==0u){return;}
+   let cs=nbListSlot(NB_LIST_C_ALL,e);
+   if(lane<2u){atomicStore(&wgWant[lane],0u);atomicStore(&wgDec[lane],0u);atomicStore(&wgStat[lane],0u);atomicStore(&wgCalm[lane],0u);}
+-  if(lane<4u){atomicStore(&wgCount[lane],0u);}
++  if(lane<4u){atomicStore(&wgCount[lane],0u);}if(lane<8u){atomicStore(&wgTrig[lane],0u);}
+   workgroupBarrier();
+   let reach=bitcast<f32>(atomicLoad(&nbSet[NB_H_CENSUS_REACH]));
+   let base=4*nbKeyCoord(nbCRec(cs,NB_REC_KEY))-vec3i(1);
+@@ -1604,21 +1605,23 @@ var<workgroup> wgGo:u32;
+   let trigOnly=cfg.z==2u;
+   if(!trigOnly){cdTile(cs,lane+64u*r,lane,reach,base);}
+   // TRIG: an F child's bit j is whether its tile j's importance triggers (final word 1 bits 16..21) heat it, the old
+-  // need rule (nbActivityTriggered, PLAN's ncNeedTriggered).
+-  let child=8u*r+lane;
+-  if(lane<8u){
+-    let fs=nbChild(cs,child);
+-    if(fs<NB_SEAM){
+-      let b=vec3u(child&3u,(child>>2u)&3u,child>>4u);var bits=0u;
+-      for(var j=0u;j<8u;j++){
+-        let q=2u*b+vec3u(j&1u,(j>>1u)&1u,j>>2u);let qi=q.x|(q.y<<3u)|(q.z<<6u);let w1=ncFin(cs,qi);
+-        bits|=select(0u,1u<<j,ncNeedTriggered(xTileOf(cs,qi),cs,qi,(w1>>16u)&63u));
+-        // The thin trigger alone (word 1 bit 17: nbActivityThin), bit 8 + j, for F's thin move path.
+-        bits|=select(0u,1u<<(8u+j),((w1>>17u)&1u)!=0u);
+-      }
+-      atomicStore(&nbSet[NB_S_TRIG+fs],bits);
+-      if((bits&0xffu)!=0u){atomicAdd(&wgCount[3],countOneBits(bits&0xffu));}
+-    }
++  // need rule (nbActivityTriggered, PLAN's ncNeedTriggered). A lane a (child, tile j): the slab's 8 children's 8
++  // tiles over the 64 lanes (GPU-shape M4: 8 lanes walked 8 tiles each), joined in wgTrig, stored by lane j = 0.
++  let child=8u*r+(lane>>3u);let j=lane&7u;
++  let fs=nbChild(cs,child);
++  if(fs<NB_SEAM){
++    let b=vec3u(child&3u,(child>>2u)&3u,child>>4u);var bits=0u;
++    let q=2u*b+vec3u(j&1u,(j>>1u)&1u,j>>2u);let qi=q.x|(q.y<<3u)|(q.z<<6u);let w1=ncFin(cs,qi);
++    bits|=select(0u,1u<<j,ncNeedTriggered(xTileOf(cs,qi),cs,qi,(w1>>16u)&63u));
++    // The thin trigger alone (word 1 bit 17: nbActivityThin), bit 8 + j, for F's thin move path.
++    bits|=select(0u,1u<<(8u+j),((w1>>17u)&1u)!=0u);
++    if(bits!=0u){atomicOr(&wgTrig[lane>>3u],bits);}
++  }
++  workgroupBarrier();
++  if(j==0u&&fs<NB_SEAM){
++    let bits=atomicLoad(&wgTrig[lane>>3u]);
++    atomicStore(&nbSet[NB_S_TRIG+fs],bits);
++    if((bits&0xffu)!=0u){atomicAdd(&wgCount[3],countOneBits(bits&0xffu));}
+   }
+   workgroupBarrier();
+   if(lane<2u&&!trigOnly){

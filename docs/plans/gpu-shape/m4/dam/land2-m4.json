@@ -1,0 +1,72 @@
+{
+ "scene": "high-resolution-dam-break",
+ "key": "dam",
+ "head": "67c09e96",
+ "warmup": 100,
+ "R": 7,
+ "CR": 3,
+ "steps": 100,
+ "date": "2026-11-23T20:26:26.285Z",
+ "status": " M lib/cloth/contact/ogc-detector-wgsl.ts\n M lib/cloth/contact/ogc-detector.ts\n M lib/cloth/contact/ogc-wgsl.ts\n M lib/cloth/gpu-solver-wgsl.ts\n M lib/cloth/system.ts\n M lib/core/webgpu-water-pipeline.ts\n M lib/methods/narrow-band/brick-census.wgsl.ts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n?? tools/experiments/gpu-shape/m4.mts\n?? tools/experiments/gpu-shape/stepab.mts\n",
+ "placements": {
+  "9": {
+   "label": "censusDecide",
+   "part": 1,
+   "dispatch": {
+    "indirect": 141
+   },
+   "variants": {},
+   "rw": [
+    "set",
+    "census"
+   ],
+   "exact": {
+    "base": {
+     "words": 0,
+     "first": -1
+    },
+    "ref": {
+     "words": 0,
+     "first": -1
+    }
+   },
+   "us": {
+    "base": {
+     "min": 1057.984,
+     "med": 1121.274,
+     "samples": [
+      1178.815,
+      1121.274,
+      1057.984,
+      1224.981,
+      1089.817,
+      1719.641,
+      1083.233
+     ]
+    },
+    "ref": {
+     "min": 938.861,
+     "med": 1007.735,
+     "samples": [
+      1007.735,
+      945.776,
+      1206.69,
+      1262.189,
+      938.861,
+      1004.693,
+      1115.15
+     ]
+    }
+   }
+  }
+ },
+ "timeProbes": [
+  76.083,
+  76.416,
+  76.333,
+  76.456,
+  76.291,
+  76.207,
+  76.207
+ ]
+}
