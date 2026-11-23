@@ -173,10 +173,10 @@ const LAST_LIST = 18;
 /** Indirect arguments: 12 words a list (G1, G8, G64, X8: eight workgroups an entry), then FC_* at 384 (F_ALL's bricks, then
  * C_ALL's pages), FA_* at 400 (F_ACT's bricks, then C_ALL's pages) and FCA_* at 412 (F_ALL's bricks, then C_ACT's
  * pages), FCA2_G1 at 421 (C_ACT's pages twice, then F_ALL's bricks: uTransfer's pages first, a page over two
- * workgroups). Lanes: P from 512, F from 2048. */
-export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, X8: 9, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, FA_G1: 400, FA_G8: 403, FA_G64: 406, FCA_G1: 412, FCA_G8: 415, FCA_G64: 418, FCA2_G1: 421, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
+ * workgroups) and C_ACT4_G1 at 424 (C_ACT's pages four times: uExt4Seed, a page over four workgroups). Lanes: P from 512, F from 2048. */
+export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, X8: 9, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, FA_G1: 400, FA_G8: 403, FA_G64: 406, FCA_G1: 412, FCA_G8: 415, FCA_G64: 418, FCA2_G1: 421, C_ACT4_G1: 424, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
 /** The end of the list arguments a stage may dispatch from, below the lanes' regions (the last triple's last word + 1). */
-export const ARGS_LIST_END = ARGS.FCA2_G1 + 3;
+export const ARGS_LIST_END = ARGS.C_ACT4_G1 + 3;
 
 /**
  * The active class (brick-abi.md §5.5), a word an F slot (set region ACT):

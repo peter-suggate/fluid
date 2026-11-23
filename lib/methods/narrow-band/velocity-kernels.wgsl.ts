@@ -1081,19 +1081,21 @@ fn x4Close(T:vec3i,a:u32,value:vec2f,source:bool)->vec3f{
 // The faces with an h owner either side (j | a << 9), whose 16 subfaces' liquid tests were the kernel's cost: listed,
 // then 16 lanes a face (seep S2p's spread of an interface face), each lane one subface's two faces and liquid test,
 // and the face's lane sums them in the subface order.
-var<workgroup> wHeavy:array<u32,1536>;
+// GPU-shape M4 (docs/plans/gpu-shape/m4-clist.md): a page over four workgroups of 128 lanes (C_ACT4_G1), a lane a
+// tile, so that a page's heavy faces no longer run as one 256-lane workgroup's tail (64 of them in flight).
+var<workgroup> wHeavy:array<u32,384>;
 var<workgroup> wHeavies:atomic<u32>;
 var<workgroup> sHeavy:u32;
-var<workgroup> wSub:array<vec2f,256>;
-var<workgroup> wSubLiquid:array<u32,256>;
+var<workgroup> wSub:array<vec2f,128>;
+var<workgroup> wSubLiquid:array<u32,128>;
 var<workgroup> sCount:u32;
-@compute @workgroup_size(256) fn uExt4Seed(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+@compute @workgroup_size(128) fn uExt4Seed(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);
- if(lid==0u){sCount=nbListCount(NB_LIST_C_ACT);}
+ if(lid==0u){sCount=4u*nbListCount(NB_LIST_C_ACT);}
  if(g>=workgroupUniformLoad(&sCount)){return;}
- let slot=nbListSlot(NB_LIST_C_ACT,g);let P=nbCOrigin(slot)>>vec3u(2u);
- for(var r=0u;r<2u;r++){
-  let j=lid+256u*r;let T=P+vec3i(i32(j&7u),i32((j>>3u)&7u),i32(j>>6u));
+ let slot=nbListSlot(NB_LIST_C_ACT,g/4u);let P=nbCOrigin(slot)>>vec3u(2u);
+ {
+  let j=lid+128u*(g%4u);let T=P+vec3i(i32(j&7u),i32((j>>3u)&7u),i32(j>>6u));
   for(var a=0u;a<3u;a++){
    let O=T-fgUnit(a);
    if(!foTileInLattice(O)||fgTileCSlot(O)==NB_NONE){x4Store(slot,0u,j,a,vec3f(0.0,0.0,-1.0));continue;}
@@ -1108,7 +1110,7 @@ var<workgroup> sCount:u32;
  if(lid==0u){sHeavy=atomicLoad(&wHeavies);}
  let n=workgroupUniformLoad(&sHeavy);
  let i=lid&15u;
- for(var b=0u;b<n;b+=16u){
+ for(var b=0u;b<n;b+=8u){
   let f=b+(lid>>4u);
   var j=0u;var a=0u;var T=vec3i(0);
   if(f<n){

@@ -68,7 +68,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const records: BrickDispatch = { indirect: P_ARGS_RECORDS };
   const at = (kernel: BrickKernel, dispatch: BrickDispatch, z = 0, w = 0): BrickPlacement => ({ kernel, dispatch, z, w });
   const args = (z: number, w: number) => at(p.pArgs, { direct: [1, 1, 1] }, z, w);
-  const ext4 = tiered ? [at(v.uExt4Seed, pagesAct), at(v.uExt4, pagesAct)] : [];
+  const ext4 = tiered ? [at(v.uExt4Seed, { indirect: ARGS.C_ACT4_G1 }), at(v.uExt4, pagesAct)] : [];
   // Tiered, the samplers' caches of this step's opening state (after the head's transfer, before pMove; at the kick,
   // after the extension, before the seeding).
   const cache = v.uCache ? [at(v.uCache, all), ...(v.uCache4 ? [at(v.uCache4, pages)] : [])] : [];
