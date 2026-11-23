@@ -472,3 +472,64 @@ The work is in fluid-scratch/gpu-shape/m1a2/t4/: rc.py (one substitution, one ca
 **Caveat.** The caps move against what each edit removes (for example, pMove's merge removed: 512, and an
 early-return probe: 512). So single-cap readings near a step are allocation noise. The conclusions above rest on
 consistent multi-edit results.
+
+## lAdvect fallback fission (lane A2, 2026-11-24, seventh task)
+
+**Verdict: no-go.** The fallback is rare, and the fissioned pair is exact. But lAdvect at 448 threads is barely
+faster than at 384, and the second pass costs more than that saving. Nothing landed in lib.
+
+### Frequency
+
+Method:
+- 300 steps a scene: brick engine, fixed dt 1/60, census settings, moored bodies on paddleboats.
+- Atomic counters in a scratch tree only: trees/fbprobe, made from t5/probe.patch.
+- The counters live in nbSet's unused list-slot-31 padding. Header words 249..255 are not free: something
+  overwrites them.
+
+Fallback share by step range (1–100 / 101–200 / 201–300):
+
+| scene | of lAdvect threads | worst step | bricks touched | worst step |
+|---|---|---|---|---|
+| dam | 0.079 / 0.093 / 0.071% | 0.21% | 2.3 / 3.2 / 2.3% | 6.6% |
+| paddleboats | 0.015 / 0.003 / 0.003% | 0.04% | 0.6 / 0.35 / 0.3% | 1.25% |
+| seep | 0.049 / 0.051 / 0.116% | 0.15% | 2.3 / 2.8 / 6.1% | 7.9% |
+| letters | 0.007 / 0.041 / 0.032% | 0.09% | 0.4 / 1.8 / 1.9% | 3.3% |
+
+Every fallback on every scene is a departure stencil past the lattice's low walls (cell − 1 < 0). None comes from a
+missing brick.
+
+So the go/no-go bar of ≤ 2% of threads and ≤ 10% of bricks passes on every scene.
+
+### Fission
+
+The patch is fluid-scratch/gpu-shape/m1a2/t5/fission.patch (tree trees/fis):
+- **Main pass, lAdvect:** the eight stencil slots are packed into 16 bits. A vertex whose stencil misses returns at
+  once; its PHI1 word is set to L_DEFER and its brick is listed once, using a mark word an F slot.
+- **lDeferArgs:** one lane. It reads and zeroes the count and writes the indirect arguments.
+- **lAdvectF:** one workgroup per listed brick, dispatched indirect. It runs lAdvect's full text on the vertices
+  marked L_DEFER, then clears the mark and the list word. It needs a workgroupBarrier before the clear: without
+  it, a later subgroup read a cleared list word, and about 15% of deferred vertices were left unadvected.
+
+regcap gives the main pass 448 on all four scenes and lAdvectF 384.
+
+### Timing
+
+Measured with stepab, using a group exactness check: lAdvect + lDeferArgs + lAdvectF together, compared on set and
+phi. The base was the same tree with lAdvect's text reverted.
+
+The pair is identical word for word on all four scenes.
+
+Family minima (ms):
+
+| scene | lAdvect, HEAD | lAdvect, 448 | lAdvectF | pair vs HEAD |
+|---|---|---|---|---|
+| dam | 1.759 | 1.715 (−2.5%) | 0.298 | +14.7% |
+| paddleboats | 2.133 | 2.146 (+0.6%) | 0.114 | +6.2% |
+| seep | 0.639 | 0.639 (0%) | 0.187 | +30% |
+| letters | 1.764 | 1.732 (−1.8%) | 0.170 | +8.1% |
+
+lDeferArgs costs 5 µs.
+
+Even with a free second pass, the main pass misses the 8% go line. lAdvect's time is not set by its thread cap.
+Inference: its time is the trace's latency per lane, not occupancy. lAdvectF runs about 100 nearly empty workgroups
+that each wait on a few full traces, a latency-bound tiny pass.
