@@ -1,0 +1,1448 @@
+{
+ "scene": "high-resolution-dam-break",
+ "key": "dam",
+ "warmup": 100,
+ "R": 5,
+ "date": "2026-11-23T09:30:49.272Z",
+ "steps": 100,
+ "cap": {
+  "f": 4913,
+  "c": 125,
+  "b": 16,
+  "k": 64,
+  "particles": 1250000,
+  "t": 9826
+ },
+ "tiered": true,
+ "git": {
+  "head": "2616d73f",
+  "status": " M lib/core/webgpu-water-pipeline.ts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? docs/plans/gpu-shape/m0d-slot-order.md\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n?? tools/experiments/gpu-shape/branchy.mts\n?? tools/experiments/gpu-shape/chains.mts\n?? tools/experiments/gpu-shape/results/m0e-branchy.jsonl\n?? tools/experiments/gpu-shape/slot-order.mts\n"
+ },
+ "live": {
+  "f": 2113,
+  "c": 105,
+  "highF": 3604,
+  "highC": 125
+ },
+ "locality": {
+  "scatter": {
+   "highF": 4913,
+   "highC": 125,
+   "f": {
+    "n": 2113,
+    "spreadP50": 4505,
+    "spreadP90": 4798,
+    "pagesMean": 22.919545669663986,
+    "pagesP90": 30
+   },
+   "c": {
+    "n": 105,
+    "spreadP50": 112,
+    "spreadP90": 124,
+    "pagesMean": 11.561904761904762,
+    "pagesP90": 14
+   }
+  },
+  "identity": {
+   "highF": 3604,
+   "highC": 125,
+   "f": {
+    "n": 2113,
+    "spreadP50": 3214,
+    "spreadP90": 3485,
+    "pagesMean": 19.785139611926173,
+    "pagesP90": 28
+   },
+   "c": {
+    "n": 105,
+    "spreadP50": 89,
+    "spreadP90": 120,
+    "pagesMean": 7.619047619047619,
+    "pagesP90": 10
+   }
+  },
+  "compact": {
+   "highF": 2113,
+   "highC": 105,
+   "f": {
+    "n": 2113,
+    "spreadP50": 1864,
+    "spreadP90": 2049,
+    "pagesMean": 19.08187411263606,
+    "pagesP90": 26
+   },
+   "c": {
+    "n": 105,
+    "spreadP50": 81,
+    "spreadP90": 102,
+    "pagesMean": 7.40952380952381,
+    "pagesP90": 10
+   }
+  },
+  "morton": {
+   "highF": 2113,
+   "highC": 105,
+   "f": {
+    "n": 2113,
+    "spreadP50": 294,
+    "spreadP90": 1192,
+    "pagesMean": 7.870799810695694,
+    "pagesP90": 11
+   },
+   "c": {
+    "n": 105,
+    "spreadP50": 58,
+    "spreadP90": 65,
+    "pagesMean": 5.695238095238095,
+    "pagesP90": 8
+   }
+  }
+ },
+ "proof": {
+  "scatter": {
+   "step1": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2072,
+     2072
+    ],
+    "liveC": [
+     105,
+     105
+    ],
+    "f": {
+     "keys": 2072,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.00005992501974105835,
+     "liquidVertices": [
+      332437,
+      332437
+     ],
+     "phiTotal": [
+      3851531.97737466,
+      3851531.9773746585
+     ]
+    },
+    "c": {
+     "keys": 105,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.0000028312206268310547,
+     "liquidVertices": [
+      13383,
+      13383
+     ],
+     "phiTotal": [
+      360871.2709029019,
+      360871.2709029019
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       309687,
+       309687
+      ],
+      "maxPosSum": 0
+     },
+     {
+      "n": [
+       306826,
+       306826
+      ],
+      "maxPosSum": 0
+     }
+    ]
+   },
+   "step2": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2081,
+     2081
+    ],
+    "liveC": [
+     103,
+     103
+    ],
+    "f": {
+     "keys": 2081,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 10.303287542890757,
+     "maxBrickNegCount": 2,
+     "maxBrickUSum": 10.595994308590889,
+     "liquidVertices": [
+      349086,
+      349086
+     ],
+     "phiTotal": [
+      3517422.4010569574,
+      3517439.6727433233
+     ]
+    },
+    "c": {
+     "keys": 103,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0.5893096923828125,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.002768486738204956,
+     "liquidVertices": [
+      13383,
+      13383
+     ],
+     "phiTotal": [
+      344602.8463993035,
+      344603.12147461995
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       306479,
+       306473
+      ],
+      "maxPosSum": 762.208057820797
+     },
+     {
+      "n": [
+       307112,
+       307112
+      ],
+      "maxPosSum": 0
+     }
+    ]
+   },
+   "step4": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2074,
+     2075
+    ],
+    "liveC": [
+     101,
+     101
+    ],
+    "f": {
+     "keys": 2074,
+     "keysOnlyOne": 5,
+     "onlyKeys": [
+      "a:12,1,0 neg 512 phi -12056.3",
+      "a:12,1,1 neg 512 phi -12740.7",
+      "b:0,3,8 neg 512 phi -5472.6",
+      "b:1,3,8 neg 512 phi -6189.9",
+      "b:4,2,13 neg 512 phi -9557.0"
+     ],
+     "maxBrickPhiSum": 382.2114176750183,
+     "maxBrickNegCount": 3,
+     "maxBrickUSum": 67.24719169735909,
+     "liquidVertices": [
+      346412,
+      346912
+     ],
+     "phiTotal": [
+      3517576.4571940633,
+      3520801.467064998
+     ]
+    },
+    "c": {
+     "keys": 101,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 8.006324529647827,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.1634441763162613,
+     "liquidVertices": [
+      13353,
+      13353
+     ],
+     "phiTotal": [
+      330397.1340823816,
+      330384.150866881
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       308213,
+       308165
+      ],
+      "maxPosSum": 7670.370765611529
+     },
+     {
+      "n": [
+       307800,
+       307809
+      ],
+      "maxPosSum": 1394.8100342154503
+     }
+    ]
+   }
+  },
+  "identity2": {
+   "step1": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2072,
+     2072
+    ],
+    "liveC": [
+     105,
+     105
+    ],
+    "f": {
+     "keys": 2072,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.000055033713579177856,
+     "liquidVertices": [
+      332437,
+      332437
+     ],
+     "phiTotal": [
+      3851531.97737466,
+      3851531.97737466
+     ]
+    },
+    "c": {
+     "keys": 105,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.000003904104232788086,
+     "liquidVertices": [
+      13383,
+      13383
+     ],
+     "phiTotal": [
+      360871.2709029019,
+      360871.2709029019
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       309687,
+       309687
+      ],
+      "maxPosSum": 0
+     },
+     {
+      "n": [
+       306826,
+       306826
+      ],
+      "maxPosSum": 0
+     }
+    ]
+   },
+   "step2": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2081,
+     2081
+    ],
+    "liveC": [
+     103,
+     103
+    ],
+    "f": {
+     "keys": 2081,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 9.808831006288528,
+     "maxBrickNegCount": 2,
+     "maxBrickUSum": 10.88133880496025,
+     "liquidVertices": [
+      349086,
+      349086
+     ],
+     "phiTotal": [
+      3517422.4010569574,
+      3517435.3093671417
+     ]
+    },
+    "c": {
+     "keys": 103,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0.3618541955947876,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.0038750208914279938,
+     "liquidVertices": [
+      13383,
+      13383
+     ],
+     "phiTotal": [
+      344602.8463993035,
+      344603.05366575345
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       306479,
+       306465
+      ],
+      "maxPosSum": 1328.81984706223
+     },
+     {
+      "n": [
+       307112,
+       307112
+      ],
+      "maxPosSum": 0
+     }
+    ]
+   },
+   "step4": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2074,
+     2074
+    ],
+    "liveC": [
+     101,
+     101
+    ],
+    "f": {
+     "keys": 2074,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 375.85184812545776,
+     "maxBrickNegCount": 3,
+     "maxBrickUSum": 15.42011404002551,
+     "liquidVertices": [
+      346412,
+      346403
+     ],
+     "phiTotal": [
+      3517576.4571940633,
+      3517309.0682487898
+     ]
+    },
+    "c": {
+     "keys": 101,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 7.553817272186279,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.1634441763162613,
+     "liquidVertices": [
+      13353,
+      13353
+     ],
+     "phiTotal": [
+      330397.1340823816,
+      330390.3910388814
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       308213,
+       308257
+      ],
+      "maxPosSum": 2595.7126612365246
+     },
+     {
+      "n": [
+       307800,
+       307834
+      ],
+      "maxPosSum": 4682.584346204996
+     }
+    ]
+   }
+  },
+  "identity3": {
+   "step1": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2072,
+     2072
+    ],
+    "liveC": [
+     105,
+     105
+    ],
+    "f": {
+     "keys": 2072,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.00005316734313964844,
+     "liquidVertices": [
+      332437,
+      332437
+     ],
+     "phiTotal": [
+      3851531.97737466,
+      3851531.97737466
+     ]
+    },
+    "c": {
+     "keys": 105,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.000005424022674560547,
+     "liquidVertices": [
+      13383,
+      13383
+     ],
+     "phiTotal": [
+      360871.2709029019,
+      360871.2709029019
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       309687,
+       309687
+      ],
+      "maxPosSum": 0
+     },
+     {
+      "n": [
+       306826,
+       306826
+      ],
+      "maxPosSum": 0
+     }
+    ]
+   },
+   "step2": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2081,
+     2081
+    ],
+    "liveC": [
+     103,
+     103
+    ],
+    "f": {
+     "keys": 2081,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 3.884645462036133,
+     "maxBrickNegCount": 1,
+     "maxBrickUSum": 12.915295398561284,
+     "liquidVertices": [
+      349086,
+      349082
+     ],
+     "phiTotal": [
+      3517422.4010569574,
+      3517439.801235539
+     ]
+    },
+    "c": {
+     "keys": 103,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0.25306570529937744,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.0068113477900624275,
+     "liquidVertices": [
+      13383,
+      13383
+     ],
+     "phiTotal": [
+      344602.8463993035,
+      344603.182867147
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       306479,
+       306471
+      ],
+      "maxPosSum": 521.720077842474
+     },
+     {
+      "n": [
+       307112,
+       307112
+      ],
+      "maxPosSum": 0
+     }
+    ]
+   },
+   "step4": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2074,
+     2072
+    ],
+    "liveC": [
+     101,
+     101
+    ],
+    "f": {
+     "keys": 2074,
+     "keysOnlyOne": 2,
+     "onlyKeys": [
+      "a:12,1,0 neg 512 phi -12056.3",
+      "a:12,1,1 neg 512 phi -12740.7"
+     ],
+     "maxBrickPhiSum": 374.8807611465454,
+     "maxBrickNegCount": 4,
+     "maxBrickUSum": 16.556036770431092,
+     "liquidVertices": [
+      346412,
+      345387
+     ],
+     "phiTotal": [
+      3517576.4571940633,
+      3542180.1544534955
+     ]
+    },
+    "c": {
+     "keys": 101,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 9.179702907800674,
+     "maxBrickNegCount": 2,
+     "maxBrickUSum": 0.4761265516281128,
+     "liquidVertices": [
+      13353,
+      13350
+     ],
+     "phiTotal": [
+      330397.1340823816,
+      330406.1117908377
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       308213,
+       308247
+      ],
+      "maxPosSum": 5689.2054601460695
+     },
+     {
+      "n": [
+       307800,
+       307831
+      ],
+      "maxPosSum": 5287.40586258471
+     }
+    ]
+   }
+  },
+  "compact": {
+   "step1": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2072,
+     2072
+    ],
+    "liveC": [
+     105,
+     105
+    ],
+    "f": {
+     "keys": 2072,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.000051021575927734375,
+     "liquidVertices": [
+      332437,
+      332437
+     ],
+     "phiTotal": [
+      3851531.97737466,
+      3851531.97737466
+     ]
+    },
+    "c": {
+     "keys": 105,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.0000037103891372680664,
+     "liquidVertices": [
+      13383,
+      13383
+     ],
+     "phiTotal": [
+      360871.2709029019,
+      360871.2709029019
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       309687,
+       309687
+      ],
+      "maxPosSum": 0
+     },
+     {
+      "n": [
+       306826,
+       306826
+      ],
+      "maxPosSum": 0
+     }
+    ]
+   },
+   "step2": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2081,
+     2081
+    ],
+    "liveC": [
+     103,
+     103
+    ],
+    "f": {
+     "keys": 2081,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 9.808824181556702,
+     "maxBrickNegCount": 2,
+     "maxBrickUSum": 12.913764393655583,
+     "liquidVertices": [
+      349086,
+      349086
+     ],
+     "phiTotal": [
+      3517422.4010569574,
+      3517402.635782809
+     ]
+    },
+    "c": {
+     "keys": 103,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0.22829580307006836,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.003991418518126011,
+     "liquidVertices": [
+      13383,
+      13383
+     ],
+     "phiTotal": [
+      344602.8463993035,
+      344602.50327306613
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       306479,
+       306455
+      ],
+      "maxPosSum": 2593.082097798586
+     },
+     {
+      "n": [
+       307112,
+       307112
+      ],
+      "maxPosSum": 0
+     }
+    ]
+   },
+   "step4": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2074,
+     2074
+    ],
+    "liveC": [
+     101,
+     101
+    ],
+    "f": {
+     "keys": 2074,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 70.91347980499268,
+     "maxBrickNegCount": 3,
+     "maxBrickUSum": 13.12197531759739,
+     "liquidVertices": [
+      346412,
+      346403
+     ],
+     "phiTotal": [
+      3517576.4571940633,
+      3517797.642286336
+     ]
+    },
+    "c": {
+     "keys": 101,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 6.441773533821106,
+     "maxBrickNegCount": 1,
+     "maxBrickUSum": 0.23215323686599731,
+     "liquidVertices": [
+      13353,
+      13352
+     ],
+     "phiTotal": [
+      330397.1340823816,
+      330403.89710323326
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       308213,
+       308290
+      ],
+      "maxPosSum": 5217.142121434212
+     },
+     {
+      "n": [
+       307800,
+       307859
+      ],
+      "maxPosSum": 4611.239451274276
+     }
+    ]
+   }
+  },
+  "morton": {
+   "step1": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2072,
+     2072
+    ],
+    "liveC": [
+     105,
+     105
+    ],
+    "f": {
+     "keys": 2072,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.00006181374192237854,
+     "liquidVertices": [
+      332437,
+      332437
+     ],
+     "phiTotal": [
+      3851531.97737466,
+      3851531.977374658
+     ]
+    },
+    "c": {
+     "keys": 105,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.0000032410025596618652,
+     "liquidVertices": [
+      13383,
+      13383
+     ],
+     "phiTotal": [
+      360871.2709029019,
+      360871.2709029019
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       309687,
+       309687
+      ],
+      "maxPosSum": 0
+     },
+     {
+      "n": [
+       306826,
+       306826
+      ],
+      "maxPosSum": 0
+     }
+    ]
+   },
+   "step2": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2081,
+     2081
+    ],
+    "liveC": [
+     103,
+     103
+    ],
+    "f": {
+     "keys": 2081,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 9.808839589357376,
+     "maxBrickNegCount": 2,
+     "maxBrickUSum": 10.877316743135452,
+     "liquidVertices": [
+      349086,
+      349087
+     ],
+     "phiTotal": [
+      3517422.4010569574,
+      3517422.6632100157
+     ]
+    },
+    "c": {
+     "keys": 103,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 0.14780592918395996,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.0044499668292701244,
+     "liquidVertices": [
+      13383,
+      13383
+     ],
+     "phiTotal": [
+      344602.8463993035,
+      344602.7162952386
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       306479,
+       306467
+      ],
+      "maxPosSum": 1839.5284744799137
+     },
+     {
+      "n": [
+       307112,
+       307112
+      ],
+      "maxPosSum": 0
+     }
+    ]
+   },
+   "step4": {
+    "fail": [
+     0,
+     0
+    ],
+    "liveF": [
+     2074,
+     2074
+    ],
+    "liveC": [
+     101,
+     101
+    ],
+    "f": {
+     "keys": 2074,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 378.11874628067017,
+     "maxBrickNegCount": 4,
+     "maxBrickUSum": 14.044522482901812,
+     "liquidVertices": [
+      346412,
+      346396
+     ],
+     "phiTotal": [
+      3517576.4571940633,
+      3517114.6050077574
+     ]
+    },
+    "c": {
+     "keys": 101,
+     "keysOnlyOne": 0,
+     "onlyKeys": [],
+     "maxBrickPhiSum": 8.233410477638245,
+     "maxBrickNegCount": 0,
+     "maxBrickUSum": 0.1623266488313675,
+     "liquidVertices": [
+      13353,
+      13353
+     ],
+     "phiTotal": [
+      330397.1340823816,
+      330384.3218435808
+     ]
+    },
+    "particles": [
+     {
+      "n": [
+       308213,
+       308344
+      ],
+      "maxPosSum": 6590.545148059726
+     },
+     {
+      "n": [
+       307800,
+       307804
+      ],
+      "maxPosSum": 1023.9724066853523
+     }
+    ]
+   }
+  }
+ },
+ "anomalies": {},
+ "timing": {
+  "identity": {
+   "wallMin": 31093.402000000002,
+   "wallMed": 31477.27,
+   "part1Min": 7682.717,
+   "part2Min": 23362.269,
+   "sumPlacements": 31476.221,
+   "byEntry": {
+    "censusBegin": 7.375,
+    "regionHeat": 22.458,
+    "regionSpread": 23.042,
+    "regionStill": 15.665,
+    "regionDeep": 55,
+    "censusFine": 928.236,
+    "censusCoarse": 271.079,
+    "censusCubes": 18.292,
+    "censusImportance": 86.748,
+    "censusDecide": 941.403,
+    "resMark": 133.371,
+    "resSource": 12.625,
+    "setClaimPages": 5.667,
+    "setClaimBricks": 12.917,
+    "setLeave": 10.291,
+    "setLeavePages": 9.25,
+    "setRecords": 13.333,
+    "setInit": 18.667,
+    "setLists": 27.166,
+    "setArgs": 22.917,
+    "censusWant": 13.958,
+    "setTransferList": 32.292,
+    "setTransferArgs": 4.834,
+    "setTransferFaces": 245.579,
+    "setTransferCells": 140.372,
+    "setTransferCommit": 36.749,
+    "setCommitMask": 11.583,
+    "certCoarse": 146.372,
+    "certFine": 271.955,
+    "certError": 100.124,
+    "stepEnd": 9.083,
+    "nrReach": 111.04,
+    "nrSpread": 68.53999999999999,
+    "lResolve": 711.905,
+    "uCache": 444.784,
+    "uCache4": 55.083,
+    "pLiquid": 154.832,
+    "pSeed": 1123.732,
+    "pArgs": 9.999,
+    "pSeparate": 1291.147,
+    "pMove": 1213.982,
+    "pScan": 130.664,
+    "pScatter": 83.124,
+    "pTiles": 68.708,
+    "setMark": 105.248,
+    "setMarkPages": 25.208,
+    "nrWallReach": 39,
+    "vGauge": 260.289,
+    "lInit": 80.915,
+    "lAdvect": 1957.178,
+    "lcAdvect": 689.698,
+    "lSplat": 331.703,
+    "lUnion": 408.659,
+    "lcCouple": 161.372,
+    "lTiles": 176.831,
+    "lDilateC": 96.749,
+    "lDilate": 200.082,
+    "lClear": 266.62,
+    "lcClear": 84.041,
+    "lResolveD": 142.998,
+    "lNear": 448.826,
+    "lDistance": 916.444,
+    "lcRetire": 696.614,
+    "lPublish": 183.33,
+    "lcPublish": 23.166,
+    "uAdvect": 1097.066,
+    "pDeposit": 699.572,
+    "uTransfer": 1645.767,
+    "pressureRowsList": 23.499,
+    "pmgListArgs": 6.791,
+    "pressureRowsZero": 23.708,
+    "pressureTileRoots": 163.04,
+    "nbOperator": 1139.358,
+    "pressureRowsC": 319.579,
+    "pmgSetupClear": 5.333,
+    "pmgGuess": 82.707,
+    "pmgWallsG": 19.875,
+    "pmgSetupF": 210.038,
+    "pmgCoarsenC": 57.542,
+    "pmgCoarsenTop": 80.541,
+    "pmgPreS": 411.994,
+    "pmgPreU": 291.95199999999994,
+    "pmgNativePre0": 169.124,
+    "pmgDown0": 428.45000000000005,
+    "pmgNativePre1": 191.95399999999998,
+    "pmgDown1": 117.37199999999999,
+    "pmgDown1C": 168.081,
+    "pmgDown2": 125.12199999999999,
+    "pmgDown3": 141.45499999999998,
+    "pmgTopCycle": 335.868,
+    "pmgUp3": 120.499,
+    "pmgUp2": 127.61999999999999,
+    "pmgNativePost1": 165.039,
+    "pmgUp1": 137.998,
+    "pmgNativePost0": 178.875,
+    "pmgPostU": 312.744,
+    "pmgPostS": 423.495,
+    "pmgPostZ": 378.368,
+    "pmgDirection": 649.366,
+    "pmgUpdate": 741.074,
+    "pmgWallGate": 6.167,
+    "pmgWallsF": 28.458,
+    "pmgWallsC": 15.417,
+    "pmgCheck": 73.791,
+    "pmgFinish": 14.625,
+    "pmgFinishC": 12,
+    "pressureProjectC": 116.748,
+    "pmgPressureDelta": 20.084,
+    "project": 490.325,
+    "projectDry": 242.163,
+    "pressureProjectRest": 12.415,
+    "uExt4Seed": 397.744,
+    "uExt4": 251.496,
+    "uExtend": 1592.059,
+    "pJoin": 221.622,
+    "pDelta": 379.327
+   },
+   "heavy": 14587.446000000002
+  },
+  "compact": {
+   "wallMin": 30892.611,
+   "wallMed": 31047.567,
+   "part1Min": 7628.175,
+   "part2Min": 23264.436,
+   "sumPlacements": 31241.856000000003,
+   "byEntry": {
+    "censusBegin": 6.958,
+    "regionHeat": 22.166,
+    "regionSpread": 23.083,
+    "regionStill": 15.5,
+    "regionDeep": 54.707,
+    "censusFine": 918.694,
+    "censusCoarse": 270.329,
+    "censusCubes": 18.333,
+    "censusImportance": 85.916,
+    "censusDecide": 969.735,
+    "resMark": 133.081,
+    "resSource": 12.959,
+    "setClaimPages": 5.917,
+    "setClaimBricks": 12.959,
+    "setLeave": 10.333,
+    "setLeavePages": 9.249,
+    "setRecords": 13.333,
+    "setInit": 17.667,
+    "setLists": 26.124000000000002,
+    "setArgs": 22.667,
+    "censusWant": 13.917,
+    "setTransferList": 31.291,
+    "setTransferArgs": 4.833,
+    "setTransferFaces": 246.038,
+    "setTransferCells": 132.957,
+    "setTransferCommit": 36.707,
+    "setCommitMask": 10.666,
+    "certCoarse": 142.663,
+    "certFine": 269.454,
+    "certError": 110.54,
+    "stepEnd": 9.375,
+    "nrReach": 111.832,
+    "nrSpread": 67.165,
+    "lResolve": 712.029,
+    "uCache": 444.619,
+    "uCache4": 56.041,
+    "pLiquid": 150.498,
+    "pSeed": 1093.192,
+    "pArgs": 10.167,
+    "pSeparate": 1300.938,
+    "pMove": 1221.897,
+    "pScan": 130.956,
+    "pScatter": 83.541,
+    "pTiles": 67.999,
+    "setMark": 110.958,
+    "setMarkPages": 24.999,
+    "nrWallReach": 38.999,
+    "vGauge": 249.454,
+    "lInit": 79.206,
+    "lAdvect": 1931.679,
+    "lcAdvect": 675.615,
+    "lSplat": 323.079,
+    "lUnion": 399.785,
+    "lcCouple": 147.581,
+    "lTiles": 176.207,
+    "lDilateC": 92.208,
+    "lDilate": 200.37199999999999,
+    "lClear": 264.829,
+    "lcClear": 80.999,
+    "lResolveD": 140.955,
+    "lNear": 449.493,
+    "lDistance": 907.027,
+    "lcRetire": 717.906,
+    "lPublish": 181.955,
+    "lcPublish": 23.042,
+    "uAdvect": 1129.4,
+    "pDeposit": 677.781,
+    "uTransfer": 1664.475,
+    "pressureRowsList": 22.999,
+    "pmgListArgs": 6.832,
+    "pressureRowsZero": 22.708,
+    "pressureTileRoots": 163.164,
+    "nbOperator": 1124.816,
+    "pressureRowsC": 318.953,
+    "pmgSetupClear": 5.417,
+    "pmgGuess": 79.457,
+    "pmgWallsG": 19.417,
+    "pmgSetupF": 201.997,
+    "pmgCoarsenC": 57.041,
+    "pmgCoarsenTop": 78.208,
+    "pmgPreS": 406.702,
+    "pmgPreU": 288.454,
+    "pmgNativePre0": 164.54,
+    "pmgDown0": 401.20199999999994,
+    "pmgNativePre1": 186.74699999999999,
+    "pmgDown1": 112.62299999999999,
+    "pmgDown1C": 164.914,
+    "pmgDown2": 125.664,
+    "pmgDown3": 139.998,
+    "pmgTopCycle": 337.617,
+    "pmgUp3": 120.87299999999999,
+    "pmgUp2": 128.042,
+    "pmgNativePost1": 164.70399999999998,
+    "pmgUp1": 135.958,
+    "pmgNativePost0": 171.66299999999998,
+    "pmgPostU": 321.205,
+    "pmgPostS": 414.2029999999999,
+    "pmgPostZ": 372.4549999999999,
+    "pmgDirection": 630.826,
+    "pmgUpdate": 734.199,
+    "pmgWallGate": 6.083,
+    "pmgWallsF": 28,
+    "pmgWallsC": 14.791,
+    "pmgCheck": 73.955,
+    "pmgFinish": 14.417,
+    "pmgFinishC": 11.665,
+    "pressureProjectC": 117.04,
+    "pmgPressureDelta": 20.458,
+    "project": 489.075,
+    "projectDry": 240.33,
+    "pressureProjectRest": 11.5,
+    "uExt4Seed": 375.494,
+    "uExt4": 249.121,
+    "uExtend": 1566.601,
+    "pJoin": 225.497,
+    "pDelta": 377.202
+   },
+   "heavy": 14562.653000000002
+  },
+  "morton": {
+   "wallMin": 30772.487,
+   "wallMed": 30958.528000000002,
+   "part1Min": 7691.3,
+   "part2Min": 23007.856,
+   "sumPlacements": 31107.820000000007,
+   "byEntry": {
+    "censusBegin": 7.125,
+    "regionHeat": 22.333,
+    "regionSpread": 22.834,
+    "regionStill": 15.834,
+    "regionDeep": 55.083,
+    "censusFine": 920.402,
+    "censusCoarse": 274.996,
+    "censusCubes": 18.125,
+    "censusImportance": 85.415,
+    "censusDecide": 956.944,
+    "resMark": 132.498,
+    "resSource": 12.792,
+    "setClaimPages": 5.75,
+    "setClaimBricks": 12.917,
+    "setLeave": 10.083,
+    "setLeavePages": 9.083,
+    "setRecords": 13.334,
+    "setInit": 17.666,
+    "setLists": 25.873,
+    "setArgs": 22.5,
+    "censusWant": 14.083,
+    "setTransferList": 32.25,
+    "setTransferArgs": 4.833,
+    "setTransferFaces": 248.122,
+    "setTransferCells": 137.373,
+    "setTransferCommit": 36.665,
+    "setCommitMask": 11.083,
+    "certCoarse": 146.039,
+    "certFine": 266.58,
+    "certError": 111.332,
+    "stepEnd": 8.708,
+    "nrReach": 111.081,
+    "nrSpread": 64.042,
+    "lResolve": 705.363,
+    "uCache": 443.453,
+    "uCache4": 58.749,
+    "pLiquid": 152.623,
+    "pSeed": 1113.273,
+    "pArgs": 10.042,
+    "pSeparate": 1274.897,
+    "pMove": 1220.607,
+    "pScan": 130.873,
+    "pScatter": 83.041,
+    "pTiles": 69.083,
+    "setMark": 105.414,
+    "setMarkPages": 25.125,
+    "nrWallReach": 39.25,
+    "vGauge": 242.372,
+    "lInit": 79.458,
+    "lAdvect": 1925.637,
+    "lcAdvect": 678.072,
+    "lSplat": 317.995,
+    "lUnion": 393.161,
+    "lcCouple": 151.914,
+    "lTiles": 174.788,
+    "lDilateC": 93.41499999999999,
+    "lDilate": 194.415,
+    "lClear": 264.829,
+    "lcClear": 81.54,
+    "lResolveD": 141.665,
+    "lNear": 445.41099999999994,
+    "lDistance": 890.653,
+    "lcRetire": 648.073,
+    "lPublish": 181.206,
+    "lcPublish": 23.125,
+    "uAdvect": 1103.233,
+    "pDeposit": 704.323,
+    "uTransfer": 1661.933,
+    "pressureRowsList": 22.666,
+    "pmgListArgs": 6.833,
+    "pressureRowsZero": 22.04,
+    "pressureTileRoots": 162.664,
+    "nbOperator": 1095.4,
+    "pressureRowsC": 389.536,
+    "pmgSetupClear": 5.292,
+    "pmgGuess": 80.583,
+    "pmgWallsG": 18.917,
+    "pmgSetupF": 206.122,
+    "pmgCoarsenC": 58.999,
+    "pmgCoarsenTop": 76.415,
+    "pmgPreS": 401.11999999999995,
+    "pmgPreU": 283.2049999999999,
+    "pmgNativePre0": 160.32999999999998,
+    "pmgDown0": 397.745,
+    "pmgNativePre1": 179.956,
+    "pmgDown1": 110.583,
+    "pmgDown1C": 163.04,
+    "pmgDown2": 123.33,
+    "pmgDown3": 138.956,
+    "pmgTopCycle": 333.74600000000004,
+    "pmgUp3": 120.33099999999999,
+    "pmgUp2": 127.249,
+    "pmgNativePost1": 161.70499999999998,
+    "pmgUp1": 134.53699999999998,
+    "pmgNativePost0": 174.12199999999999,
+    "pmgPostU": 312.826,
+    "pmgPostS": 406.16099999999994,
+    "pmgPostZ": 368.743,
+    "pmgDirection": 622.365,
+    "pmgUpdate": 725.5730000000001,
+    "pmgWallGate": 5.625,
+    "pmgWallsF": 26.917,
+    "pmgWallsC": 15.082,
+    "pmgCheck": 71.456,
+    "pmgFinish": 14.583,
+    "pmgFinishC": 12,
+    "pressureProjectC": 124.79,
+    "pmgPressureDelta": 18.958,
+    "project": 478.118,
+    "projectDry": 239.954,
+    "pressureProjectRest": 12.375,
+    "uExt4Seed": 407.411,
+    "uExt4": 258.621,
+    "uExtend": 1544.894,
+    "pJoin": 245.413,
+    "pDelta": 377.744
+   },
+   "heavy": 14433.446
+  }
+ },
+ "heavy": [
+  "lAdvect",
+  "uTransfer",
+  "uExtend",
+  "pSeparate",
+  "pMove",
+  "nbOperator",
+  "pSeed",
+  "uAdvect",
+  "censusDecide",
+  "censusFine",
+  "lDistance",
+  "pmgUpdate"
+ ],
+ "counterCycles": 55
+}
