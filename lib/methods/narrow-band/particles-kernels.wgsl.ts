@@ -39,7 +39,7 @@ import { brickDetailWGSL } from "./brick-detail.wgsl";
 import { ARGS, type BrickLayout } from "./brick-abi";
 import type { BrickBinding, BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
-import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
+import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fgDepthWGSL, fluidKernel } from "./fluid-grid.wgsl";
 import { particleResidencyTravelWGSL } from "../uniform/uniform-local-residency";
 import { NBF_PARTICLE_SETTINGS, nbfApicWGSL, nbfParticleFormulasAt, nbfParticleRecordFor, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { nbfDeltaWGSL } from "./velocity-formulas.wgsl";
@@ -114,13 +114,8 @@ fn pApicSample(q:vec3f)->array<vec4f,3>{
 }
 `;
 
-/** fgDepth's text (FG_DEPTH_WGSL) as psDepth, its corner and reach reads through pSeed's stage (lane E). */
-const PS_DEPTH_WGSL = (() => {
-  const at = FG_DEPTH_WGSL.indexOf("fn fgDepth(");
-  const body = FG_DEPTH_WGSL.slice(at, FG_DEPTH_WGSL.indexOf("\n}\n", at) + 3);
-  for (const x of ["if(!fgReach1(c))", "fgDepthVertex(c+vec3i(corner))"]) if (!body.includes(x)) throw new Error(`particles: fgDepth changed shape (${x})`);
-  return body.replace("fn fgDepth(", "fn psDepth(").replace("if(!fgReach1(c))", "if(!psReach1(c))").replace("fgDepthVertex(c+vec3i(corner))", "psDepthVertex(c+vec3i(corner))");
-})();
+/** fgDepth's text (fgDepthWGSL) as psDepth, its corner and reach reads through pSeed's stage (lane E). */
+const PS_DEPTH_WGSL = fgDepthWGSL("psDepth", "psReach1", "psDepthVertex");
 
 /** The particle kernels; options.bandDepth the particle band's depth in cells (the scene's, 3 by default);
  * options.statics the scene's static voxel mask is bound (lane E's pSolid and the seeding's blocked test). */

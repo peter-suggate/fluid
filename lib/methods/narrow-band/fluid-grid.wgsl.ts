@@ -625,21 +625,49 @@ fn fgSampleVel(p:vec3f,lo:u32,hi:u32)->vec3f{
 }
 `;
 
-/** The particle depth (needs fcell and phi): particleDepthIn. Bank A's trilinear in a reach-1 tile, else φ pushed
- * to six cells (nbfFarDepth). */
-export const FG_DEPTH_WGSL = /* wgsl */`
-fn fgDepthVertex(v:vec3i)->f32{let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_AIR;}return fcLoadF(FC_DEPTH+fgCell(s,v));}
-fn fgDepth(p:vec3f)->f32{
+/** The particle depth's text as fn `name`: particleDepthIn, bank A's trilinear in a `reach` tile, its corners read
+ * by `vertex`, else φ pushed to six cells (nbfFarDepth). `bricks` runs before the corners (FG_DEPTH_WGSL's lookups);
+ * pSeed's psDepth is the same text over its stage (particles-kernels.wgsl.ts). */
+export const fgDepthWGSL = (name: string, reach: string, vertex: string, bricks = "") => /* wgsl */`fn ${name}(p:vec3f)->f32{
  let c=vec3i(floor(p));
- if(!fgReach1(c)){let far=fgPhiAt(p);return select(max(far,6.0),min(far,-6.0),far<0.0);}
- let f=p-vec3f(c);var value=0.0;
+ if(!${reach}(c)){let far=fgPhiAt(p);return select(max(far,6.0),min(far,-6.0),far<0.0);}
+ let f=p-vec3f(c);var value=0.0;${bricks}
  for(var k=0u;k<8u;k++){
   let corner=vec3u(k&1u,(k>>1u)&1u,k>>2u);let w=select(1.0-f,f,corner!=vec3u(0));
-  value+=w.x*w.y*w.z*fgDepthVertex(c+vec3i(corner));
+  value+=w.x*w.y*w.z*${vertex}(c+vec3i(corner));
  }
  return value;
 }
 `;
+
+/** The particle depth (needs fcell and phi): fgDepth, fgDepthWGSL with fgReach1 and the corners' bricks looked up
+ * once (docs/plans/gpu-shape/m1-distinct-once.md). fgDepthVertex walked the directory a corner (two dependent loads)
+ * and branched on the walk, and the branch held back the next corner's loads: pMove reads 1-3 depths a record. The
+ * corners c..c+1 lie in bricks c >> 3 and (c + 1) >> 3 an axis; fdBricks walks each distinct one once, the walks
+ * independent, and fdVertex picks a corner's slot by selects. A reach-1 c has a slot, so c >= 0 and fgSlot(v) is
+ * fgBrickSlot(v >> 3) at every corner: fdVertex reads fgDepthVertex's word. */
+export const FG_DEPTH_WGSL = /* wgsl */`
+fn fgDepthVertex(v:vec3i)->f32{let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_AIR;}return fcLoadF(FC_DEPTH+fgCell(s,v));}
+var<private> fdBrick:vec3i;
+var<private> fdSlot0:u32;var<private> fdSlot1:u32;var<private> fdSlot2:u32;var<private> fdSlot3:u32;
+var<private> fdSlot4:u32;var<private> fdSlot5:u32;var<private> fdSlot6:u32;var<private> fdSlot7:u32;
+fn fdBricks(c:vec3i){
+ // Bricks x + 2y + 4z of the 2^3 at c >> 3; on an axis the corners do not cross, the upper ones repeat the lower.
+ let b0=c>>vec3u(3u);let b1=(c+vec3i(1))>>vec3u(3u);let d=b1!=b0;fdBrick=b0;
+ fdSlot0=fgBrickSlot(b0);
+ if(d.x){fdSlot1=fgBrickSlot(vec3i(b1.x,b0.y,b0.z));}else{fdSlot1=fdSlot0;}
+ if(d.y){fdSlot2=fgBrickSlot(vec3i(b0.x,b1.y,b0.z));if(d.x){fdSlot3=fgBrickSlot(vec3i(b1.x,b1.y,b0.z));}else{fdSlot3=fdSlot2;}}else{fdSlot2=fdSlot0;fdSlot3=fdSlot1;}
+ if(d.z){
+  fdSlot4=fgBrickSlot(vec3i(b0.x,b0.y,b1.z));if(d.x){fdSlot5=fgBrickSlot(vec3i(b1.x,b0.y,b1.z));}else{fdSlot5=fdSlot4;}
+  if(d.y){fdSlot6=fgBrickSlot(vec3i(b0.x,b1.y,b1.z));if(d.x){fdSlot7=fgBrickSlot(b1);}else{fdSlot7=fdSlot6;}}else{fdSlot6=fdSlot4;fdSlot7=fdSlot5;}
+ }else{fdSlot4=fdSlot0;fdSlot5=fdSlot1;fdSlot6=fdSlot2;fdSlot7=fdSlot3;}
+}
+fn fdVertex(v:vec3i)->f32{
+ let d=(v>>vec3u(3u))!=fdBrick;
+ let s=select(select(select(fdSlot0,fdSlot1,d.x),select(fdSlot2,fdSlot3,d.x),d.y),select(select(fdSlot4,fdSlot5,d.x),select(fdSlot6,fdSlot7,d.x),d.y),d.z);
+ if(s==NB_NONE){return NB_PHI_AIR;}return fcLoadF(FC_DEPTH+fgCell(s,v));
+}
+${fgDepthWGSL("fgDepth", "fgReach1", "fdVertex", "\n fdBricks(c);")}`;
 
 /** A cell's run in the bank pScatter wrote (needs set and fcell): [start, end), empty where the slot's bin is. */
 export const FG_RUN_WGSL = /* wgsl */`
