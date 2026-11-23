@@ -141,3 +141,84 @@ Its numbers above are the frozen-state ones.
 - lCorners0 (lAdvect, phiSolid) and pMove's fgCornersOf: the corners win (−4 to −9%) is either 1 ulp (lAdvect) or
   smaller than depth alone and lives in the shared FG_PHI_WGSL (pMove, exact); not landed.
 - nbOperator and pSeed: not looked at (pSeed already stages its depth vertices in workgroup memory).
+
+## Gates for small exact wins (lane A2, 2026-11-24, second task)
+
+The timing round cannot resolve a change under ~1% (above). Three tools changed, commit 67c09e96 and the stepab
+commit:
+
+- **Paddleboats observer** (tools/nbflip-observe-brick.ts). The engine's box under an open top is the lattice's
+  y: the container plus `fluid.brickTiers.openTopHeadroom` (brick-scene.ts; a scene setting since 9265994e). The
+  observer compared that with the container (sceneLatticeDimensions): 512x64x192 vs 512x32x192, and failed at step
+  0 for every tree. Now x and z must match, and y must hold the container under the headroom (open top only). The
+  bins are x/z only, so liquid splashed over the rim is counted, as the engine's box counts it.
+- **Balanced timing round** (tools/nbflip-timing-round.sh, nbflip-gates.ts `--order`). Per scene, fenced and
+  pipelined run their base/candidate pair in opposite orders, and the scenes alternate which order comes first:
+  scene 1 runs fenced base then candidate, and pipelined candidate then base; scene 2 the reverse. OUT/order.log
+  records the order. The table adds each pair's row with its order and the **order-balanced change** (the mean of
+  the two pairs' changes). No extra runs: four a scene, as before.
+- **Frozen whole-step A/B** (tools/experiments/gpu-shape/stepab.mts). The landing gate for bit-identical changes.
+  It builds the engine from BASE and warms it to step 100 (census settings, as m1fix). A child process builds
+  CAND's engine and dumps its schedule. Placement for placement, the two schedules must agree in everything but
+  the WGSL (label, entry, bindings, dispatch, z/w); otherwise it fails explicitly, so host-side changes need the
+  round.
+  - Exactness: per changed placement, it snapshots the state just before it (S0, then base placements 0..i-1). From
+    that snapshot it runs base, candidate and base again, then compares every read-write binding word for word.
+    Where base and base again differ (atomic order: pSeed's claimed particle slots, pMove's fpart ranks), the buffer
+    is compared as a multiset of records instead: NB_PSTRIDE words a particle in `parts`, one word elsewhere, by two
+    order-free hash sums. It passes "identical up to order".
+  - Timing: the whole step from S0, with base, candidate and an A/A set (base again), rotated each sample. S0 is
+    held on the GPU (a mirror of every buffer, copied back inside the submit before each replay). A sample is R=4
+    replays untimed, then R timed with gpu-kernel-timer, then R GPU walls. S=9 samples. A sample is dropped when the
+    clock probe reads more than 1.3x the top clock's. The figures are per-family minima.
+  - The gate figure is the **changed families' Σ Δ**. Unchanged families run the same text, and their Δ, like
+    every A/A, is the floor.
+  - First version, superseded: a host restore (GBs uploaded) before each single replay. Per-kernel times spread
+    1-3x, and the whole-step A/A was +1.9 ms on dam.
+
+stepab, cbb5f5b5 + e8a33481 (export of 7e6a6ac8) vs c12d19cd (lib of 734dd9e2), step 100, one run a scene.
+Measured; ms are per-family minima (Σ placements is serialised, one pass a dispatch):
+
+| scene | changed placements: exact | changed families Σ Δ (A/A) | unchanged Σ Δ (A/A) | GPU wall min (A/A) |
+|---|---|---|---|---|
+| seep | 8 of 8 (fpart, parts up to order) | −0.037 ms, −0.19% of 19.57 (−0.032) | +0.126 (+0.015) | +0.004 ms, +0.02% (−0.200) |
+| dam | 6 of 6 | **−0.466 ms, −1.49%** of 31.22 (+0.042) | +0.067 (+0.025) | −0.589 ms, −1.88% (−0.016) |
+| letters | 6 of 6 | **−1.128 ms, −2.48%** of 45.55 (−0.010) | +0.033 (−0.061) | −1.452 ms, −3.18% (−0.539) |
+| paddleboats | 6 of 6 | **−0.554 ms, −1.60%** of 34.64 (+0.028) | +0.024 (−0.022) | −0.564 ms, −1.63% (+0.032) |
+
+Per family (base → candidate ms):
+- dam: lAdvect −10.7%, pMove −12.9%, pSeparate −8.0%, pSeed −0.8%, uTransfer +0.1%.
+- letters: pMove −16.6%, uTransfer −10.2%, lAdvect −13.3%, pSeparate −11.8%, pSeed +2.2%.
+- paddleboats: lAdvect −11.4%, uTransfer −9.1%, pMove −13.5%, pSeparate −10.6%, pSeed +0.9%.
+- seep: uTransfer −10.1%, phiSolid **+9.1%** (0.882 → 0.962, A/A −0.010), pMove −9.4%, pSeparate −5.2%, lAdvect
+  +1.2%, pSeed +1.6%, pSolid −3.8%.
+
+Reading:
+- The changed-family A/A is ≤ 0.04 ms on every scene, so the tool resolves about 0.1% of a step.
+- All four scenes are exact.
+- Three scenes gain 1.5-2.5%. Seep is flat: in the step, phiSolid loses what uTransfer and pMove gain. The
+  isolated frozen-state A/B (m1fix, R batched copies of phiSolid alone) had phiSolid −6.2% on seep. Inference:
+  phiSolid's in-step cost depends on what runs before it (its cache state), and only the whole step sees that.
+  Not verified. A later lane could revert the phiSolid half of e8a33481 on seep's evidence; the lAdvect half
+  holds on every scene.
+- pSeparate and pSeed changed through fgDepth (cbb5f5b5) and were not timed before.
+
+Balanced round, paddleboats only. The base is 67c09e96 with lib reverted to before cbb5f5b5 + e8a33481
+(lib = HEAD minus the two landings, lane B2's M4 commits included); the candidate is 67c09e96. Both trees carry the
+fixed observer. Measured:
+- All four 300-step runs completed, rc 0, no Metal aborts. The observer fix holds.
+- Fenced (base first): 36.41 → 36.27 ms median (−0.4%).
+- Pipelined (candidate first): 34.53 → 34.56 ms/step (+0.1%).
+- Order-balanced change: −0.2%. stepab's −1.6% is below this round's resolution, as expected.
+
+The round's final table step had a zsh quoting slip (`${CAND:+a b}` is one word); it was fixed before the stepab
+commit, and the table above comes from rerunning nbflip-gates.ts on the round's runs.
+
+check:types (`tsc --noEmit`):
+- At commit 7e6a6ac8 (a clean archive) it fails on lane-n's files only:
+  - tools/experiments/lane-n/dump-msl.mts (6,46) and (7,43);
+  - tools/experiments/lane-n/features.mts (3,46);
+  - each imports from fluid-scratch/lane-n/tree/lib/..., which no longer exists.
+- In the main working tree at 09:2x it passes. The uncommitted lane-n edits fix it there.
+- The untracked tools/experiments/gpu-shape/m4.mts error seen earlier (388,103: `unknown[]` vs `GPUBuffer[]`) no
+  longer reproduces. m4.mts is lane B2's (it ran as `m4.mts paddleboats` in B2's process tree).

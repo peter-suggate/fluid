@@ -76,4 +76,4 @@ kill $MON 2>/dev/null
 /usr/bin/log show --start "$START" --style compact --predicate 'eventMessage CONTAINS[c] "command buffer was aborted" OR eventMessage CONTAINS[c] "GPU Restart" OR eventMessage CONTAINS[c] "kIOGPUCommandBufferCallbackError"' 2>/dev/null | grep -v -E "^Timestamp|log run noninteractively" > $O/metal.log
 echo "Metal aborts / GPU restarts in the round's window: $(wc -l < $O/metal.log | tr -d ' ') (OUT/metal.log)" | tee -a $O/round.log
 echo "round end $(date '+%Y-%m-%d %H:%M:%S')" | tee -a $O/round.log
-(cd $MAIN && node --import tsx tools/nbflip-gates.ts --timing-only --ref-timing=$O/base ${CAND:+--candidate-timing=$O/candidate --order=$O/order.log} --out=$O --name=timing) | tee -a $O/round.log
+(cd $MAIN && node --import tsx tools/nbflip-gates.ts --timing-only --ref-timing=$O/base ${CAND:+--candidate-timing=$O/candidate} ${CAND:+--order=$O/order.log} --out=$O --name=timing) | tee -a $O/round.log
