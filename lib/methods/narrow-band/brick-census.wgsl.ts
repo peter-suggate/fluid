@@ -1253,29 +1253,34 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
   // (tile z = r), a lane a tile; every workgroup word is the 64-tile slab's, so the slabs run side by side.
   // Out-of-lattice tiles store identity keys and zero words; an h tile without its F brick fails (TIER) when tiered,
   // and is air all-h (CMASK all-ones a resident page: no slot reads NB_PHI_FAR), so it stores the identity.
+  // Workgroup memory 4.5 KB (GPU-shape M5, docs/plans/gpu-shape/m4-clist.md §6): the job lists packed (cqError and
+  // cqDeep a byte a tile, cqVertex and cqPart 16 bits an entry, atomicOr into words zeroed before the first barrier),
+  // cqIsDeep and cqBounded a bit a tile. At 7.1 KB the residency was the workgroup memory's (~8 groups a core under
+  // a 704-thread cap); at 4.5 KB ~10 (frozen paddleboats 0.71 -> 0.66 ms, dam 0.27 -> 0.25, bit for bit).
   const censusCoarse = k("censusCoarse", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + REGION + /* wgsl */`
 var<workgroup> wgFlag:u32;
 var<workgroup> cqErrors:atomic<u32>;
-var<workgroup> cqError:array<u32,64>;
+var<workgroup> cqError:array<atomic<u32>,16>;
 var<workgroup> cqDeeps:atomic<u32>;
-var<workgroup> cqDeep:array<u32,64>;
+var<workgroup> cqDeep:array<atomic<u32>,16>;
 var<workgroup> cqWorst:array<atomic<u32>,64>;
 var<workgroup> cqCurve:array<atomic<u32>,64>;
 var<workgroup> cqDeepest:array<array<atomic<u32>,2>,64>;
 // The slab's depth vertices (the 11 x 11 x 4 box of its tiles' 4^3 wide vertices, from (-1,-1,-1) of the slab's
 // first tile): each one a deep tile reads is sampled once (cqVertex lists them, cqVertexSeen a bit each) and raises
 // every deep tile holding it.
-var<workgroup> cqIsDeep:array<u32,64>;
+var<workgroup> cqIsDeep:array<atomic<u32>,2>;
 var<workgroup> cqVertexSeen:array<atomic<u32>,16>;
 var<workgroup> cqVertices:atomic<u32>;
-var<workgroup> cqVertex:array<u32,484>;
-var<workgroup> cqBounded:array<u32,64>;
+var<workgroup> cqVertex:array<atomic<u32>,242>;
+var<workgroup> cqBounded:array<atomic<u32>,2>;
 var<workgroup> cqLow:array<array<atomic<u32>,3>,64>;
 var<workgroup> cqHigh:array<array<atomic<u32>,3>,64>;
 var<workgroup> cqParts:atomic<u32>;
 // A face job j (owner j / 6, axis (j % 6) / 2, sign j & 1) beside an h tile, whose sixteen h patches the parts take;
-// its probe cell, the face job's.
-var<workgroup> cqPart:array<u32,384>;
+// its probe cell, the face job's. Two entries a word (entry k in bits 16 (k & 1)); cqVertex likewise, cqError and
+// cqDeep four (bits 8 (k & 3)).
+var<workgroup> cqPart:array<atomic<u32>,192>;
 fn cqFaceProbe(cs:u32,r:u32,j:u32)->vec3i{
   let owner=j/6u;let axis=(j%6u)/2u;let sign=select(-1,1,(j&1u)!=0u);
   let origin=4*xTileOf(cs,owner+64u*r);var probe=origin;probe[axis]+=select(-1,4,sign>0);
@@ -1304,9 +1309,9 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
   {
     if(lane==0u){atomicStore(&cqErrors,0u);atomicStore(&cqDeeps,0u);atomicStore(&cqParts,0u);atomicStore(&cqVertices,0u);}
     if(lane<16u){atomicStore(&cqVertexSeen[lane],0u);}
-    cqIsDeep[lane]=0u;
+    if(lane<2u){atomicStore(&cqIsDeep[lane],0u);atomicStore(&cqBounded[lane],0u);}if(lane<16u){atomicStore(&cqError[lane],0u);atomicStore(&cqDeep[lane],0u);}
+    for(var z=lane;z<242u;z+=64u){atomicStore(&cqVertex[z],0u);if(z<192u){atomicStore(&cqPart[z],0u);}}
     for(var a=0u;a<3u;a++){atomicStore(&cqLow[lane][a],ncOrderKey(3.0e38));atomicStore(&cqHigh[lane][a],ncOrderKey(-3.0e38));}
-    cqBounded[lane]=0u;
     atomicStore(&cqWorst[lane],0u);atomicStore(&cqCurve[lane],0u);atomicStore(&cqDeepest[lane][0],0u);atomicStore(&cqDeepest[lane][1],0u);
     workgroupBarrier();
     let i=lane+64u*r;let t=xTileOf(cs,i);
@@ -1317,50 +1322,50 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
       let b=t>>vec3u(1u);
       if(nbFSlotOfBrick(b)>=NB_SEAM){${tiered ? "nbFail(NB_FAIL_TIER,nbKey(b));" : ""}ncStoreIdentity(cs,i);}
     }else{
-      classified=true;cqBounded[lane]=1u;
+      classified=true;atomicOr(&cqBounded[lane>>5u],1u<<(lane&31u));
       ncClassifyOwner(t,4u,0u,&c,false);
-      if((c.flags&2u)!=0u&&NC_TOL>0.0){cqError[atomicAdd(&cqErrors,1u)]=lane;}
-      if((c.flags&2u)!=0u){cqDeep[atomicAdd(&cqDeeps,1u)]=lane;cqIsDeep[lane]=1u;}
+      if((c.flags&2u)!=0u&&NC_TOL>0.0){let k=atomicAdd(&cqErrors,1u);atomicOr(&cqError[k>>2u],lane<<(8u*(k&3u)));}
+      if((c.flags&2u)!=0u){let k=atomicAdd(&cqDeeps,1u);atomicOr(&cqDeep[k>>2u],lane<<(8u*(k&3u)));atomicOr(&cqIsDeep[lane>>5u],1u<<(lane&31u));}
     }
     workgroupBarrier();
     // Face jobs (umFaceFirst, l.691): one patch, or sixteen h patches beside an h tile.
     for(var j=lane;j<6u*64u;j+=64u){
-      let owner=j/6u;if(cqBounded[owner]==0u){continue;}
+      let owner=j/6u;if(((atomicLoad(&cqBounded[owner>>5u])>>(owner&31u))&1u)==0u){continue;}
       let axis=(j%6u)/2u;let sign=select(-1,1,(j&1u)!=0u);
       let probe=cqFaceProbe(cs,r,j);
       var nw=0u;if(ncCellKind(probe)==0u){nw=select(4u,1u,ncCellOwnerH(probe));}
       let width=min(4u,select(4u,nw,nw!=0u));let side=4u/width;var anchor=probe;anchor[axis]-=select(0,1,sign>0);
       if(side*side==1u){cqBound(owner,axis,anchor);}
-      else{cqPart[atomicAdd(&cqParts,1u)]=j;}
+      else{let k=atomicAdd(&cqParts,1u);atomicOr(&cqPart[k>>1u],j<<(16u*(k&1u)));}
     }
     let errors=atomicLoad(&cqErrors);
     for(var j=lane;j<8u*errors;j+=64u){
-      let owner=cqError[j/8u];ncCoarseCurve=0.0;
+      let owner=(atomicLoad(&cqError[(j/8u)>>2u])>>(8u*((j/8u)&3u)))&255u;ncCoarseCurve=0.0;
       let error=ncResolutionError4(xTileOf(cs,owner+64u*r),j%8u);
       atomicMax(&cqWorst[owner],bitcast<u32>(error));atomicMax(&cqCurve[owner],bitcast<u32>(ncCoarseCurve));
     }
     // Depth jobs (umDepthSample, lane j % 64 of deep tile j / 64): the vertex t + corner - 1 of deep tile t, listed once.
     let deeps=atomicLoad(&cqDeeps);
     for(var j=lane;j<64u*deeps;j+=64u){
-      let owner=cqDeep[j/64u];let c=ncCorner(j%64u,4u);
+      let owner=(atomicLoad(&cqDeep[(j/64u)>>2u])>>(8u*((j/64u)&3u)))&255u;let c=ncCorner(j%64u,4u);
       let v=(owner&7u)+c.x+11u*((owner>>3u)+c.y)+121u*c.z;
       let bit=1u<<(v&31u);
-      if((atomicOr(&cqVertexSeen[v>>5u],bit)&bit)==0u){cqVertex[atomicAdd(&cqVertices,1u)]=v;}
+      if((atomicOr(&cqVertexSeen[v>>5u],bit)&bit)==0u){let k=atomicAdd(&cqVertices,1u);atomicOr(&cqVertex[k>>1u],v<<(16u*(k&1u)));}
     }
     workgroupBarrier();
     let vertices=atomicLoad(&cqVertices);let first=xTileOf(cs,64u*r);
     for(var j=lane;j<vertices;j+=64u){
-      let v=cqVertex[j];let u=vec3u(v%11u,(v/11u)%11u,v/121u);
+      let v=(atomicLoad(&cqVertex[j>>1u])>>(16u*(j&1u)))&0xffffu;let u=vec3u(v%11u,(v/11u)%11u,v/121u);
       let d=ncDepthAt(first+vec3i(u)-vec3i(1));
       // The slab's tiles holding u: x in u.x-3..u.x, y in u.y-3..u.y (its z is the slab's).
       for(var y=max(i32(u.y)-3,0);y<=min(i32(u.y),7);y++){for(var x=max(i32(u.x)-3,0);x<=min(i32(u.x),7);x++){
-        let owner=u32(x)+8u*u32(y);if(cqIsDeep[owner]==0u){continue;}
+        let owner=u32(x)+8u*u32(y);if(((atomicLoad(&cqIsDeep[owner>>5u])>>(owner&31u))&1u)==0u){continue;}
         atomicMax(&cqDeepest[owner][0],d.x);atomicMax(&cqDeepest[owner][1],d.y);
       }}
     }
     let parts=atomicLoad(&cqParts);
     for(var j=lane;j<16u*parts;j+=64u){
-      let face=cqPart[j/16u];let part=j%16u;
+      let face=(atomicLoad(&cqPart[(j/16u)>>1u])>>(16u*((j/16u)&1u)))&0xffffu;let part=j%16u;
       let axis=(face%6u)/2u;var anchor=cqFaceProbe(cs,r,face);anchor[axis]-=select(0,1,(face&1u)!=0u);
       anchor[(axis+1u)%3u]+=i32(part%4u);anchor[(axis+2u)%3u]+=i32(part/4u);
       cqBound(face/6u,axis,anchor);
