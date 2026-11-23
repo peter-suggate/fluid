@@ -1,0 +1,45 @@
+{
+ "scene": "high-resolution-dam-break",
+ "warm": 100,
+ "loopSteps": 227,
+ "git": {
+  "head": "226ac783",
+  "status": " M lib/core/webgpu-water-pipeline.ts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n?? tools/experiments/gpu-shape/footprint-analyze.mts\n?? tools/experiments/gpu-shape/footprint-ctr.mts\n?? tools/experiments/gpu-shape/footprint.mts\n"
+ },
+ "cal": [
+  {
+   "name": "rand8M",
+   "G": 1024,
+   "lanesLoads": 4194304,
+   "min_us": 308.495,
+   "med_us": 400.911,
+   "GlaneLoadsPerS": 10.461932947711587
+  },
+  {
+   "name": "rand32M",
+   "G": 1024,
+   "lanesLoads": 4194304,
+   "min_us": 625.574,
+   "med_us": 672.115,
+   "GlaneLoadsPerS": 6.240455874366738
+  },
+  {
+   "name": "rand256M",
+   "G": 192,
+   "lanesLoads": 786432,
+   "min_us": 1039.275,
+   "med_us": 1045.901,
+   "GlaneLoadsPerS": 0.7519182025832272
+  },
+  {
+   "name": "coal8M",
+   "G": 8192,
+   "lanesLoads": 33554432,
+   "min_us": 172.415,
+   "med_us": 175.747,
+   "GlaneLoadsPerS": 190.9246359824065
+  }
+ ],
+ "dispatches": 1698,
+ "gpuErrors": []
+}
