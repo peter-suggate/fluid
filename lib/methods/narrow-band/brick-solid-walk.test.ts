@@ -68,7 +68,8 @@ test("brick solid walk: pSolid and phiSolid join F's stage set only with statics
     assert.match(p, /let traced=psWalkPhi\(foot,nbfSurfaceTrace\(foot,dt,h,wall\)\);/);
     assert.ok(!p.includes("q=psWalkPhi(p,q);"), "no walk from the vertex (seep +3.5 ms)");
     assert.match(p, /let cell=min\(psOpenPointCell\(q\),NB_\w+-vec3i\(1\)\);/, "umVertexCell's open point cell");
-    assert.ok(p.includes("if(!psCubicBuried(cell,f,lowHeld,highHeld)){if(lStencil(cell-vec3i(1),cell+vec3i(2))){value=lStencilCubic(f,lowHeld,highHeld);}else{value=nbfCubicLimited(f,lowHeld,highHeld);}}"), "a buried weighted tap keeps the trilinear");
+    assert.ok(p.includes("if(!psCubicBuried(cell,f,lowHeld,highHeld)){value=nbfCubicLimited(f,lowHeld,highHeld);}"), "a buried weighted tap keeps the trilinear");
+    assert.ok(!p.includes("if(lStencil("), "phiSolid takes its taps a tap (stepab: the stencil form ran it +9.8% on seep)");
     assert.ok(p.includes("if(!psOpenAt(p-0.25*vec3f(e))){at[2u*a]=p;}if(!psOpenAt(p+0.25*vec3f(e))){at[2u*a+1u]=p;}"), "the foot's closed taps");
     assert.ok(p.includes("let slid=psSlideWalk(p,fgHeld(p+offset),1u);if(!slid.closed){foot=slid.end;shift=p-foot;}"), "the foot's slide");
     assert.ok(p.includes("var valid=psSmoothOpen(v,a);"), "the smoothing's closed bits");

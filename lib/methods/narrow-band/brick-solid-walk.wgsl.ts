@@ -344,6 +344,12 @@ const LADVECT_FOOT = "foot=fgHeld(p+offset);shift=p-foot;}";
 const LADVECT_SMOOTH_AXIS = "var part=6.0*c;var valid=true;var different=0u;";
 const LADVECT_CELL = "let cell=min(vec3i(floor(q)),NB_WALL_BOX-vec3i(1));let f=q-vec3f(cell);";
 const LADVECT_CUBIC = "if(lStencil(cell-vec3i(1),cell+vec3i(2))){value=lStencilCubic(f,lowHeld,highHeld);}else{value=nbfCubicLimited(f,lowHeld,highHeld);}";
+const LADVECT_FOOT_STENCIL = "if(lStencil(v-vec3i(2),v+vec3i(2))){for(var k=0u;k<10u;k++){t[k]=lStencilPhi(vec3i(at[k]));}}\n  else{for(var k=0u;k<10u;k++){t[k]=lPhi0(vec3i(at[k]));}}";
+// phiSolid's taps a tap (lPhi0), not lAdvect's stencil slots (lStencil): in seep's whole step (the only scene with
+// phiSolid) the stencil form ran phiSolid +9.8% (0.841 -> 0.932 ms, tools/experiments/gpu-shape/stepab.mts;
+// docs/plans/gpu-shape/m1-distinct-once.md), bit-identical either way.
+const PHISOLID_FOOT_TAPS = "for(var k=0u;k<10u;k++){t[k]=lPhi0(vec3i(at[k]));}";
+const PHISOLID_CUBIC = "value=nbfCubicLimited(f,lowHeld,highHeld);";
 
 /** lAdvect's text with statics: phiSolid advects the NEAR_SOLID bricks. Elsewhere the walk is proven empty only for
  * a trace that stays inside the ring of its vertex (the foot and the end): lAdvect leaves a vertex whose trace leaves
@@ -371,6 +377,7 @@ export function brickPhiSolidWGSL(body: string): string {
   // foot slides (umSlideWalk mode 1) and a closed one is dropped; an axis of the smoothing with a buried tap is no
   // distance (umSurfaceSmoothing's closed bits).
   head = once(head, LADVECT_FOOT_TAPS, LADVECT_FOOT_TAPS.replace("at[2u*a+1u]=fgHeld(p+e);}", "at[2u*a+1u]=fgHeld(p+e);if(!psOpenAt(p-0.25*vec3f(e))){at[2u*a]=p;}if(!psOpenAt(p+0.25*vec3f(e))){at[2u*a+1u]=p;}}"), "lAdvect");
+  head = once(head, LADVECT_FOOT_STENCIL, PHISOLID_FOOT_TAPS, "lAdvect");
   head = once(head, LADVECT_FOOT, "let slid=psSlideWalk(p,fgHeld(p+offset),1u);if(!slid.closed){foot=slid.end;shift=p-foot;}}", "lAdvect");
   head = once(head, LADVECT_SMOOTH_AXIS, LADVECT_SMOOTH_AXIS.replace("var valid=true;", "var valid=psSmoothOpen(v,a);"), "lAdvect");
   // umAdvected with solids: the sample is umVertexCell's open point cell, and a buried weighted cubic tap keeps the
@@ -379,7 +386,7 @@ export function brickPhiSolidWGSL(body: string): string {
   // 42.7, the volume curve 1.03% against 0.69%, peak particles 377k against 298k; 2026-11-19).
   head = once(head, LADVECT_TRACE, "let traced=psWalkPhi(foot,nbfSurfaceTrace(foot,dt,h,wall));", "lAdvect");
   head = once(head, LADVECT_CELL, LADVECT_CELL.replace("vec3i(floor(q))", "psOpenPointCell(q)"), "lAdvect");
-  head = once(head, LADVECT_CUBIC, `if(!psCubicBuried(cell,f,lowHeld,highHeld)){${LADVECT_CUBIC}}`, "lAdvect");
+  head = once(head, LADVECT_CUBIC, `if(!psCubicBuried(cell,f,lowHeld,highHeld)){${PHISOLID_CUBIC}}`, "lAdvect");
   entry = once(entry, LADVECT_HEAD, LADVECT_HEAD.replace("fn lAdvect(", "fn phiSolid("), "lAdvect");
   entry = once(entry, LIST_HEAD, `${LIST_HEAD}
  let near=psNearSolid(slot);`, "lAdvect");
