@@ -53,7 +53,7 @@
  * Unported pieces latch FAIL.UNSUPPORTED when they would activate: a cut brick, or a BULK16
  * page across a face. There are no solids, so bounded rows (bInside, N_CLOSED) never arise.
  */
-import { BOX_TOKEN, boxPadded, type BrickLayout, resolveBox } from "./brick-abi";
+import { ARGS, BOX_TOKEN, boxPadded, type BrickLayout, resolveBox } from "./brick-abi";
 import type { BrickBinding } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { brickCellKernel } from "./brick-pressure.wgsl";
@@ -576,6 +576,8 @@ const headerWGSL = (L: BrickLayout, staged = false, tiered = true, cuts = false)
 
 /** The composite kernels. rowsF's label and entry are the engine's operator's when pressure-operator.wgsl.ts builds it.
  * `tiered: false` (the all-h engine) drops the absent-page guard: all-h, an absent page is air (brick-abi.md §2.5). */
+/** pressureRowsC's dispatch: a C_ALL page over two workgroups of 256 lanes (GPU-shape M4, C_ALL2_G1). */
+export const ROWS_C_PAGES = { indirect: ARGS.C_ALL2_G1 } as const;
 export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [string, string]; projectF?: [string, string] } = {}, opt: { readonly tiered?: boolean; readonly faces?: number; readonly live?: { readonly hb: number; readonly hp: number; readonly rl: number; readonly rln: number; readonly dry: number }; readonly cuts?: boolean } = {}) {
   const tiered = opt.tiered !== false;
   // The cuts (opt.cuts, default off; M5 design §5): rowsF and projectF read the K slots' FRAC / AP / W (static and
@@ -780,29 +782,29 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
   }
 }`, rowsEntry, rowsB, true, cuts);
 
-  // rowsC: a workgroup a page of C_ALL (G1), a lane a tile. After rowsF, whose stored rows it reads: a seam
-  // subface's h cell m takes its centre φ from PPHI and its head from poHeadB (the h rows' starts in B and centre φ
-  // in PPHI), the values rowsF computed, so the subface's coefficient and head are the h row's own, unrecomputed.
+  // rowsC: two workgroups a page of C_ALL (ROWS_C_PAGES), a lane a tile of the page's half. After rowsF, whose
+  // stored rows it reads: a seam subface's h cell m takes its centre φ from PPHI and its head from poHeadB (the h
+  // rows' starts in B and centre φ in PPHI), the values rowsF computed, so the subface's coefficient and head are the h row's own, unrecomputed.
   // The seams are the pass's work (16 subfaces a face, each a band face and a head), so they are spread over the
-  // workgroup: each lane lists its tile's seam faces, then the lanes take the listed faces' subfaces 512 at a time
-  // (32 faces), and each tile's lane adds its faces' 16 sums in subface order. One lane walked its two tiles' seams
+  // workgroup: each lane lists its tile's seam faces, then the lanes take the listed faces' subfaces 256 at a time
+  // (16 faces), and each tile's lane adds its faces' 16 sums in subface order. One lane walked its two tiles' seams
   // alone before (2.4 ms on the tiered dam, the slowest lane's chain).
   const rowsC = k("pressureRowsC", PROJECT_WGSL + /* wgsl */`
 var<workgroup> rcN:atomic<u32>;var<workgroup> rcCount:u32;
-var<workgroup> rcE:array<u32,3072>;
-var<workgroup> rcR:array<f32,512>;
-var<workgroup> rcD:array<f32,512>;var<workgroup> rcX:array<f32,512>;var<workgroup> rcP:array<f32,512>;
-@compute @workgroup_size(512) fn pressureRowsC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){rcCount=nbListCount(NB_LIST_C_ALL);atomicStore(&rcN,0u);}
+var<workgroup> rcE:array<u32,1536>;
+var<workgroup> rcR:array<f32,256>;
+var<workgroup> rcD:array<f32,256>;var<workgroup> rcX:array<f32,256>;var<workgroup> rcP:array<f32,256>;
+@compute @workgroup_size(256) fn pressureRowsC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  if(lid==0u){rcCount=2u*nbListCount(NB_LIST_C_ALL);atomicStore(&rcN,0u);}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&rcCount)){return;}
-  let cs=nbListSlot(NB_LIST_C_ALL,g);
+  let cs=nbListSlot(NB_LIST_C_ALL,g/2u);let rcOff=256u*(g%2u);
   let O=nbCOrigin(cs)>>vec3u(2u);let r=cfg.x;let h=nbRingF(r,NB_RING_H);
   let rate=bitcast<f32>(atomicLoad(&nbSet[NB_H_LANE_F]));let capacity=1.0;
-  let i=lid;let T=O+nbLocalCoord(i);let at=NB_STRIDE*cs+i;
+  let i=lid+rcOff;let T=O+nbLocalCoord(i);let at=NB_STRIDE*cs+i;
   var diag=0.0;var div=0.0;var extra=0.0;var kk=vec3f(0.0);var start=0.0;
   let owned=nbTileInWallBox(T)&&!nbTileH(cs,i);
   var root=0.0;if(owned){root=poRootPhi4(T);}
-  rcR[i]=root;
+  rcR[lid]=root;
   let liquid=owned&&poWet(root,4.0);
   ${cuts ? `// A liquid native row in a cut brick (a static cut's tile left at 4h) would not read the cut: the old band
   // certificate's failure, a latch.
@@ -848,7 +850,7 @@ ${L.staticTiles ? "  // With the static tiles an exact tile of a cut brick is a 
   let n=workgroupUniformLoad(&rcCount);
   // Each listed face's subface s, with the band's own face formula from the h side (poSeamFace: the cell across is
   // the native row's tile, whose root φ is rcR's).
-  for(var c0=0u;c0<n;c0+=32u){
+  for(var c0=0u;c0<n;c0+=16u){
     let ent=c0+(lid>>4u);var dc=0.0;var xc=0.0;var pc=0.0;
     if(ent<n){
       let wv=rcE[ent];let ti=wv>>3u;let f=wv&7u;let a=f/2u;let side=f&1u;
@@ -856,7 +858,7 @@ ${L.staticTiles ? "  // With the static tiles an exact tile of a cut brick is a 
       let u=poUnit((a+1u)%3u);let v=poUnit((a+2u)%3u);let g2=f^1u;let sq=lid&15u;
       var layer=4*Tn;if(side==0u){layer[a]+=3;}
       let m=layer+i32(sq&3u)*u+i32(sq>>2u)*v;
-      let pm=poPhiF(m);let lm=poWet(pm,1.0);let pf=poSeamFace(m,pm,lm,g2,rcR[ti]);
+      let pm=poPhiF(m);let lm=poWet(pm,1.0);let pf=poSeamFace(m,pm,lm,g2,rcR[ti-rcOff]);
       if(pf.kind==NP_K_SEAM){dc=pf.coefficient;if(lm){xc=pf.coefficient*poHeadB(m,pm,poBF(m),g2);}}
       var fm=m;if(side==0u){fm[a]+=1;}
       pc=nbFacePlane(fm,a);
@@ -864,7 +866,7 @@ ${L.staticTiles ? "  // With the static tiles an exact tile of a cut brick is a 
     rcD[lid]=dc;rcX[lid]=xc;rcP[lid]=pc;
     workgroupBarrier();
     // No break or continue: the barrier below stays in uniform control flow.
-    for(var e=max(sBase,c0);e<min(sBase+sCount,c0+32u);e++){
+    for(var e=max(sBase,c0);e<min(sBase+sCount,c0+16u);e++){
       let q=e-c0;
       {
         let wv=rcE[e];var sd=0.0;var sx=0.0;var sp=0.0;

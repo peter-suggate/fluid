@@ -15,7 +15,7 @@
  */
 import { ARGS, LIST } from "./brick-abi";
 import type { PressureSolver, PressureSolverFactory } from "./brick-pressure-slot";
-import { pressureCompositeKernels } from "./pressure-composite.wgsl";
+import { pressureCompositeKernels, ROWS_C_PAGES } from "./pressure-composite.wgsl";
 import { mgLayout, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
 import type { BrickBodiesFrame } from "./bodies-binding.wgsl";
 import type { BrickLayout } from "./brick-abi";
@@ -33,14 +33,14 @@ export const compositeMGPCG = (options: MGPCGOptions & { readonly monolithic?: b
   const cuts = options.cuts ?? context?.cuts ?? L.cap.k > 0;
   const { monolithic = true, ...rest } = options, bodies = rest.bodies ?? (monolithic ? context?.bodies : undefined);
   const { publish, live, core, ...mg } = poolMGPCG(L, { ...rest, cuts, walls: rest.walls ?? true, ...(bodies ? { bodies } : {}) }), K = pressureCompositeKernels(L, {}, { cuts, faces: cuts ? mgLayout(L).FC : undefined });
-  const pages = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 };
+  const pages = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 }, rowsPages = ROWS_C_PAGES;
   // The live lists (pressure-mgpcg.ts mgLive): the engine's operator is the lists' pass, so the h tiles' held fit and
   // the h rows run over HB at the setup's head, before the native rows, and the h faces' projection over HP closes the
   // finish (the F_ALL path's order: operator, rowsC, ..., projectC, publish, project).
   if (live) return {
     ...mg,
     label: "composite MGPCG (lane P)",
-    setup: [...live.args, ...live.tileRoots, ...live.rows, { kernel: K.rowsC, dispatch: pages }, ...core.setup],
+    setup: [...live.args, ...live.tileRoots, ...live.rows, { kernel: K.rowsC, dispatch: rowsPages }, ...core.setup],
     finish: [...core.finish, { kernel: K.projectC, dispatch: pages }, ...publish, ...live.project],
   };
   return {
@@ -48,7 +48,7 @@ export const compositeMGPCG = (options: MGPCGOptions & { readonly monolithic?: b
     label: "composite MGPCG (lane P)",
     // The h tiles' held fit (root φ) once a step, before the operator's cold starts read it.
     before: [{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }],
-    setup: [{ kernel: K.rowsC, dispatch: pages }, ...core.setup],
+    setup: [{ kernel: K.rowsC, dispatch: rowsPages }, ...core.setup],
     // Then the region pressure change (pmgC PDELTA) from the final root values, for E's next region heat.
     finish: [...core.finish, { kernel: K.projectC, dispatch: pages }, ...publish],
   };

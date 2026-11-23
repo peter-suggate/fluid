@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ARGS, BRICK_CELLS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE } from "./brick-abi";
 import { COMPOSITE_N, add, coarseTile, compositeFixture, keyCoord, scale, shr, type V3 } from "./parity/composite-fixture";
-import { P_FLAG, pressureCompositeKernels } from "./pressure-composite.wgsl";
+import { P_FLAG, pressureCompositeKernels, ROWS_C_PAGES } from "./pressure-composite.wgsl";
 import { mgLayout, poolMGPCG } from "./pressure-mgpcg";
 import { NP_K } from "./pressure-rows.wgsl";
 
@@ -89,7 +89,7 @@ async function setup(device: GPUDevice) {
 type Fx = Awaited<ReturnType<typeof setup>>;
 async function runRows(fx: Fx, cuts: boolean) {
   const { e, L, M } = fx, K = cuts ? fx.KC : fx.KF;
-  await e.run([{ kernel: K.tileRoots, dispatch: fAll }, { kernel: K.rowsF, dispatch: fAll }, { kernel: K.rowsC, dispatch: cAll }]);
+  await e.run([{ kernel: K.tileRoots, dispatch: fAll }, { kernel: K.rowsF, dispatch: fAll }, { kernel: K.rowsC, dispatch: ROWS_C_PAGES }]);
   const rows = await e.save();
   await e.run([{ kernel: K.projectC, dispatch: cAll }, { kernel: K.projectF, dispatch: fAll }]);
   const header = await e.read("set", 0, 256);
@@ -248,7 +248,7 @@ test("pressure cuts (GPU): the composite MGPCG on the cut rows converges with ev
     const lv = poolMGPCG(L, { slots: 40, tolerance: 1e-3, walls: true, wallDecisions: Infinity, audit: true, cuts: true }), live = lv.live!;
     assert.ok(live, "the live lists");
     const rowsC = pressureCompositeKernels(L).rowsC;
-    await e.run([{ kernel: live.rowsList, dispatch: fAll }, ...live.args, ...live.tileRoots, ...live.rows, { kernel: rowsC, dispatch: cAll }, ...lv.core.setup]);
+    await e.run([{ kernel: live.rowsList, dispatch: fAll }, ...live.args, ...live.tileRoots, ...live.rows, { kernel: rowsC, dispatch: ROWS_C_PAGES }, ...lv.core.setup]);
     // The rows' wall faces (rowsF's face cache) before any re-decision moves a state: the audit counts these.
     const fc = new Float32Array((await e.read("pmgF", fx.M.FC, 7 * BRICK_STRIDE * L.cap.f)).buffer);
     let walls = 0;

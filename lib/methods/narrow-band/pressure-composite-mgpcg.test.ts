@@ -18,7 +18,7 @@ import type { BrickEngine } from "./brick-engine";
 import type { BrickPlacement } from "./brick-kernel";
 import { add, coarseTile, compositeFixture, COMPOSITE_N, keyCoord, scale, type V3 } from "./parity/composite-fixture";
 import { CompositePressureModel, type CompositeRows } from "./pressure-composite-model";
-import { P_FLAG, P_WALL_C, pressureCompositeKernels } from "./pressure-composite.wgsl";
+import { P_FLAG, P_WALL_C, pressureCompositeKernels, ROWS_C_PAGES } from "./pressure-composite.wgsl";
 import { MG_FINE_ORDER, MG_GATE, MG_HEADER, mgLayout, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
@@ -73,7 +73,7 @@ async function solveComposite(device: GPUDevice, mg: MGPCGOptions, vcycleOnly: b
   // (labels operator and project) are left out below.
   const fAll = { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 }, live = poolMGPCG(e.layout, mg).live;
   await e.run([...(solver.before ?? []), ...(live ? [{ kernel: live.rowsList, dispatch: fAll }, ...live.args] : []),
-    { kernel: K.tileRoots, dispatch: fAll }, { kernel: KF.rowsF, dispatch: fAll }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
+    { kernel: K.tileRoots, dispatch: fAll }, { kernel: KF.rowsF, dispatch: fAll }, { kernel: K.rowsC, dispatch: ROWS_C_PAGES }]);
   const before = await readComposite(e, fx.s.bricks, fx.pages, fx.dir, mg.fineOrder);
   const setup = solver.setup.filter(p => p.kernel.label !== "operator" && p.kernel.label !== "pmgListArgs"), finish = solver.finish.filter(p => p.kernel.label !== "project");
   const run = vcycleOnly ? [...setup, ...solver.slot(0).filter(p => !SOLVE.includes(p.kernel.label))]
@@ -174,8 +174,8 @@ test("composite live lists (GPU): the rows, setup, finish and projection over HB
     // The rows and the setup from the garbage; then the slots once (the same kernels either way: their row bricks are
     // RB's, whose append order and so the sums' order vary run to run), and the finish and projection from there.
     const start = await e.save();
-    const rowsF = [{ kernel: K.tileRoots, dispatch: fAll }, { kernel: KF.rowsF, dispatch: fAll }, { kernel: K.rowsC, dispatch: pages }, ...fa.core.setup];
-    const rowsL = [{ kernel: live.rowsList, dispatch: fAll }, ...live.args, ...live.tileRoots, ...live.rows, { kernel: K.rowsC, dispatch: pages }, ...lv.core.setup];
+    const rowsF = [{ kernel: K.tileRoots, dispatch: fAll }, { kernel: KF.rowsF, dispatch: fAll }, { kernel: K.rowsC, dispatch: ROWS_C_PAGES }, ...fa.core.setup];
+    const rowsL = [{ kernel: live.rowsList, dispatch: fAll }, ...live.args, ...live.tileRoots, ...live.rows, { kernel: K.rowsC, dispatch: ROWS_C_PAGES }, ...lv.core.setup];
     const setup = await same("rows and setup", start, rowsF, rowsL);
     const zl = setup.buffers.get("args")![MG_GATE.ZL]!;
     // The next step from there: the bricks off HB hold their certified zero rows, so ZL is empty and the rows are the

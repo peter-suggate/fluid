@@ -6,7 +6,7 @@ import test from "node:test";
 import { ARGS, BRICK_CELLS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, PHI_AIR, PHI_AIR_C, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { COMPOSITE_N, add, compositeFixture, keyCoord, scale, shr, type V3 } from "./parity/composite-fixture";
-import { P_FLAG, pressureCompositeKernels } from "./pressure-composite.wgsl";
+import { P_FLAG, pressureCompositeKernels, ROWS_C_PAGES } from "./pressure-composite.wgsl";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 const N = COMPOSITE_N;
@@ -27,7 +27,7 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
     for (const cs of pages) for (let i = 0; i < BRICK_CELLS; i++) assert.equal(enteredX[BRICK_STRIDE * cs + i], 0, `C X at entry, slot ${cs}`);
     // ---- Run the rows.
     const K = pressureCompositeKernels(L);
-    await e.run([{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
+    await e.run([{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: ROWS_C_PAGES }]);
     const header = await e.read("set", 0, 256);
     assert.equal(header[H.FAIL], 0, `FAIL ${header[H.FAIL]} info ${header[H.FAIL_INFO]?.toString(16)}`);
     const readF = async (ch: string) => new Float32Array((await e.read("pres", L.base("pres", "F", ch), L.cap.f * BRICK_STRIDE)).buffer);
