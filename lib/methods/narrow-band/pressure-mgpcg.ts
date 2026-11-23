@@ -85,6 +85,7 @@ import type { PressureSolver } from "./brick-pressure-slot";
 import { FINE_ORDER, OC } from "./pressure-model";
 import { P_FLAG, P_WALL_C, pressureCompositeKernels, pressureResolveBox } from "./pressure-composite.wgsl";
 import { NP_K } from "./pressure-rows.wgsl";
+import { pressureFloatingPlacements } from "./pressure-floating.wgsl";
 import { BODIES_RO, BODY_CUTS_RO, pbBrickBodiesWGSL, type BrickBodiesFrame } from "./bodies-binding.wgsl";
 import { pbBodyCoupleWGSL } from "./bodies-shapes.wgsl";
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
@@ -2246,6 +2247,9 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
       ...(bodyJ ? [{ kernel: bodyJ, dispatch: list(LIST.F_BODY) }] : []),
       ...(guessOn ? [{ kernel: guess, dispatch: fRows }] : []),
       ...(guessWalls ? [{ kernel: wallsFKernel(false, true), dispatch: fRows }] : []),
+      // A detail engine's floating components (pressure-floating.wgsl.ts): compatible data and the parent's gauge on
+      // each component no Dirichlet face reaches, from the decided rows, before setupF forms r and the aggregates.
+      ...pressureFloatingPlacements(L, { live, hbl: M.HBL, dispatch: fRows }),
       ...(bodyZ0 && bodyFold0 ? [{ kernel: bodyZ0, dispatch: list(LIST.F_BODY) }, { kernel: bodyFold0, dispatch: { direct: [NB, 1, 1] as [number, number, number] } }] : []),
       { kernel: setupF, dispatch: fRows },
       { kernel: coarsenC, dispatch: list(LIST.C_ALL) },

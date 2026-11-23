@@ -94,7 +94,8 @@ export class BrickDetailAlloc {
     const C = GPUShaderStage.COMPUTE;
     const layout = device.createBindGroupLayout({ label, entries: [
       ...[0, 1, 2, 3].map(binding => ({ binding, visibility: C, buffer: { type: "read-only-storage" as const } })),
-      ...[4, 5, 6].map(binding => ({ binding, visibility: C, buffer: { type: "storage" as const } }))] });
+      ...[4, 5, 6].map(binding => ({ binding, visibility: C, buffer: { type: "storage" as const } })),
+      { binding: 7, visibility: C, buffer: { type: "read-only-storage" as const } }] });
     const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [layout] });
     const dispatches = brickDetailAllocDispatches(parent.layout, spec.layout, forced.length);
     const pipelines = await Promise.all(Object.entries(dispatches).map(async ([entryPoint, groups]) =>
@@ -110,7 +111,8 @@ export class BrickDetailAlloc {
     this.group = this.device.createBindGroup({ label: "nb-brick.detailAlloc", layout: this.bindLayout, entries: [
       { binding: 0, resource: { buffer: p.buffer("set") } }, { binding: 1, resource: { buffer: p.buffer("dir") } },
       { binding: 2, resource: { buffer: p.buffer("phi") } }, { binding: 3, resource: { buffer: p.buffer("vel") } },
-      { binding: 4, resource: { buffer: src } }, { binding: 5, resource: { buffer: dir } }, { binding: 6, resource: { buffer: this.state } }] });
+      { binding: 4, resource: { buffer: src } }, { binding: 5, resource: { buffer: dir } }, { binding: 6, resource: { buffer: this.state } },
+      { binding: 7, resource: { buffer: p.buffer("pres") } }] });
     this.device.queue.writeBuffer(this.state, 4 * DETAIL_ST.DTL, new Uint32Array([fine.dir.dtl]));
     if (this.forced.length) this.device.queue.writeBuffer(this.state, 4 * this.forcedAt, new Uint32Array(this.forced));
   }

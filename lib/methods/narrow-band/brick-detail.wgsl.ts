@@ -69,7 +69,9 @@ export const brickDetailHash = (d: Pick<BrickDetailLayout, "slots">) => { let n 
  * none the container's. */
 export function brickDetailSrc(d: BrickDetailLayout) {
   const meta = 4, map = meta + 16, keys = map + 2 * brickDetailHash(d), fresh = keys + d.slots, gone = fresh + d.budget, nodes = gone + d.budget;
-  return { meta, map, keys, fresh, gone, nodes, words: nodes + 4 * BLOCK3 * d.slots };
+  // px: an active slot's parent pressure (its tile's C X), the gauge of a floating component (pressure-floating.wgsl.ts).
+  const px = nodes + 4 * BLOCK3 * d.slots;
+  return { meta, map, keys, fresh, gone, nodes, px, words: px + d.budget };
 }
 /** The slot map's hash of a tile index (WGSL, shared by the allocator and the readers). */
 export const DETAIL_HASH_WGSL = (entries: number) => `fn nbDtlHash(i:u32)->u32{return (i*2654435761u)>>${32 - Math.log2(entries)}u;}`;

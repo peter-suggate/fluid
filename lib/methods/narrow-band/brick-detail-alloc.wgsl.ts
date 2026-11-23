@@ -20,7 +20,8 @@
  * - dtlRing: each active's since (its activation step: fresh while under DETAIL_FRESH steps), core bit, and ring (its
  *   inactive container neighbours, a slot each for the nodes the edge's faces read); the tiles turned on (fresh list)
  *   and off (gone list) this step;
- * - dtlNodes: the parent's φ and faces on every slot's block that is not core (a core tile never reads them).
+ * - dtlNodes: the parent's φ and faces on every slot's block that is not core (a core tile never reads them), and
+ *   every active slot's parent pressure (its tile's C X: a floating component's gauge, pressure-floating.wgsl.ts).
  * Every store is the budget's size or the parent's pools' (the heat is a C slot's tiles', tagged with the tile), none
  * the container's but the mask's bit planes (3 bits a 4h tile).
  */
@@ -69,19 +70,26 @@ ${brickAbiWGSL(parent, { set: { name: "nbSet", atomic: false }, dir: { name: "di
 @group(0) @binding(4) var<storage,read_write> src:array<atomic<u32>>;
 @group(0) @binding(5) var<storage,read_write> fdir:array<atomic<u32>>;
 @group(0) @binding(6) var<storage,read_write> al:array<atomic<u32>>;
+@group(0) @binding(7) var<storage,read> pres:array<f32>;
 ${brickOwnerWGSL({ phi: "phi", vel: "vel", box: boxWGSL(parent) })}
 ${DETAIL_HASH_WGSL(H)}
 const DT_TILES:vec3i=vec3i(${d.tiles.join(",")});const DT_B:u32=${d.budget}u;const DT_S:u32=${d.slots}u;const DT_H:u32=${H}u;
 const DT_HEAT_B:f32=${Math.max(1, d.budget - o.forced)}.0;const DT_NF:u32=${o.forced}u;const DT_CAND:u32=${a.cand}u;
 const DT_PLANE:u32=${brickDetailPlaneWords(d)}u;const DT_R:f32=${d.factor}.0;
 const DT_DT:f32=${o.dt_s};const DT_HM:f32=${o.h_m};const DT_TAU:f32=${DETAIL_HEAT_TAU};const DT_HMIN:f32=${DETAIL_HEAT_MIN};const DT_SURF:f32=${DETAIL_SURFACE};
-const S_META:u32=${s.meta}u;const S_MAP:u32=${s.map}u;const S_KEYS:u32=${s.keys}u;const S_FRESH:u32=${s.fresh}u;const S_GONE:u32=${s.gone}u;const S_NODES:u32=${s.nodes}u;
+const S_META:u32=${s.meta}u;const S_MAP:u32=${s.map}u;const S_KEYS:u32=${s.keys}u;const S_FRESH:u32=${s.fresh}u;const S_GONE:u32=${s.gone}u;const S_NODES:u32=${s.nodes}u;const S_PX:u32=${s.px}u;
 const A_ST:u32=${a.st}u;const A_HIST:u32=${a.hist}u;const A_HISTH:u32=${a.histHeld}u;const A_CT:u32=${a.candT}u;const A_CB:u32=${a.candB}u;const A_PHASH:u32=${a.phash}u;
 const A_PKEYS:u32=${a.pkeys}u;const A_PSINCE:u32=${a.psince}u;const A_SINCE:u32=${a.since}u;const A_HEAT:u32=${a.heat}u;const A_FORCED:u32=${a.forced}u;
 fn dtIn(T:vec3i)->bool{return all(T>=vec3i(0))&&all(T<DT_TILES);}
 fn dtIdx(T:vec3i)->u32{return u32(T.x+DT_TILES.x*(T.y+DT_TILES.y*T.z));}
 fn dtTile(i:u32)->vec3i{let n=vec3u(DT_TILES);return vec3i(i32(i%n.x),i32((i/n.x)%n.y),i32(i/(n.x*n.y)));}
 fn dtSt(k:u32)->u32{return atomicLoad(&al[A_ST+k]);}
+// The parent's pressure on 4h tile T: its C X (projectC writes an h tile's as its liquid rows' mean), 0 off the pages.
+fn dtParentX(T:vec3i)->f32{
+  let p=T>>vec3u(3u);let cs=nbCSlotOfPage(p);
+  if(cs==NB_NONE||nbCRec(cs,NB_REC_KEY)!=nbKey(p)){return 0.0;}
+  return pres[NB_PRES_C_X+NB_STRIDE*cs+nbLocal(T)];
+}
 fn dtMeta(k:u32)->u32{return atomicLoad(&src[S_META+k]);}
 // The fine engine's mask planes in its dir (ST.DTL, written at bind).
 fn dtDtl()->u32{return atomicLoad(&al[A_ST+${ST.DTL}u]);}
@@ -272,6 +280,7 @@ fn dtActivate(i:u32){
   if(slot<DT_B){if(slot>=min(dtMeta(${M.ACTIVE}u),DT_B)){return;}}
   else if(slot>=DT_B+min(dtMeta(${M.RING}u),DT_S-DT_B)){return;}
   let i=atomicLoad(&src[S_KEYS+slot]);
+  if(slot<DT_B&&lane==0u){atomicStore(&src[S_PX+slot],bitcast<u32>(dtParentX(dtTile(i))));}
   if(slot<DT_B&&dtBit(2u,i)){return;}
   let base=4*dtTile(i)-vec3i(1);
   for(var n=lane;n<${block3}u;n+=64u){
