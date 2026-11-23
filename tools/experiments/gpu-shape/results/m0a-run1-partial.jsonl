@@ -1,0 +1,1632 @@
+{"kind":"setup","vendor":"apple","architecture":"metal-3","device":"apple-m1-max","description":"Metal driver on macOS Version 26.6.2 (Build 25G83)","reps":4,"maxWorkgroupStorage":32768,"maxInvocations":1024}
+{"kind":"ramp","why":"dvfs","ms":310.23266699999976,"probe":75.995}
+{"kind":"dvfs","coldMin":61.784,"coldProbe":281.011,"hotMin":22.875,"hotProbe":80.498}
+{"kind":"ramp","why":"start","ms":309.86991600000056,"probe":75.623}
+{"kind":"heater","heatIters":7450,"HEAT_US":1500}
+{"kind":"check","bad":0}
+{"kind":"ladder","bytes":16384,"t256":40.916,"t1024":133.956,"nsPerLoad":121.14583333333331}
+{"kind":"foot","bytes":16384,"L":256,"M":1,"G":256,"D":16,"min":32.208,"probe":75.666,"gLoadsPerS":32.55638350720318}
+{"kind":"foot","bytes":16384,"L":256,"M":4,"G":64,"D":16,"min":32.208,"probe":75.665,"gLoadsPerS":32.55638350720318}
+{"kind":"ramp","why":"probe 502","ms":354.22741700000006,"probe":76.332}
+{"kind":"foot","bytes":16384,"L":256,"M":4,"G":256,"D":16,"min":111.332,"probe":75.332,"gLoadsPerS":37.67384040527431}
+{"kind":"ramp","why":"probe 418","ms":336.50824999999986,"probe":76.041}
+{"kind":"ladder","bytes":131072,"t256":79.79,"t1024":188.08,"nsPerLoad":141.00260416666666}
+{"kind":"foot","bytes":131072,"L":256,"M":1,"G":256,"D":16,"min":55.915,"probe":75.374,"gLoadsPerS":18.753035857998746}
+{"kind":"foot","bytes":131072,"L":256,"M":4,"G":64,"D":16,"min":122.831,"probe":79.04,"gLoadsPerS":8.536737468554355}
+{"kind":"foot","bytes":131072,"L":256,"M":4,"G":256,"D":16,"min":205.747,"probe":75.539,"gLoadsPerS":20.385735879502494}
+{"kind":"ladder","bytes":1048576,"t256":77.582,"t1024":302.538,"nsPerLoad":292.91145833333337}
+{"kind":"foot","bytes":1048576,"L":256,"M":1,"G":256,"D":16,"min":60.124,"probe":75.374,"gLoadsPerS":17.44022353802142}
+{"kind":"ramp","why":"probe 89","ms":306.80691600000046,"probe":75.832}
+{"kind":"foot","bytes":1048576,"L":256,"M":4,"G":64,"D":16,"min":63.208,"probe":77.499,"gLoadsPerS":16.589292494620935}
+{"kind":"ramp","why":"probe 498","ms":429.45458400000007,"probe":76.374}
+{"kind":"ramp","why":"probe 500","ms":352.6588750000001,"probe":76.457}
+{"kind":"foot","bytes":1048576,"L":256,"M":4,"G":256,"D":16,"min":222.121,"probe":79.041,"gLoadsPerS":18.88296919246717}
+{"kind":"ladder","bytes":4194304,"t256":70.624,"t1024":280.121,"nsPerLoad":272.7825520833333}
+{"kind":"foot","bytes":4194304,"L":256,"M":1,"G":256,"D":16,"min":73.458,"probe":75.416,"gLoadsPerS":14.274496991478124}
+{"kind":"ramp","why":"probe 139","ms":354.4100410000001,"probe":76.041}
+{"kind":"foot","bytes":4194304,"L":256,"M":4,"G":64,"D":16,"min":73.498,"probe":75.54,"gLoadsPerS":14.266728346349561}
+{"kind":"foot","bytes":4194304,"L":256,"M":4,"G":256,"D":16,"min":276.413,"probe":75.415,"gLoadsPerS":15.174047530325998}
+{"kind":"ladder","bytes":8388608,"t256":67.874,"t1024":280.037,"nsPerLoad":276.25390624999994}
+{"kind":"foot","bytes":8388608,"L":256,"M":1,"G":256,"D":16,"min":77.915,"probe":75.416,"gLoadsPerS":13.457947763588525}
+{"kind":"ramp","why":"probe 97","ms":360.0632080000005,"probe":76.331}
+{"kind":"ramp","why":"probe 200","ms":345.06533300000046,"probe":75.915}
+{"kind":"foot","bytes":8388608,"L":256,"M":4,"G":64,"D":16,"min":78.791,"probe":75.333,"gLoadsPerS":13.308322016473964}
+{"kind":"foot","bytes":8388608,"L":256,"M":4,"G":256,"D":16,"min":295.953,"probe":75.29,"gLoadsPerS":14.172196260892779}
+{"kind":"ramp","why":"probe 247","ms":323.61295900000005,"probe":75.957}
+{"kind":"ladder","bytes":33554432,"t256":74.415,"t1024":282.037,"nsPerLoad":270.3411458333333}
+{"kind":"foot","bytes":33554432,"L":256,"M":1,"G":256,"D":16,"min":170.663,"probe":81.333,"gLoadsPerS":6.144132002835998}
+{"kind":"foot","bytes":33554432,"L":256,"M":4,"G":64,"D":16,"min":155.873,"probe":75.873,"gLoadsPerS":6.72711758931951}
+{"kind":"ramp","why":"probe 484","ms":313.9550840000011,"probe":75.833}
+{"kind":"ramp","why":"probe 586","ms":353.6517909999984,"probe":75.624}
+{"kind":"foot","bytes":33554432,"L":256,"M":4,"G":256,"D":16,"min":606.575,"probe":118.458,"gLoadsPerS":6.914732720603387}
+{"kind":"ramp","why":"probe 156","ms":380.2735410000005,"probe":75.957}
+{"kind":"ramp","why":"probe 98","ms":462.277333,"probe":75.916}
+{"kind":"ladder","bytes":67108864,"t256":107.998,"t1024":403.994,"nsPerLoad":385.4114583333334}
+{"kind":"ramp","why":"probe 132","ms":458.22591699999975,"probe":76.541}
+{"kind":"foot","bytes":67108864,"L":256,"M":1,"G":256,"D":16,"min":823.155,"probe":75.874,"gLoadsPerS":1.2738500039482237}
+{"kind":"ramp","why":"probe 126","ms":409.34729100000004,"probe":76.083}
+{"kind":"foot","bytes":67108864,"L":256,"M":4,"G":64,"D":16,"min":820.488,"probe":76.166,"gLoadsPerS":1.277990659217441}
+{"kind":"ramp","why":"probe 245","ms":381.3126250000005,"probe":75.791}
+{"kind":"ramp","why":"probe 118","ms":352.81841600000007,"probe":76.041}
+{"kind":"foot","bytes":67108864,"L":256,"M":4,"G":256,"D":16,"min":3323.659,"probe":179.248,"gLoadsPerS":1.2619537684220914}
+{"kind":"ramp","why":"probe 369","ms":483.87454199999956,"probe":75.999}
+{"kind":"ramp","why":"probe 102","ms":482.81637500000033,"probe":75.749}
+{"kind":"ramp","why":"probe 99","ms":820.9567080000015,"probe":75.998}
+{"kind":"ramp","why":"probe 100","ms":444.39541700000154,"probe":76.041}
+{"kind":"ladder","bytes":134217728,"t256":121.916,"t1024":514.534,"nsPerLoad":511.2213541666667}
+{"kind":"ramp","why":"probe 490","ms":1023.4526249999981,"probe":100.166}
+{"kind":"ramp","why":"probe 588","ms":1067.7095000000008,"probe":100.457}
+{"kind":"foot","bytes":134217728,"L":256,"M":1,"G":256,"D":16,"min":1315.855,"probe":118.082,"gLoadsPerS":0.7968780754718415}
+{"kind":"ramp","why":"probe 100","ms":652.5662499999999,"probe":100.498}
+{"kind":"ramp","why":"probe 116","ms":420.1130410000005,"probe":100.415}
+{"kind":"foot","bytes":134217728,"L":256,"M":4,"G":64,"D":16,"min":1287.856,"probe":555.2,"gLoadsPerS":0.8142028301300767}
+{"kind":"ramp","why":"probe 125","ms":864.984625000001,"probe":76.166}
+{"kind":"ramp","why":"probe 185","ms":365.49512499999764,"probe":100.249}
+{"kind":"foot","bytes":134217728,"L":256,"M":4,"G":256,"D":16,"min":4986.924,"probe":92.498,"gLoadsPerS":0.8410603410037931}
+{"kind":"ladder","bytes":268435456,"t256":118.332,"t1024":468.826,"nsPerLoad":456.3723958333333}
+{"kind":"ramp","why":"probe 109","ms":460.04662499999904,"probe":82.248}
+{"kind":"ramp","why":"probe 85","ms":347.27570900000137,"probe":76.207}
+{"kind":"foot","bytes":268435456,"L":256,"M":1,"G":256,"D":16,"min":1398.479,"probe":102.623,"gLoadsPerS":0.7497974585245828}
+{"kind":"ramp","why":"probe 96","ms":735.9321659999987,"probe":75.498}
+{"kind":"ramp","why":"probe 101","ms":548.4271660000013,"probe":76.082}
+{"kind":"foot","bytes":268435456,"L":256,"M":4,"G":64,"D":16,"min":1386.937,"probe":110.164,"gLoadsPerS":0.7560372244737865}
+{"kind":"ramp","why":"probe 908","ms":883.5941669999993,"probe":77.456}
+{"kind":"ramp","why":"probe 140","ms":776.6309589999983,"probe":100.498}
+{"kind":"foot","bytes":268435456,"L":256,"M":4,"G":256,"D":16,"min":6253.697,"probe":76.79,"gLoadsPerS":0.6706919123200245}
+{"kind":"ramp","why":"probe 118","ms":591.4879999999976,"probe":75.958}
+{"kind":"ramp","why":"probe 95","ms":1115.8931249999987,"probe":85.749}
+{"kind":"floor","bytes":8388608,"D":0,"min":5.292,"med":5.541,"probe":100.206}
+{"kind":"ramp","why":"probe 111","ms":473.37895800000115,"probe":77.831}
+{"kind":"ramp","why":"probe 100","ms":618.4799999999996,"probe":93.873}
+{"kind":"floor","bytes":8388608,"D":1,"min":5.542,"med":5.875,"probe":124.165}
+{"kind":"ramp","why":"probe 126","ms":440.1366249999992,"probe":100.332}
+{"kind":"ramp","why":"probe 92","ms":949.7999159999999,"probe":75.916}
+{"kind":"floor","bytes":8388608,"D":4,"min":5.958,"med":17.165,"probe":104.624}
+{"kind":"ramp","why":"probe 94","ms":677.753084,"probe":100.207}
+{"kind":"floor","bytes":8388608,"D":16,"min":9.042,"med":9.334,"probe":76.165}
+{"kind":"ramp","why":"probe 103","ms":458.9315420000021,"probe":75.916}
+{"kind":"floor","bytes":8388608,"D":64,"min":20.875,"med":21.124,"probe":76.165}
+{"kind":"ramp","why":"probe 100","ms":686.6078339999985,"probe":75.832}
+{"kind":"ramp","why":"probe 101","ms":825.6331250000039,"probe":101.581}
+{"kind":"floor","bytes":268435456,"D":0,"min":5.708,"med":9.75,"probe":100.165}
+{"kind":"ramp","why":"probe 100","ms":1638.7949169999993,"probe":86.456}
+{"kind":"ramp","why":"probe 101","ms":542.5007499999992,"probe":81.458}
+{"kind":"floor","bytes":268435456,"D":1,"min":6.165,"med":6.209,"probe":99.958}
+{"kind":"floor","bytes":268435456,"D":4,"min":6.208,"med":6.333,"probe":75.666}
+{"kind":"ramp","why":"probe 164","ms":595.9569999999949,"probe":76.665}
+{"kind":"floor","bytes":268435456,"D":16,"min":13,"med":13.125,"probe":75.831}
+{"kind":"ramp","why":"probe 109","ms":791.0031670000026,"probe":83.583}
+{"kind":"floor","bytes":268435456,"D":64,"min":32.542,"med":32.75,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":1051.085500000001,"probe":76.249}
+{"kind":"ramp","why":"probe 100","ms":418.44204100000206,"probe":77.79}
+{"kind":"floor64","min":2.290328125,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":344.2135830000043,"probe":75.791}
+{"kind":"ramp","why":"probe 100","ms":347.51654199999757,"probe":100.041}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":32,"min":5.792,"med":6.125,"probe":99.998}
+{"kind":"ramp","why":"probe 100","ms":303.43741600000067,"probe":100.123}
+{"kind":"ramp","why":"probe 100","ms":392.3471669999999,"probe":100.124}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":64,"min":5.667,"med":5.959,"probe":99.998}
+{"kind":"ramp","why":"probe 125","ms":348.0862080000006,"probe":100.166}
+{"kind":"ramp","why":"probe 101","ms":442.216124999999,"probe":101.082}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":128,"min":7.416,"med":7.666,"probe":125.123}
+{"kind":"ramp","why":"probe 125","ms":429.5488340000011,"probe":100.04}
+{"kind":"ramp","why":"probe 100","ms":418.1473330000008,"probe":124.873}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":256,"min":6.917,"med":7.999,"probe":125.415}
+{"kind":"ramp","why":"probe 123","ms":339.52929199999926,"probe":125.456}
+{"kind":"ramp","why":"probe 124","ms":331.7720830000035,"probe":100.498}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":512,"min":6.916,"med":7.166,"probe":100.499}
+{"kind":"ramp","why":"probe 125","ms":320.26645799999824,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":314.8684579999972,"probe":100.04}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":1024,"min":7.833,"med":8.125,"probe":125.206}
+{"kind":"ramp","why":"probe 100","ms":303.88300000000163,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":359.8267500000002,"probe":99.706}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":2048,"min":5.834,"med":5.917,"probe":99.664}
+{"kind":"ramp","why":"probe 100","ms":353.67716700000165,"probe":99.831}
+{"kind":"ramp","why":"probe 100","ms":536.9032920000027,"probe":75.331}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":4096,"min":6,"med":6.208,"probe":99.789}
+{"kind":"ramp","why":"probe 100","ms":345.9103329999998,"probe":99.54}
+{"kind":"ramp","why":"probe 100","ms":348.5003329999963,"probe":99.873}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":8192,"min":6.291,"med":6.5,"probe":95.29}
+{"kind":"ramp","why":"probe 100","ms":346.0934170000037,"probe":75.999}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":16384,"min":6.875,"med":7.166,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":347.18254100000195,"probe":76.291}
+{"kind":"ramp","why":"probe 100","ms":348.29558300000645,"probe":99.874}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":32768,"min":9.04,"med":9.209,"probe":84.708}
+{"kind":"ramp","why":"probe 100","ms":353.25883300000714,"probe":99.998}
+{"kind":"ramp","why":"probe 100","ms":357.9278750000012,"probe":99.957}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":65536,"min":17.833,"med":18.582,"probe":100.957}
+{"kind":"ramp","why":"probe 100","ms":301.66945800000394,"probe":99.916}
+{"kind":"ramp","why":"probe 124","ms":307.93937500000175,"probe":99.915}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":131072,"min":18.541,"med":18.708,"probe":99.832}
+{"kind":"ramp","why":"probe 124","ms":315.96224999999686,"probe":99.623}
+{"kind":"ramp","why":"probe 100","ms":393.3278750000027,"probe":99.998}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8192,"lanes":262144,"min":34.667,"med":51.79,"probe":123.998}
+{"kind":"ramp","why":"probe 124","ms":327.38729100000637,"probe":99.915}
+{"kind":"ramp","why":"probe 124","ms":326.72191600000224,"probe":99.664}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16384,"lanes":524288,"min":54.708,"med":54.915,"probe":99.956}
+{"kind":"ramp","why":"probe 119","ms":394.77812500000437,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":386.1984999999986,"probe":99.582}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32768,"lanes":1048576,"min":94.833,"med":102.706,"probe":99.624}
+{"kind":"ramp","why":"probe 101","ms":308.3160409999982,"probe":99.791}
+{"kind":"ramp","why":"probe 100","ms":305.00254100000166,"probe":99.79}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":64,"min":5.916,"med":6,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":358.42191699999967,"probe":99.791}
+{"kind":"ramp","why":"probe 100","ms":351.5827499999941,"probe":99.831}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":128,"min":6,"med":6.166,"probe":100.04}
+{"kind":"ramp","why":"probe 100","ms":409.2175419999985,"probe":75.583}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":256,"min":4.958,"med":5.083,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":525.869709000006,"probe":76.29}
+{"kind":"ramp","why":"probe 100","ms":397.73604100000375,"probe":75.457}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":512,"min":5.083,"med":5.208,"probe":88.541}
+{"kind":"ramp","why":"probe 100","ms":395.42287500000384,"probe":75.999}
+{"kind":"ramp","why":"probe 100","ms":454.3867089999985,"probe":75.666}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":1024,"min":6.125,"med":6.291,"probe":100.249}
+{"kind":"ramp","why":"probe 100","ms":335.80895800000144,"probe":75.416}
+{"kind":"ramp","why":"probe 101","ms":398.9209999999948,"probe":75.415}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":2048,"min":6.125,"med":6.292,"probe":99.914}
+{"kind":"ramp","why":"probe 100","ms":340.406167000001,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":344.260291999999,"probe":75.29}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":4096,"min":6.25,"med":6.375,"probe":99.914}
+{"kind":"ramp","why":"probe 100","ms":348.25991700000304,"probe":75.749}
+{"kind":"ramp","why":"probe 100","ms":350.3211669999946,"probe":99.79}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":8192,"min":6.542,"med":6.875,"probe":99.998}
+{"kind":"ramp","why":"probe 100","ms":354.0970410000009,"probe":99.831}
+{"kind":"ramp","why":"probe 100","ms":359.0338330000013,"probe":99.79}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":16384,"min":7.209,"med":7.417,"probe":99.874}
+{"kind":"ramp","why":"probe 100","ms":358.8877499999944,"probe":99.664}
+{"kind":"ramp","why":"probe 100","ms":358.2225000000035,"probe":99.707}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":32768,"min":9.041,"med":9.167,"probe":100.165}
+{"kind":"ramp","why":"probe 100","ms":359.4670419999966,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":358.6044170000023,"probe":99.874}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":65536,"min":12.875,"med":13.416,"probe":99.874}
+{"kind":"ramp","why":"probe 100","ms":354.63166700000147,"probe":99.831}
+{"kind":"ramp","why":"probe 100","ms":354.9618750000009,"probe":99.749}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":131072,"min":19.083,"med":19.291,"probe":99.998}
+{"kind":"ramp","why":"probe 100","ms":353.51870800000324,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":354.19358400000056,"probe":99.873}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":262144,"min":30.499,"med":30.584,"probe":100.249}
+{"kind":"ramp","why":"probe 100","ms":354.46866600000067,"probe":99.665}
+{"kind":"ramp","why":"probe 100","ms":353.1890839999978,"probe":99.79}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8192,"lanes":524288,"min":54.208,"med":54.333,"probe":99.874}
+{"kind":"ramp","why":"probe 100","ms":354.5425830000022,"probe":99.664}
+{"kind":"ramp","why":"probe 100","ms":354.03683399999863,"probe":99.831}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16384,"lanes":1048576,"min":93.416,"med":102.499,"probe":99.624}
+{"kind":"ramp","why":"probe 100","ms":353.69270799999504,"probe":99.832}
+{"kind":"ramp","why":"probe 100","ms":352.000208999998,"probe":99.666}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":128,"min":5.792,"med":6,"probe":99.831}
+{"kind":"ramp","why":"probe 100","ms":351.76437499999884,"probe":99.874}
+{"kind":"ramp","why":"probe 100","ms":351.42237499999464,"probe":99.623}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":256,"min":6,"med":6.208,"probe":100.207}
+{"kind":"ramp","why":"probe 100","ms":351.3535839999968,"probe":99.665}
+{"kind":"ramp","why":"probe 100","ms":416.12279199999466,"probe":93.998}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":512,"min":5.916,"med":6.041,"probe":99.999}
+{"kind":"ramp","why":"probe 100","ms":415.9230829999942,"probe":79.416}
+{"kind":"ramp","why":"probe 100","ms":373.8399170000048,"probe":99.956}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":1024,"min":5.791,"med":6.042,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":354.35945899999933,"probe":99.581}
+{"kind":"ramp","why":"probe 100","ms":358.27125000000524,"probe":99.664}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":2048,"min":5.917,"med":5.958,"probe":100.04}
+{"kind":"ramp","why":"probe 100","ms":358.80616700000246,"probe":99.707}
+{"kind":"ramp","why":"probe 100","ms":310.6002499999886,"probe":99.623}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":4096,"min":6.042,"med":6.208,"probe":110.666}
+{"kind":"ramp","why":"probe 100","ms":358.82474999999977,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":358.80425000000105,"probe":99.79}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":8192,"min":6.458,"med":6.542,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":359.226416000005,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":358.96825000000536,"probe":99.664}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":16384,"min":7.166,"med":7.291,"probe":99.832}
+{"kind":"ramp","why":"probe 100","ms":353.9914999999892,"probe":99.541}
+{"kind":"ramp","why":"probe 100","ms":354.66433299999335,"probe":99.873}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":32768,"min":9,"med":9.208,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":352.73845900000015,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":357.1213329999882,"probe":99.832}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":65536,"min":12,"med":12.166,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":363.37162499999977,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":362.87574999999197,"probe":99.915}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":131072,"min":19.208,"med":115.79,"probe":100.081}
+{"kind":"ramp","why":"probe 100","ms":367.1251249999914,"probe":99.581}
+{"kind":"ramp","why":"probe 108","ms":301.7065419999999,"probe":99.873}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":262144,"min":30.334,"med":30.707,"probe":99.749}
+{"kind":"ramp","why":"probe 100","ms":320.6332919999986,"probe":99.833}
+{"kind":"ramp","why":"probe 100","ms":311.7102500000037,"probe":99.958}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":524288,"min":54.666,"med":54.832,"probe":99.958}
+{"kind":"ramp","why":"probe 124","ms":365.22962499999267,"probe":99.999}
+{"kind":"ramp","why":"probe 100","ms":325.23391600001196,"probe":100.415}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8192,"lanes":1048576,"min":98.748,"med":102.998,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":313.45116700000654,"probe":99.706}
+{"kind":"ramp","why":"probe 100","ms":326.0349579999893,"probe":100.041}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":256,"min":7.75,"med":7.959,"probe":125.414}
+{"kind":"ramp","why":"probe 100","ms":393.52920799999265,"probe":100.373}
+{"kind":"ramp","why":"probe 100","ms":317.176667000007,"probe":99.831}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":512,"min":5.75,"med":6,"probe":110.165}
+{"kind":"ramp","why":"probe 100","ms":316.1077499999956,"probe":99.999}
+{"kind":"ramp","why":"probe 100","ms":313.4832500000048,"probe":99.915}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":1024,"min":5.875,"med":6.125,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":311.8317500000121,"probe":99.707}
+{"kind":"ramp","why":"probe 100","ms":309.8005830000038,"probe":99.665}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":2048,"min":5.959,"med":6.25,"probe":99.916}
+{"kind":"ramp","why":"probe 100","ms":305.07270900000003,"probe":99.999}
+{"kind":"ramp","why":"probe 100","ms":303.1559169999964,"probe":99.831}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":4096,"min":8.375,"med":8.834,"probe":125.206}
+{"kind":"ramp","why":"probe 100","ms":301.44775000000664,"probe":99.916}
+{"kind":"ramp","why":"probe 100","ms":362.38391600000614,"probe":99.833}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":8192,"min":6.25,"med":6.374,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":358.59175000000687,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":357.1110420000041,"probe":99.914}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":16384,"min":7.167,"med":7.541,"probe":99.998}
+{"kind":"ramp","why":"probe 100","ms":353.33633399999235,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":353.9859999999899,"probe":99.956}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":32768,"min":8.833,"med":9.042,"probe":99.874}
+{"kind":"ramp","why":"probe 100","ms":358.4982919999893,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":358.51137500000186,"probe":99.831}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":65536,"min":11.834,"med":12.292,"probe":99.916}
+{"kind":"ramp","why":"probe 100","ms":362.46187500000815,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":364.35749999999825,"probe":99.998}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":131072,"min":28.291,"med":28.625,"probe":100.541}
+{"kind":"ramp","why":"probe 100","ms":301.251958000008,"probe":99.623}
+{"kind":"ramp","why":"probe 104","ms":303.6345830000064,"probe":99.874}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":262144,"min":30.542,"med":30.625,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":305.4751669999969,"probe":99.791}
+{"kind":"ramp","why":"probe 100","ms":308.9850839999999,"probe":99.999}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":524288,"min":54.208,"med":54.541,"probe":120.582}
+{"kind":"ramp","why":"probe 100","ms":309.1757920000091,"probe":99.914}
+{"kind":"ramp","why":"probe 124","ms":310.0275830000028,"probe":99.79}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":1048576,"min":94.207,"med":102.374,"probe":99.915}
+{"kind":"ramp","why":"probe 125","ms":305.8215409999975,"probe":99.791}
+{"kind":"ramp","why":"probe 125","ms":306.76308300001256,"probe":99.957}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":512,"min":7.958,"med":8.083,"probe":125.29}
+{"kind":"ramp","why":"probe 100","ms":513.3664169999975,"probe":99.79}
+{"kind":"ramp","why":"probe 125","ms":311.73475000000326,"probe":100.54}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":1024,"min":8.915,"med":10.625,"probe":128.54}
+{"kind":"ramp","why":"probe 104","ms":323.5075829999987,"probe":99.832}
+{"kind":"ramp","why":"probe 125","ms":314.0397910000029,"probe":100.04}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":2048,"min":8.542,"med":8.833,"probe":125.04}
+{"kind":"ramp","why":"probe 100","ms":382.4083329999994,"probe":99.999}
+{"kind":"ramp","why":"probe 125","ms":319.5744170000107,"probe":99.748}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":4096,"min":6.833,"med":7.208,"probe":100.457}
+{"kind":"ramp","why":"probe 125","ms":319.62345800000185,"probe":99.833}
+{"kind":"ramp","why":"probe 125","ms":322.15637500000594,"probe":99.914}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":8192,"min":7.042,"med":7.333,"probe":99.957}
+{"kind":"ramp","why":"probe 125","ms":326.27870800001256,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":328.99000000000524,"probe":99.999}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":16384,"min":7.167,"med":7.417,"probe":99.831}
+{"kind":"ramp","why":"probe 100","ms":401.43824999999197,"probe":99.832}
+{"kind":"ramp","why":"probe 125","ms":398.8331670000043,"probe":100.082}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":32768,"min":13.375,"med":13.499,"probe":125.416}
+{"kind":"ramp","why":"probe 100","ms":398.6288329999952,"probe":99.915}
+{"kind":"ramp","why":"probe 124","ms":322.6185419999965,"probe":99.956}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":65536,"min":18.875,"med":19.208,"probe":125.29}
+{"kind":"ramp","why":"probe 100","ms":318.1895829999994,"probe":100.082}
+{"kind":"ramp","why":"probe 100","ms":383.6640000000043,"probe":99.957}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":131072,"min":29.749,"med":29.833,"probe":124.956}
+{"kind":"ramp","why":"probe 100","ms":442.8917089999886,"probe":99.623}
+{"kind":"ramp","why":"probe 124","ms":302.04258299998764,"probe":99.666}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":262144,"min":30.125,"med":30.417,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":358.62645900000643,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":362.18941600000835,"probe":99.832}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":524288,"min":54.457,"med":54.79,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":363.3532089999935,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":309.33291600001394,"probe":100.039}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":1048576,"min":115.999,"med":117.331,"probe":124.081}
+{"kind":"ramp","why":"probe 100","ms":366.1148749999993,"probe":99.914}
+{"kind":"ramp","why":"probe 100","ms":303.39179100000183,"probe":99.832}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":1024,"min":7.375,"med":7.624,"probe":99.958}
+{"kind":"ramp","why":"probe 100","ms":445.46537499999977,"probe":100.124}
+{"kind":"ramp","why":"probe 100","ms":451.9184169999935,"probe":100.082}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":2048,"min":8.375,"med":8.625,"probe":100.29}
+{"kind":"ramp","why":"probe 100","ms":320.734540999998,"probe":99.999}
+{"kind":"ramp","why":"probe 100","ms":328.16158300000825,"probe":100.166}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":4096,"min":10.375,"med":10.542,"probe":125.79}
+{"kind":"ramp","why":"probe 100","ms":331.85445900000923,"probe":100.082}
+{"kind":"ramp","why":"probe 127","ms":323.7769580000022,"probe":99.916}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":8192,"min":8.542,"med":8.749,"probe":99.916}
+{"kind":"ramp","why":"probe 125","ms":348.9277909999946,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":328.7349169999943,"probe":100.415}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":16384,"min":10.042,"med":13.458,"probe":129.331}
+{"kind":"ramp","why":"probe 100","ms":399.47154200001387,"probe":99.958}
+{"kind":"ramp","why":"probe 125","ms":327.40091699999175,"probe":99.832}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":32768,"min":13.334,"med":13.708,"probe":125.248}
+{"kind":"ramp","why":"probe 100","ms":475.7017920000071,"probe":99.999}
+{"kind":"ramp","why":"probe 125","ms":400.41537499999686,"probe":100.165}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":65536,"min":18.457,"med":19,"probe":125.039}
+{"kind":"ramp","why":"probe 100","ms":473.7428749999963,"probe":99.957}
+{"kind":"ramp","why":"probe 125","ms":327.03441599999496,"probe":99.999}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":131072,"min":18.5,"med":18.582,"probe":100.039}
+{"kind":"ramp","why":"probe 124","ms":338.22624999999243,"probe":99.957}
+{"kind":"ramp","why":"probe 102","ms":392.63600000001315,"probe":99.873}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":262144,"min":34.416,"med":51.416,"probe":124.54}
+{"kind":"ramp","why":"probe 100","ms":336.0713340000075,"probe":100.666}
+{"kind":"ramp","why":"probe 100","ms":390.0247090000048,"probe":100.081}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":524288,"min":61.791,"med":62.207,"probe":124.29}
+{"kind":"ramp","why":"probe 100","ms":397.07224999999744,"probe":100.331}
+{"kind":"ramp","why":"probe 124","ms":320.74245799999335,"probe":100.248}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":1048576,"min":116.831,"med":118.04,"probe":124.332}
+{"kind":"ramp","why":"probe 100","ms":351.40883400000166,"probe":100.583}
+{"kind":"ramp","why":"probe 126","ms":355.16912500000035,"probe":100.541}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":32,"min":8.041,"med":8.124,"probe":125.664}
+{"kind":"ramp","why":"probe 100","ms":395.63683299999684,"probe":100.665}
+{"kind":"ramp","why":"probe 100","ms":334.2146669999929,"probe":100.331}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":64,"min":6.042,"med":6.125,"probe":99.998}
+{"kind":"ramp","why":"probe 125","ms":411.0238329999993,"probe":100.206}
+{"kind":"ramp","why":"probe 125","ms":343.0878329999978,"probe":125.582}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":128,"min":6.207,"med":6.291,"probe":112.624}
+{"kind":"ramp","why":"probe 125","ms":427.0761659999989,"probe":118.04}
+{"kind":"ramp","why":"probe 125","ms":661.2278749999969,"probe":99.999}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":256,"min":8.042,"med":8.334,"probe":125.29}
+{"kind":"ramp","why":"probe 125","ms":423.94854199999827,"probe":100.333}
+{"kind":"ramp","why":"probe 125","ms":651.466167000006,"probe":100.789}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":512,"min":8.125,"med":8.416,"probe":125.207}
+{"kind":"ramp","why":"probe 125","ms":360.7370419999934,"probe":100.624}
+{"kind":"ramp","why":"probe 125","ms":480.7723340000084,"probe":99.956}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":1024,"min":6.292,"med":6.417,"probe":99.999}
+{"kind":"ramp","why":"probe 125","ms":408.35025000000314,"probe":100.457}
+{"kind":"ramp","why":"probe 100","ms":341.5744579999882,"probe":100.373}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":2048,"min":6.541,"med":6.708,"probe":99.999}
+{"kind":"ramp","why":"probe 125","ms":430.4616250000108,"probe":101.414}
+{"kind":"ramp","why":"probe 100","ms":336.8502080000035,"probe":124.873}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":4096,"min":6.583,"med":6.75,"probe":99.957}
+{"kind":"ramp","why":"probe 125","ms":338.747457999998,"probe":124.998}
+{"kind":"ramp","why":"probe 124","ms":342.30108299999847,"probe":99.998}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":8192,"min":7.542,"med":9.958,"probe":110.831}
+{"kind":"ramp","why":"probe 126","ms":345.17266699999163,"probe":125.873}
+{"kind":"ramp","why":"probe 125","ms":345.38608399999794,"probe":99.956}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":16384,"min":12.875,"med":13.209,"probe":125.165}
+{"kind":"ramp","why":"probe 100","ms":420.49316699999326,"probe":100.623}
+{"kind":"ramp","why":"probe 125","ms":423.32741699999315,"probe":100.666}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":32768,"min":18.957,"med":19.125,"probe":125.54}
+{"kind":"ramp","why":"probe 100","ms":342.5541249999951,"probe":100.124}
+{"kind":"ramp","why":"probe 103","ms":360.7725829999981,"probe":100.456}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":65536,"min":18.916,"med":19.375,"probe":99.915}
+{"kind":"ramp","why":"probe 124","ms":337.8800409999967,"probe":125.082}
+{"kind":"ramp","why":"probe 104","ms":339.64012500000536,"probe":100.457}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":131072,"min":34.791,"med":51.333,"probe":124.457}
+{"kind":"ramp","why":"probe 124","ms":336.4732919999951,"probe":99.706}
+{"kind":"ramp","why":"probe 124","ms":332.3145829999994,"probe":99.749}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8192,"lanes":262144,"min":54.416,"med":54.79,"probe":100.041}
+{"kind":"ramp","why":"probe 124","ms":408.54875000000175,"probe":99.998}
+{"kind":"ramp","why":"probe 124","ms":403.3529169999965,"probe":99.956}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16384,"lanes":524288,"min":111.581,"med":114.373,"probe":124.165}
+{"kind":"ramp","why":"probe 124","ms":326.67645800000173,"probe":99.999}
+{"kind":"ramp","why":"probe 124","ms":327.2731669999921,"probe":99.998}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32768,"lanes":1048576,"min":218.122,"med":219.205,"probe":124.123}
+{"kind":"ramp","why":"probe 100","ms":470.5306249999994,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":472.47220899999957,"probe":100.414}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":64,"min":7.417,"med":7.667,"probe":124.914}
+{"kind":"ramp","why":"probe 100","ms":398.4334579999995,"probe":99.873}
+{"kind":"ramp","why":"probe 125","ms":327.4593339999992,"probe":99.749}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":128,"min":5.875,"med":5.917,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":394.29820800000743,"probe":100.082}
+{"kind":"ramp","why":"probe 100","ms":392.60954100001254,"probe":99.957}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":256,"min":8.083,"med":8.208,"probe":125.373}
+{"kind":"ramp","why":"probe 100","ms":389.43745800000033,"probe":99.957}
+{"kind":"ramp","why":"probe 112","ms":317.44174999999814,"probe":99.623}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":512,"min":6.25,"med":6.417,"probe":99.999}
+{"kind":"ramp","why":"probe 125","ms":314.702959000002,"probe":99.998}
+{"kind":"ramp","why":"probe 125","ms":311.92312500000116,"probe":99.664}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":1024,"min":7.207,"med":7.292,"probe":124.539}
+{"kind":"ramp","why":"probe 100","ms":309.17908300001,"probe":99.832}
+{"kind":"ramp","why":"probe 125","ms":308.3218749999942,"probe":99.831}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":2048,"min":6.458,"med":6.541,"probe":100.082}
+{"kind":"ramp","why":"probe 100","ms":311.2822909999959,"probe":100.624}
+{"kind":"ramp","why":"probe 100","ms":382.950708999997,"probe":100.457}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":4096,"min":7.417,"med":7.5,"probe":124.457}
+{"kind":"ramp","why":"probe 100","ms":387.8439999999973,"probe":100.249}
+{"kind":"ramp","why":"probe 100","ms":392.95795799999905,"probe":100.207}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":8192,"min":9.999,"med":10.167,"probe":125.04}
+{"kind":"ramp","why":"probe 100","ms":331.6950829999987,"probe":100.082}
+{"kind":"ramp","why":"probe 125","ms":337.36008300000685,"probe":125.581}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":16384,"min":9.875,"med":10.208,"probe":124.706}
+{"kind":"ramp","why":"probe 100","ms":497.32566699999734,"probe":100.415}
+{"kind":"ramp","why":"probe 125","ms":437.3042909999931,"probe":100.123}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":32768,"min":18.417,"med":19.666,"probe":131.498}
+{"kind":"ramp","why":"probe 125","ms":687.0320840000059,"probe":115.332}
+{"kind":"ramp","why":"probe 125","ms":366.9725000000035,"probe":125.831}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":65536,"min":21.375,"med":30.375,"probe":124.332}
+{"kind":"ramp","why":"probe 124","ms":443.2607089999947,"probe":101.374}
+{"kind":"ramp","why":"probe 124","ms":670.700250000009,"probe":100.957}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":131072,"min":34.249,"med":51.041,"probe":124.373}
+{"kind":"ramp","why":"probe 124","ms":343.4739169999957,"probe":125.206}
+{"kind":"ramp","why":"probe 124","ms":408.02970800000185,"probe":100.04}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":262144,"min":52.874,"med":57.541,"probe":124.248}
+{"kind":"ramp","why":"probe 103","ms":474.03874999999243,"probe":99.957}
+{"kind":"ramp","why":"probe 124","ms":320.5194999999949,"probe":100.083}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8192,"lanes":524288,"min":110.874,"med":112.332,"probe":124.248}
+{"kind":"ramp","why":"probe 100","ms":384.44608300000255,"probe":99.749}
+{"kind":"ramp","why":"probe 100","ms":314.01654199999757,"probe":99.706}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16384,"lanes":1048576,"min":174.748,"med":175.498,"probe":99.874}
+{"kind":"ramp","why":"probe 100","ms":317.89949999999953,"probe":100.624}
+{"kind":"ramp","why":"probe 100","ms":396.1102089999913,"probe":100.79}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":128,"min":6.249,"med":6.333,"probe":100.04}
+{"kind":"ramp","why":"probe 125","ms":402.1964169999992,"probe":100.748}
+{"kind":"ramp","why":"probe 100","ms":349.59562500000175,"probe":125.207}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":256,"min":7.5,"med":7.833,"probe":125.248}
+{"kind":"ramp","why":"probe 100","ms":335.2978329999896,"probe":124.957}
+{"kind":"ramp","why":"probe 100","ms":339.5913750000036,"probe":124.915}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":512,"min":8.084,"med":8.125,"probe":125.207}
+{"kind":"ramp","why":"probe 100","ms":342.6745419999788,"probe":99.874}
+{"kind":"ramp","why":"probe 100","ms":343.2869580000115,"probe":99.957}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":1024,"min":6.334,"med":6.583,"probe":100.124}
+{"kind":"ramp","why":"probe 125","ms":340.11195900000166,"probe":124.998}
+{"kind":"ramp","why":"probe 125","ms":341.53858299998683,"probe":124.998}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":2048,"min":7.125,"med":7.333,"probe":125.248}
+{"kind":"ramp","why":"probe 112","ms":628.0833330000169,"probe":100.081}
+{"kind":"ramp","why":"probe 100","ms":398.3662089999998,"probe":99.957}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":4096,"min":8.792,"med":9,"probe":125.206}
+{"kind":"ramp","why":"probe 100","ms":391.28966700000456,"probe":99.914}
+{"kind":"ramp","why":"probe 125","ms":318.26250000001164,"probe":99.957}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":8192,"min":7.166,"med":7.209,"probe":99.957}
+{"kind":"ramp","why":"probe 125","ms":318.28208299999824,"probe":99.958}
+{"kind":"ramp","why":"probe 100","ms":388.24775000000955,"probe":100.041}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":16384,"min":8.917,"med":9,"probe":100.082}
+{"kind":"ramp","why":"probe 100","ms":455.71420899999794,"probe":100.082}
+{"kind":"ramp","why":"probe 100","ms":387.1746249999851,"probe":100.04}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":32768,"min":11.833,"med":11.917,"probe":99.915}
+{"kind":"ramp","why":"probe 125","ms":317.51866699999664,"probe":99.582}
+{"kind":"ramp","why":"probe 100","ms":384.54000000000815,"probe":100.04}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":65536,"min":17.415,"med":17.583,"probe":99.957}
+{"kind":"ramp","why":"probe 124","ms":318.52491700000246,"probe":99.998}
+{"kind":"ramp","why":"probe 100","ms":387.04537500001607,"probe":99.999}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":131072,"min":30.083,"med":30.749,"probe":99.957}
+{"kind":"ramp","why":"probe 124","ms":316.5667919999978,"probe":99.832}
+{"kind":"ramp","why":"probe 100","ms":388.2558340000105,"probe":99.874}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":262144,"min":52.666,"med":52.75,"probe":99.79}
+{"kind":"ramp","why":"probe 102","ms":386.98858299999847,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":390.68987500001094,"probe":100.04}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":524288,"min":111.332,"med":112.124,"probe":124.415}
+{"kind":"ramp","why":"probe 100","ms":392.373917000019,"probe":99.914}
+{"kind":"ramp","why":"probe 100","ms":392.5882500000007,"probe":99.998}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8192,"lanes":1048576,"min":216.206,"med":216.412,"probe":124.164}
+{"kind":"ramp","why":"probe 100","ms":393.5137499999837,"probe":99.79}
+{"kind":"ramp","why":"probe 125","ms":326.0844170000055,"probe":99.999}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":256,"min":6.375,"med":6.417,"probe":100.206}
+{"kind":"ramp","why":"probe 100","ms":495.2064160000009,"probe":100.916}
+{"kind":"ramp","why":"probe 129","ms":437.3935829999973,"probe":125.707}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":512,"min":8.292,"med":11.167,"probe":126.873}
+{"kind":"ramp","why":"probe 100","ms":344.2156669999822,"probe":100.748}
+{"kind":"ramp","why":"probe 126","ms":347.0148749999935,"probe":100.998}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":1024,"min":8.458,"med":8.791,"probe":125.331}
+{"kind":"ramp","why":"probe 125","ms":588.8379169999971,"probe":100.79}
+{"kind":"ramp","why":"probe 100","ms":357.43137499998556,"probe":101.415}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":2048,"min":10.041,"med":10.207,"probe":125.331}
+{"kind":"ramp","why":"probe 125","ms":680.996833000012,"probe":100.999}
+{"kind":"ramp","why":"probe 125","ms":783.1958750000049,"probe":100.832}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":4096,"min":10,"med":10.083,"probe":125.289}
+{"kind":"ramp","why":"probe 100","ms":589.8520420000132,"probe":100.499}
+{"kind":"ramp","why":"probe 125","ms":427.3572920000006,"probe":100.999}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":8192,"min":7.208,"med":7.334,"probe":100.082}
+{"kind":"ramp","why":"probe 125","ms":570.4661659999983,"probe":100.083}
+{"kind":"ramp","why":"probe 100","ms":486.7203750000044,"probe":100.374}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":16384,"min":8.666,"med":8.917,"probe":121.041}
+{"kind":"ramp","why":"probe 124","ms":404.9480829999957,"probe":100.082}
+{"kind":"ramp","why":"probe 125","ms":417.5554589999956,"probe":99.915}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":32768,"min":11.541,"med":11.834,"probe":99.706}
+{"kind":"ramp","why":"probe 100","ms":387.4378330000036,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":315.6209169999929,"probe":99.874}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":65536,"min":17.415,"med":17.583,"probe":99.749}
+{"kind":"ramp","why":"probe 100","ms":309.64099999997416,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":315.9156249999942,"probe":99.998}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":131072,"min":32.75,"med":47.749,"probe":110.206}
+{"kind":"ramp","why":"probe 100","ms":378.2337080000143,"probe":100.415}
+{"kind":"ramp","why":"probe 100","ms":307.7758750000212,"probe":100.04}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":262144,"min":52.415,"med":52.75,"probe":100.124}
+{"kind":"ramp","why":"probe 100","ms":312.74112500000047,"probe":100.666}
+{"kind":"ramp","why":"probe 100","ms":383.4086669999815,"probe":100.04}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":524288,"min":111.29,"med":111.748,"probe":124.04}
+{"kind":"ramp","why":"probe 100","ms":389.3892089999863,"probe":99.957}
+{"kind":"ramp","why":"probe 124","ms":323.6469159999979,"probe":99.833}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":1048576,"min":174.205,"med":175.163,"probe":99.873}
+{"kind":"ramp","why":"probe 125","ms":326.5053750000079,"probe":100.041}
+{"kind":"ramp","why":"probe 100","ms":326.52162499999395,"probe":100.083}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":512,"min":7.375,"med":7.5,"probe":99.998}
+{"kind":"ramp","why":"probe 128","ms":339.28450000000885,"probe":125.415}
+{"kind":"ramp","why":"probe 100","ms":340.5772500000021,"probe":100.248}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":1024,"min":7.375,"med":7.417,"probe":100.123}
+{"kind":"ramp","why":"probe 125","ms":538.234375,"probe":100.333}
+{"kind":"ramp","why":"probe 100","ms":344.26908300002106,"probe":125.165}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":2048,"min":7.084,"med":7.25,"probe":100.04}
+{"kind":"ramp","why":"probe 125","ms":340.9291669999948,"probe":125.248}
+{"kind":"ramp","why":"probe 125","ms":337.3097500000149,"probe":99.958}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":4096,"min":12.291,"med":12.458,"probe":125.248}
+{"kind":"ramp","why":"probe 100","ms":339.7353330000187,"probe":124.914}
+{"kind":"ramp","why":"probe 125","ms":338.6753749999916,"probe":124.831}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":8192,"min":8.5,"med":8.666,"probe":99.957}
+{"kind":"ramp","why":"probe 125","ms":502.191582999978,"probe":100.123}
+{"kind":"ramp","why":"probe 125","ms":554.1909159999923,"probe":99.833}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":16384,"min":8.709,"med":8.916,"probe":99.873}
+{"kind":"ramp","why":"probe 125","ms":329.05299999998533,"probe":99.833}
+{"kind":"ramp","why":"probe 125","ms":325.38804200000595,"probe":99.914}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":32768,"min":17.957,"med":18.292,"probe":124.873}
+{"kind":"ramp","why":"probe 100","ms":321.28825000001234,"probe":99.706}
+{"kind":"ramp","why":"probe 124","ms":316.2994159999944,"probe":99.957}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":65536,"min":17.541,"med":17.583,"probe":99.874}
+{"kind":"ramp","why":"probe 124","ms":314.41179099999135,"probe":99.832}
+{"kind":"ramp","why":"probe 124","ms":311.6242499999935,"probe":99.833}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":131072,"min":29.166,"med":29.292,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":309.3172500000219,"probe":99.664}
+{"kind":"ramp","why":"probe 112","ms":306.0185000000056,"probe":99.831}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":262144,"min":52.708,"med":56.832,"probe":124.249}
+{"kind":"ramp","why":"probe 100","ms":305.44470900000306,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":304.87933299998986,"probe":99.748}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":524288,"min":94.499,"med":99.916,"probe":99.706}
+{"kind":"ramp","why":"probe 100","ms":305.2724579999922,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":305.40137499998673,"probe":99.581}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":1048576,"min":174.955,"med":175.372,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":301.26479200000176,"probe":99.707}
+{"kind":"ramp","why":"probe 127","ms":305.0421250000072,"probe":99.749}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":1024,"min":8.833,"med":8.958,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":305.54025000002,"probe":99.666}
+{"kind":"ramp","why":"probe 100","ms":304.43900000001304,"probe":99.664}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":2048,"min":9,"med":9.291,"probe":100.04}
+{"kind":"ramp","why":"probe 100","ms":304.751082999981,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":507.52291600001627,"probe":99.749}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":4096,"min":9.041,"med":9.292,"probe":99.832}
+{"kind":"ramp","why":"probe 100","ms":305.17666599998483,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":306.9689589999907,"probe":99.916}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":8192,"min":11.499,"med":11.666,"probe":99.874}
+{"kind":"ramp","why":"probe 125","ms":310.31454200000735,"probe":99.999}
+{"kind":"ramp","why":"probe 100","ms":382.11612500000047,"probe":99.999}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":16384,"min":12.667,"med":12.708,"probe":124.998}
+{"kind":"ramp","why":"probe 100","ms":455.70504199998686,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":391.1060830000206,"probe":99.916}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":32768,"min":18.041,"med":18.125,"probe":124.748}
+{"kind":"ramp","why":"probe 100","ms":392.43512499998906,"probe":99.831}
+{"kind":"ramp","why":"probe 125","ms":321.5899159999972,"probe":99.664}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":65536,"min":17.457,"med":17.667,"probe":99.999}
+{"kind":"ramp","why":"probe 124","ms":319.58479200000875,"probe":99.956}
+{"kind":"ramp","why":"probe 124","ms":322.24950000000536,"probe":99.999}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":131072,"min":52,"med":53.417,"probe":145.372}
+{"kind":"ramp","why":"probe 100","ms":384.4118750000198,"probe":99.832}
+{"kind":"ramp","why":"probe 100","ms":310.8264579999959,"probe":99.707}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":262144,"min":58.832,"med":81.706,"probe":123.956}
+{"kind":"ramp","why":"probe 99","ms":373.83004199998686,"probe":99.623}
+{"kind":"ramp","why":"probe 124","ms":303.2697909999988,"probe":99.831}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":524288,"min":93.499,"med":99.874,"probe":99.54}
+{"kind":"ramp","why":"probe 100","ms":301.09412500000326,"probe":99.749}
+{"kind":"ramp","why":"probe 100","ms":364.0476670000062,"probe":99.833}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":1048576,"min":175.165,"med":186.747,"probe":99.624}
+{"kind":"ramp","why":"probe 100","ms":358.63241599997855,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":358.62504199999967,"probe":99.874}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":32,"min":6.082,"med":6.416,"probe":99.874}
+{"kind":"ramp","why":"probe 101","ms":362.8324169999978,"probe":99.749}
+{"kind":"ramp","why":"probe 100","ms":363.09954200001084,"probe":99.874}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":64,"min":6.166,"med":6.375,"probe":99.999}
+{"kind":"ramp","why":"probe 114","ms":309.468292000005,"probe":100.081}
+{"kind":"ramp","why":"probe 100","ms":446.5429159999767,"probe":100.373}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":128,"min":6.209,"med":6.25,"probe":100.041}
+{"kind":"ramp","why":"probe 114","ms":313.88208399998257,"probe":100.248}
+{"kind":"ramp","why":"probe 100","ms":313.35658299998613,"probe":99.998}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":256,"min":6.167,"med":6.5,"probe":99.998}
+{"kind":"ramp","why":"probe 110","ms":312.90245799999684,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":313.31529200001387,"probe":99.79}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":512,"min":6.292,"med":6.5,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":315.70416700001806,"probe":100.457}
+{"kind":"ramp","why":"probe 100","ms":382.2435000000114,"probe":100.04}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":1024,"min":8.583,"med":8.957,"probe":124.873}
+{"kind":"ramp","why":"probe 100","ms":446.5783330000122,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":377.63041599999997,"probe":99.916}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":2048,"min":6.916,"med":7.292,"probe":100.082}
+{"kind":"ramp","why":"probe 100","ms":439.39883300001384,"probe":99.998}
+{"kind":"ramp","why":"probe 100","ms":370.35137499999837,"probe":99.789}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":4096,"min":7.332,"med":7.416,"probe":99.791}
+{"kind":"ramp","why":"probe 125","ms":300.93733399998746,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":303.28758400000515,"probe":99.915}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":8192,"min":12.875,"med":13.167,"probe":124.915}
+{"kind":"ramp","why":"probe 100","ms":300.82354199999827,"probe":99.79}
+{"kind":"ramp","why":"probe 103","ms":303.032916999975,"probe":99.873}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":16384,"min":11.707,"med":11.834,"probe":99.748}
+{"kind":"ramp","why":"probe 101","ms":301.38254199997755,"probe":99.707}
+{"kind":"ramp","why":"probe 100","ms":300.99608299997635,"probe":99.832}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":32768,"min":18.416,"med":18.833,"probe":100.04}
+{"kind":"ramp","why":"probe 100","ms":301.6782919999969,"probe":99.999}
+{"kind":"ramp","why":"probe 101","ms":363.60162500001024,"probe":99.873}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":65536,"min":30.624,"med":31.916,"probe":100.039}
+{"kind":"ramp","why":"probe 100","ms":363.22141600001487,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":359.4861669999955,"probe":99.832}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":131072,"min":54.499,"med":55.124,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":358.39220800000476,"probe":99.831}
+{"kind":"ramp","why":"probe 100","ms":356.9708330000285,"probe":99.749}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8192,"lanes":262144,"min":89.457,"med":101.499,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":359.0350840000028,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":356.2462499999965,"probe":99.831}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16384,"lanes":524288,"min":169.956,"med":174.038,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":356.0326659999846,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":358.4356249999837,"probe":99.915}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32768,"lanes":1048576,"min":331.953,"med":334.703,"probe":102.249}
+{"kind":"ramp","why":"probe 100","ms":353.7829999999958,"probe":99.541}
+{"kind":"ramp","why":"probe 100","ms":358.31487500001094,"probe":99.665}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":64,"min":6.333,"med":6.499,"probe":99.833}
+{"kind":"ramp","why":"probe 100","ms":359.73829100001603,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":358.5386249999865,"probe":99.623}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":128,"min":6.25,"med":6.417,"probe":99.831}
+{"kind":"ramp","why":"probe 100","ms":358.04012499999953,"probe":99.666}
+{"kind":"ramp","why":"probe 100","ms":355.86879199999385,"probe":99.748}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":256,"min":6.5,"med":6.75,"probe":100.124}
+{"kind":"ramp","why":"probe 100","ms":356.08191599999554,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":354.45779099999345,"probe":99.581}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":512,"min":6.874,"med":7.125,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":319.3526669999992,"probe":99.873}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":1024,"min":6.75,"med":7.209,"probe":75.957}
+{"kind":"ramp","why":"probe 100","ms":353.46262500001467,"probe":99.666}
+{"kind":"ramp","why":"probe 100","ms":352.0247920000111,"probe":99.956}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":2048,"min":6.833,"med":7,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":355.14441700000316,"probe":99.624}
+{"kind":"ramp","why":"probe 100","ms":352.1872499999881,"probe":99.582}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":4096,"min":7.625,"med":10.541,"probe":102.541}
+{"kind":"ramp","why":"probe 100","ms":352.16695800001617,"probe":99.789}
+{"kind":"ramp","why":"probe 100","ms":354.33379200001946,"probe":99.874}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":8192,"min":9.084,"med":9.167,"probe":99.998}
+{"kind":"ramp","why":"probe 100","ms":352.8074590000033,"probe":99.623}
+{"kind":"ramp","why":"probe 100","ms":353.68491599999834,"probe":99.749}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":16384,"min":12.084,"med":12.417,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":354.5592919999908,"probe":99.581}
+{"kind":"ramp","why":"probe 100","ms":353.3530829999945,"probe":99.831}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":32768,"min":17.332,"med":17.708,"probe":99.958}
+{"kind":"ramp","why":"probe 100","ms":354.25533400001586,"probe":99.707}
+{"kind":"ramp","why":"probe 100","ms":358.35699999998906,"probe":99.831}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":65536,"min":30.54,"med":32.04,"probe":99.957}
+{"kind":"ramp","why":"probe 124","ms":358.33191700000316,"probe":99.874}
+{"kind":"ramp","why":"probe 100","ms":358.2231249999895,"probe":99.749}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":131072,"min":53.541,"med":54.207,"probe":99.873}
+{"kind":"ramp","why":"probe 124","ms":359.7002499999944,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":359.0108750000072,"probe":99.708}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":262144,"min":95.165,"med":98.624,"probe":99.706}
+{"kind":"ramp","why":"probe 100","ms":358.6149999999907,"probe":99.914}
+{"kind":"ramp","why":"probe 100","ms":307.83170800001244,"probe":99.915}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8192,"lanes":524288,"min":167.998,"med":174.206,"probe":99.666}
+{"kind":"ramp","why":"probe 100","ms":362.40079200000037,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":363.1138749999809,"probe":99.79}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16384,"lanes":1048576,"min":329.995,"med":409.076,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":300.99366700000246,"probe":99.916}
+{"kind":"ramp","why":"probe 100","ms":373.0812080000178,"probe":99.873}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":128,"min":6.666,"med":6.666,"probe":99.79}
+{"kind":"ramp","why":"probe 125","ms":311.1884580000187,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":316.52324999999837,"probe":99.956}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":256,"min":6.375,"med":6.708,"probe":99.664}
+{"kind":"ramp","why":"probe 113","ms":317.9551250000077,"probe":99.831}
+{"kind":"ramp","why":"probe 100","ms":392.43537500000093,"probe":99.874}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":512,"min":7.958,"med":8.041,"probe":124.373}
+{"kind":"ramp","why":"probe 125","ms":330.63529100001324,"probe":100.081}
+{"kind":"ramp","why":"probe 125","ms":318.01774999999907,"probe":99.957}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":1024,"min":7.25,"med":7.416,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":317.89916699999594,"probe":99.999}
+{"kind":"ramp","why":"probe 125","ms":318.3994160000002,"probe":99.916}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":2048,"min":7.416,"med":7.625,"probe":99.998}
+{"kind":"ramp","why":"probe 125","ms":317.22541600000113,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":388.8032499999972,"probe":99.873}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":4096,"min":10.375,"med":10.832,"probe":125.373}
+{"kind":"ramp","why":"probe 100","ms":387.83158300002106,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":383.0486249999958,"probe":99.958}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":8192,"min":12.917,"med":13.375,"probe":125.207}
+{"kind":"ramp","why":"probe 100","ms":309.13175000000047,"probe":99.958}
+{"kind":"ramp","why":"probe 125","ms":305.0865840000042,"probe":99.957}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":16384,"min":11.666,"med":11.832,"probe":99.916}
+{"kind":"ramp","why":"probe 100","ms":300.3234170000069,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":358.673334000021,"probe":99.582}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":32768,"min":17.667,"med":17.833,"probe":99.999}
+{"kind":"ramp","why":"probe 100","ms":359.589541000023,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":358.7279170000111,"probe":99.581}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":65536,"min":29.042,"med":29.25,"probe":99.874}
+{"kind":"ramp","why":"probe 100","ms":361.60604199999943,"probe":99.831}
+{"kind":"ramp","why":"probe 100","ms":300.55595800001174,"probe":99.914}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":131072,"min":59.624,"med":61.749,"probe":124.165}
+{"kind":"ramp","why":"probe 100","ms":304.6077079999959,"probe":99.624}
+{"kind":"ramp","why":"probe 100","ms":307.8988750000135,"probe":99.624}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":262144,"min":87.04,"med":98.207,"probe":107.249}
+{"kind":"ramp","why":"probe 100","ms":446.90504100002,"probe":100.082}
+{"kind":"ramp","why":"probe 100","ms":377.3784999999916,"probe":99.582}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":524288,"min":167.665,"med":168.457,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":305.78545799999847,"probe":99.582}
+{"kind":"ramp","why":"probe 100","ms":303.8449580000015,"probe":124.706}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8192,"lanes":1048576,"min":329.079,"med":329.245,"probe":99.831}
+{"kind":"ramp","why":"probe 126","ms":362.8112919999985,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":356.07587499998044,"probe":99.623}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":256,"min":7.625,"med":7.792,"probe":100.081}
+{"kind":"ramp","why":"probe 100","ms":351.2427080000052,"probe":75.999}
+{"kind":"ramp","why":"probe 100","ms":347.3302089999779,"probe":99.832}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":512,"min":7.334,"med":7.542,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":344.9416659999988,"probe":99.623}
+{"kind":"ramp","why":"probe 86","ms":530.1266250000044,"probe":75.499}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":1024,"min":7.458,"med":7.791,"probe":99.791}
+{"kind":"ramp","why":"probe 100","ms":404.7318749999977,"probe":75.707}
+{"kind":"ramp","why":"probe 100","ms":468.64466699998593,"probe":75.499}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":2048,"min":8.666,"med":8.792,"probe":99.999}
+{"kind":"ramp","why":"probe 100","ms":345.287290999986,"probe":99.623}
+{"kind":"ramp","why":"probe 100","ms":344.264165999979,"probe":99.915}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":4096,"min":8.542,"med":8.583,"probe":99.916}
+{"kind":"ramp","why":"probe 100","ms":469.66820800001733,"probe":75.624}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":8192,"min":8.792,"med":9.124,"probe":79.541}
+{"kind":"ramp","why":"probe 100","ms":344.09008300001733,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":341.8796250000014,"probe":99.749}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":16384,"min":11.874,"med":11.917,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":344.58950000000186,"probe":99.54}
+{"kind":"ramp","why":"probe 100","ms":342.5969590000168,"probe":75.79}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":32768,"min":17.375,"med":17.417,"probe":99.833}
+{"kind":"ramp","why":"probe 100","ms":404.0148329999938,"probe":75.708}
+{"kind":"ramp","why":"probe 100","ms":467.2920420000155,"probe":75.457}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":65536,"min":28.875,"med":29.374,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":403.8662089999998,"probe":75.749}
+{"kind":"ramp","why":"probe 100","ms":343.1573750000098,"probe":99.707}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":131072,"min":51.415,"med":52.125,"probe":99.748}
+{"kind":"ramp","why":"probe 100","ms":404.2639579999959,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":467.1799170000013,"probe":75.708}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":262144,"min":92.541,"med":98.707,"probe":99.499}
+{"kind":"ramp","why":"probe 100","ms":345.59345799998846,"probe":75.708}
+{"kind":"ramp","why":"probe 86","ms":344.7838750000228,"probe":75.416}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":524288,"min":167.956,"med":176.872,"probe":99.789}
+{"kind":"ramp","why":"probe 100","ms":344.6140830000222,"probe":99.789}
+{"kind":"ramp","why":"probe 100","ms":345.3769999999786,"probe":99.956}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4096,"lanes":1048576,"min":329.412,"med":330.661,"probe":99.666}
+{"kind":"ramp","why":"probe 100","ms":466.29504199998337,"probe":76.457}
+{"kind":"ramp","why":"probe 100","ms":343.1013340000063,"probe":75.499}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":512,"min":9.417,"med":9.5,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":528.4064999999828,"probe":75.664}
+{"kind":"ramp","why":"probe 100","ms":342.27633300001617,"probe":81.041}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":1024,"min":9.25,"med":9.375,"probe":100.082}
+{"kind":"ramp","why":"probe 100","ms":405.2625410000037,"probe":75.664}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":2048,"min":8.375,"med":8.584,"probe":75.707}
+{"kind":"ramp","why":"probe 100","ms":342.1111249999958,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":525.6685830000206,"probe":75.374}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":4096,"min":11.5,"med":11.666,"probe":99.958}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":8192,"min":10.666,"med":10.833,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":462.9522500000021,"probe":75.624}
+{"kind":"ramp","why":"probe 100","ms":341.0469999999914,"probe":99.748}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":16384,"min":11.666,"med":11.792,"probe":99.665}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":32768,"min":16.75,"med":16.959,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":527.4085419999901,"probe":96.916}
+{"kind":"ramp","why":"probe 100","ms":341.1722089999821,"probe":84.373}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":65536,"min":29.083,"med":29.25,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":341.12095799998497,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":586.347374999983,"probe":75.915}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":131072,"min":52.332,"med":52.416,"probe":99.707}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":262144,"min":78.957,"med":96.956,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":341.17862500000047,"probe":75.666}
+{"kind":"ramp","why":"probe 100","ms":339.72495800000615,"probe":75.374}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":524288,"min":168.705,"med":184.997,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":460.6203749999986,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":337.55770799997845,"probe":99.831}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2048,"lanes":1048576,"min":329.954,"med":330.12,"probe":99.874}
+{"kind":"ramp","why":"probe 100","ms":396.0602080000099,"probe":75.457}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1,"lanes":1024,"min":10.542,"med":11.125,"probe":75.664}
+{"kind":"ramp","why":"probe 100","ms":577.3874999999825,"probe":75.583}
+{"kind":"ramp","why":"probe 100","ms":394.73741699999664,"probe":75.666}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":2,"lanes":2048,"min":10.667,"med":10.709,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":397.4393329999875,"probe":75.582}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":4,"lanes":4096,"min":11.083,"med":11.292,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":397.08233299999847,"probe":75.581}
+{"kind":"ramp","why":"probe 100","ms":336.15962500000023,"probe":75.373}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":8,"lanes":8192,"min":17.042,"med":17.208,"probe":100.04}
+{"kind":"ramp","why":"probe 100","ms":335.9381669999857,"probe":75.666}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":16,"lanes":16384,"min":16.125,"med":16.291,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":396.10379100000137,"probe":75.499}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":32,"lanes":32768,"min":16.792,"med":17.125,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":346.57362499999,"probe":76.332}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":64,"lanes":65536,"min":28.082,"med":28.375,"probe":75.666}
+{"kind":"ramp","why":"probe 100","ms":638.4939580000064,"probe":75.499}
+{"kind":"ramp","why":"probe 88","ms":336.55254100001184,"probe":75.416}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":128,"lanes":131072,"min":50.624,"med":52.25,"probe":99.748}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":256,"lanes":262144,"min":88.374,"med":97.123,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":396.03062500001397,"probe":75.624}
+{"kind":"ramp","why":"probe 100","ms":335.95650000000023,"probe":75.332}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":512,"lanes":524288,"min":168.413,"med":178.247,"probe":99.914}
+{"kind":"ramp","why":"probe 100","ms":334.46870800000033,"probe":75.54}
+{"kind":"ramp","why":"probe 100","ms":454.6584579999908,"probe":75.624}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":1,"G":1024,"lanes":1048576,"min":298.995,"med":330.537,"probe":75.331}
+{"kind":"ramp","why":"probe 100","ms":457.71716699999524,"probe":75.833}
+{"kind":"ramp","why":"probe 100","ms":514.6974999999802,"probe":75.583}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":32,"min":5.917,"med":6.125,"probe":75.789}
+{"kind":"ramp","why":"probe 100","ms":453.60083300000406,"probe":75.79}
+{"kind":"ramp","why":"probe 100","ms":392.63141599998926,"probe":93.832}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":64,"min":6.666,"med":6.749,"probe":99.957}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":128,"min":5.917,"med":5.959,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":451.3277090000047,"probe":75.956}
+{"kind":"ramp","why":"probe 100","ms":452.7339589999756,"probe":75.749}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":256,"min":6.999,"med":7,"probe":99.916}
+{"kind":"ramp","why":"probe 100","ms":331.91904099998646,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":391.4973750000063,"probe":75.582}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":512,"min":7.041,"med":7.25,"probe":99.957}
+{"kind":"ramp","why":"probe 100","ms":330.9478750000126,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":449.40662500000326,"probe":75.29}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":1024,"min":6.958,"med":7.25,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":389.77554100001,"probe":76.249}
+{"kind":"ramp","why":"probe 100","ms":568.0717909999948,"probe":76.415}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":2048,"min":7.291,"med":7.541,"probe":99.832}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":4096,"min":6.499,"med":6.667,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":566.8027910000237,"probe":76.04}
+{"kind":"ramp","why":"probe 100","ms":327.4598329999717,"probe":75.458}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":8192,"min":8.792,"med":8.916,"probe":99.958}
+{"kind":"ramp","why":"probe 100","ms":507.58083399999305,"probe":75.833}
+{"kind":"ramp","why":"probe 100","ms":566.9779170000111,"probe":75.457}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":16384,"min":11.417,"med":11.583,"probe":100.082}
+{"kind":"ramp","why":"probe 100","ms":390.4861670000246,"probe":75.749}
+{"kind":"ramp","why":"probe 100","ms":507.9500420000113,"probe":75.499}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":32768,"min":19.542,"med":20.042,"probe":99.999}
+{"kind":"ramp","why":"probe 100","ms":451.1947919999948,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":448.51566699999967,"probe":75.499}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":65536,"min":30.29,"med":31.249,"probe":100.207}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":131072,"min":55.04,"med":56.124,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":570.9460409999883,"probe":75.79}
+{"kind":"ramp","why":"probe 100","ms":448.5042909999902,"probe":75.457}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8192,"lanes":262144,"min":88.124,"med":102.208,"probe":99.666}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16384,"lanes":524288,"min":153.79,"med":155.122,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":448.7943749999977,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":512.0346250000002,"probe":75.582}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32768,"lanes":1048576,"min":299.746,"med":318.87,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":508.4914159999753,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":329.13612499999,"probe":75.54}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":64,"min":6.667,"med":6.875,"probe":100.082}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":128,"min":5.875,"med":6.04,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":327.9031669999822,"probe":99.791}
+{"kind":"ramp","why":"probe 101","ms":326.91083300000173,"probe":75.499}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":256,"min":6.624,"med":6.833,"probe":99.915}
+{"kind":"ramp","why":"probe 100","ms":618.8137500000012,"probe":75.539}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":512,"min":6.084,"med":6.125,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":324.1414999999979,"probe":75.291}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":1024,"min":6.041,"med":6.334,"probe":75.832}
+{"kind":"ramp","why":"probe 100","ms":323.1208330000227,"probe":99.749}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":2048,"min":6.166,"med":6.333,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":326.7452500000072,"probe":99.666}
+{"kind":"ramp","why":"probe 100","ms":326.508582999988,"probe":99.582}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":4096,"min":7.375,"med":7.584,"probe":99.873}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":8192,"min":8.042,"med":8.084,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":324.70616700002574,"probe":75.333}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":16384,"min":10.833,"med":10.958,"probe":81.082}
+{"kind":"ramp","why":"probe 100","ms":325.99937499998487,"probe":99.956}
+{"kind":"ramp","why":"probe 100","ms":327.22966599999927,"probe":99.874}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":32768,"min":17.666,"med":17.833,"probe":100.039}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":65536,"min":36.54,"med":36.666,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":325.5439170000027,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":327.2077500000014,"probe":99.707}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":131072,"min":53.582,"med":55.541,"probe":99.749}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":262144,"min":79.082,"med":97.123,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":506.6204579999903,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":327.91533299998264,"probe":75.665}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8192,"lanes":524288,"min":165.456,"med":178.247,"probe":99.706}
+{"kind":"ramp","why":"probe 100","ms":326.1028750000114,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":325.940499999997,"probe":75.332}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16384,"lanes":1048576,"min":327.203,"med":328.245,"probe":100.124}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":128,"min":5.834,"med":6.042,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":325.4557919999934,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":325.13208300000406,"probe":75.499}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":256,"min":5.833,"med":5.958,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":325.60404199999175,"probe":99.749}
+{"kind":"ramp","why":"probe 100","ms":325.4982500000042,"probe":75.457}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":512,"min":6.25,"med":6.292,"probe":75.874}
+{"kind":"ramp","why":"probe 100","ms":325.4983749999956,"probe":99.916}
+{"kind":"ramp","why":"probe 100","ms":326.7784999999858,"probe":99.749}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":1024,"min":7.458,"med":10.625,"probe":104.206}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":2048,"min":6.125,"med":6.417,"probe":75.331}
+{"kind":"ramp","why":"probe 103","ms":324.39220800000476,"probe":75.624}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":4096,"min":6.375,"med":6.625,"probe":75.832}
+{"kind":"ramp","why":"probe 100","ms":324.4116670000076,"probe":99.707}
+{"kind":"ramp","why":"probe 100","ms":325.6484579999815,"probe":75.415}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":8192,"min":7.75,"med":7.917,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":323.21758299999055,"probe":99.873}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":16384,"min":10.874,"med":11,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":324.8005000000121,"probe":99.581}
+{"kind":"ramp","why":"probe 100","ms":324.52283299999544,"probe":75.415}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":32768,"min":16.666,"med":17.124,"probe":75.79}
+{"kind":"ramp","why":"probe 100","ms":323.2311669999908,"probe":99.666}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":65536,"min":27.915,"med":28.166,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":323.724916999985,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":322.94812499999534,"probe":75.416}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":131072,"min":54.874,"med":55.625,"probe":99.915}
+{"kind":"ramp","why":"probe 99","ms":322.21562499998254,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":321.5579580000194,"probe":99.748}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":262144,"min":91.416,"med":97.124,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":378.7095419999969,"probe":75.624}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":524288,"min":151.498,"med":171.623,"probe":75.248}
+{"kind":"ramp","why":"probe 100","ms":320.22025000001304,"probe":75.499}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8192,"lanes":1048576,"min":314.537,"med":328.786,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":322.43258300001617,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":322.8990000000049,"probe":99.916}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":256,"min":7.125,"med":7.333,"probe":99.623}
+{"kind":"ramp","why":"probe 100","ms":321.40708299999824,"probe":99.832}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":512,"min":6.125,"med":6.375,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":323.302915999986,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":323.8693749999802,"probe":99.791}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":1024,"min":7.125,"med":7.5,"probe":100.289}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":2048,"min":7.499,"med":7.583,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":323.5327089999919,"probe":75.332}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":4096,"min":7.875,"med":7.917,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":325.3646670000162,"probe":99.706}
+{"kind":"ramp","why":"probe 100","ms":325.03095799998846,"probe":75.707}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":8192,"min":7.958,"med":8.208,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":323.6609579999931,"probe":99.623}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":16384,"min":10.708,"med":10.875,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":323.2201670000213,"probe":99.832}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":32768,"min":16.541,"med":16.667,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":326.1307910000032,"probe":99.749}
+{"kind":"ramp","why":"probe 100","ms":321.51500000001397,"probe":75.332}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":65536,"min":27.75,"med":28,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":319.71691699998337,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":320.19204100000206,"probe":75.333}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":131072,"min":52.207,"med":52.208,"probe":99.998}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":262144,"min":79.124,"med":96.791,"probe":75.208}
+{"kind":"ramp","why":"probe 100","ms":375.643791999988,"probe":75.165}
+{"kind":"ramp","why":"probe 100","ms":315.77083299998776,"probe":75.291}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":524288,"min":151.414,"med":152.122,"probe":76.498}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":1048576,"min":297.996,"med":328.287,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":317.1589169999934,"probe":75.457}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":512,"min":7.583,"med":7.959,"probe":75.582}
+{"kind":"ramp","why":"probe 102","ms":315.94758400000865,"probe":75.708}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":1024,"min":7.958,"med":8.125,"probe":75.873}
+{"kind":"ramp","why":"probe 100","ms":315.4566249999916,"probe":75.208}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":2048,"min":7.75,"med":7.832,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":317.7936660000123,"probe":75.499}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":4096,"min":10.291,"med":10.375,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":317.8123749999795,"probe":75.248}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":8192,"min":10.625,"med":10.709,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":374.94337500003166,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":318.6050830000313,"probe":75.541}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":16384,"min":11.542,"med":11.75,"probe":99.873}
+{"kind":"ramp","why":"probe 100","ms":375.42162500001723,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":317.60425000003306,"probe":75.249}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":32768,"min":17.249,"med":17.541,"probe":99.79}
+{"kind":"ramp","why":"probe 100","ms":433.5116670000134,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":317.6659170000348,"probe":75.249}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":65536,"min":28.666,"med":28.917,"probe":99.832}
+{"kind":"ramp","why":"probe 100","ms":377.2282500000438,"probe":75.665}
+{"kind":"ramp","why":"probe 100","ms":322.4219999999623,"probe":75.373}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":131072,"min":50.749,"med":51,"probe":75.791}
+{"kind":"ramp","why":"probe 100","ms":374.7642079999787,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":318.7857499999809,"probe":75.249}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":262144,"min":85.749,"med":98.332,"probe":99.706}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":524288,"min":152.165,"med":152.539,"probe":75.373}
+{"kind":"ramp","why":"probe 100","ms":607.5682500000112,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":317.5353339999565,"probe":75.206}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":1048576,"min":327.495,"med":329.661,"probe":99.54}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":1024,"min":10.416,"med":10.624,"probe":75.206}
+{"kind":"ramp","why":"probe 100","ms":316.34337499999674,"probe":75.458}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":2048,"min":10.75,"med":10.916,"probe":75.791}
+{"kind":"ramp","why":"probe 100","ms":315.9205420000362,"probe":75.207}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":4096,"min":10.917,"med":11.083,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":317.30529200000456,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":317.28229200001806,"probe":75.457}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":8192,"min":16.083,"med":16.208,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":315.73716699995566,"probe":75.207}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":16384,"min":16.624,"med":16.667,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":314.56937500002095,"probe":75.291}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":32768,"min":16.624,"med":16.833,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":314.4992079999647,"probe":75.332}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":65536,"min":28.042,"med":28.208,"probe":75.749}
+{"kind":"ramp","why":"probe 100","ms":314.5330419999664,"probe":75.583}
+{"kind":"ramp","why":"probe 100","ms":314.1438330000383,"probe":75.541}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":131072,"min":50.707,"med":51.207,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":314.3152499999851,"probe":75.791}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":262144,"min":78.249,"med":96.914,"probe":75.166}
+{"kind":"ramp","why":"probe 100","ms":313.94812499999534,"probe":75.291}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":524288,"min":152.706,"med":167.497,"probe":75.29}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":1048576,"min":312.62,"med":331.87,"probe":77.832}
+{"kind":"ramp","why":"probe 100","ms":314.32762500003446,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":314.3577499999665,"probe":75.374}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":32,"min":5.959,"med":6.082,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":315.7767499999609,"probe":75.29}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":64,"min":5.874,"med":6.25,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":315.6430420000106,"probe":75.249}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":128,"min":6.082,"med":6.209,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":316.59204199997475,"probe":75.499}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":256,"min":6.375,"med":6.417,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":315.86074999999255,"probe":75.291}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":512,"min":6.291,"med":6.5,"probe":80.791}
+{"kind":"ramp","why":"probe 100","ms":373.8131660000072,"probe":75.291}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":1024,"min":6.499,"med":6.667,"probe":75.874}
+{"kind":"ramp","why":"probe 100","ms":314.9739169999957,"probe":75.541}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":2048,"min":6.833,"med":7.041,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":314.5290420000092,"probe":75.54}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":4096,"min":7.957,"med":8.125,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":313.6635000000242,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":314.24874999996973,"probe":75.665}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":8192,"min":10.916,"med":11.166,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":313.9822910000221,"probe":75.332}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":16384,"min":18.958,"med":19.667,"probe":78.124}
+{"kind":"ramp","why":"probe 100","ms":313.5806670000311,"probe":75.207}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":32768,"min":31.208,"med":33.041,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":314.8935000000056,"probe":75.332}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":65536,"min":54.166,"med":55.999,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":313.37174999999115,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":312.203582999995,"probe":75.332}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":131072,"min":88.831,"med":102.332,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":313.70250000001397,"probe":75.415}
+{"kind":"ramp","why":"probe 99","ms":313.6091659999802,"probe":75.456}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8192,"lanes":262144,"min":157.248,"med":173.831,"probe":75.331}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16384,"lanes":524288,"min":302.62,"med":322.412,"probe":75.248}
+{"kind":"ramp","why":"probe 100","ms":313.20549999998184,"probe":75.666}
+{"kind":"ramp","why":"probe 100","ms":314.8120830000262,"probe":75.331}
+{"kind":"base","L":32,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32768,"lanes":1048576,"min":588.824,"med":590.324,"probe":80.915}
+{"kind":"ramp","why":"probe 100","ms":313.4520410000114,"probe":75.416}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":64,"min":5.875,"med":6.041,"probe":75.624}
+{"kind":"ramp","why":"probe 100","ms":314.8850419999799,"probe":75.165}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":128,"min":5.834,"med":6,"probe":75.414}
+{"kind":"ramp","why":"probe 100","ms":317.1557090000133,"probe":75.166}
+{"kind":"ramp","why":"probe 100","ms":316.96958299999824,"probe":75.333}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":256,"min":6.166,"med":6.208,"probe":82.166}
+{"kind":"ramp","why":"probe 100","ms":315.65091699996265,"probe":75.249}
+{"kind":"ramp","why":"probe 86","ms":318.0787920000148,"probe":75.457}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":512,"min":6.584,"med":6.958,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":316.6550419999985,"probe":75.54}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":1024,"min":6.916,"med":7,"probe":75.999}
+{"kind":"ramp","why":"probe 100","ms":315.891958000022,"probe":75.332}
+{"kind":"ramp","why":"probe 88","ms":317.263208999997,"probe":75.541}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":2048,"min":7.124,"med":7.166,"probe":75.791}
+{"kind":"ramp","why":"probe 100","ms":315.6581250000163,"probe":75.332}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":4096,"min":8.084,"med":8.208,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":315.5519170000334,"probe":75.333}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":8192,"min":10.708,"med":10.875,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":314.79691699997056,"probe":75.333}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":16384,"min":16.833,"med":16.917,"probe":75.456}
+{"kind":"ramp","why":"probe 100","ms":313.11337500001537,"probe":75.208}
+{"kind":"ramp","why":"probe 100","ms":311.274207999988,"probe":75.374}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":32768,"min":28.874,"med":28.917,"probe":100.123}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":65536,"min":49.375,"med":54.583,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":310.3254580000066,"probe":75.373}
+{"kind":"ramp","why":"probe 100","ms":308.64254199998686,"probe":75.457}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":131072,"min":81.416,"med":98.581,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":308.0126670000027,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":309.04891599999974,"probe":75.541}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":262144,"min":150.747,"med":159.538,"probe":75.332}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8192,"lanes":524288,"min":295.996,"med":322.453,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":309.90279200003715,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":311.49741700000595,"probe":75.457}
+{"kind":"base","L":64,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16384,"lanes":1048576,"min":584.824,"med":585.157,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":315.2567089999793,"probe":75.416}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":128,"min":6.125,"med":6.333,"probe":75.623}
+{"kind":"ramp","why":"probe 100","ms":316.75487499998417,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":319.9786249999888,"probe":75.373}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":256,"min":7.375,"med":7.5,"probe":99.832}
+{"kind":"ramp","why":"probe 100","ms":322.2638330000336,"probe":99.79}
+{"kind":"ramp","why":"probe 90","ms":322.48079100000905,"probe":75.332}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":512,"min":7.458,"med":7.625,"probe":100.124}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":1024,"min":7.667,"med":7.958,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":322.7265829999815,"probe":99.664}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":2048,"min":7.875,"med":8,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":379.95241700002225,"probe":75.291}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":4096,"min":7.875,"med":8.042,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":494.89883299998473,"probe":75.581}
+{"kind":"ramp","why":"probe 100","ms":435.1199589999742,"probe":75.624}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":8192,"min":11.458,"med":11.665,"probe":99.915}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":16384,"min":16.667,"med":16.75,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":317.18470799998613,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":317.8244169999962,"probe":75.249}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":32768,"min":28.791,"med":29.5,"probe":99.998}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":65536,"min":50.416,"med":50.541,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":313.4086670000106,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":311.96045800001593,"probe":75.332}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":131072,"min":81.666,"med":83.958,"probe":75.54}
+{"kind":"ramp","why":"probe 100","ms":366.15533300000243,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":308.2217079999973,"probe":75.749}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":262144,"min":161.497,"med":161.956,"probe":99.79}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":524288,"min":295.953,"med":296.745,"probe":75.582}
+{"kind":"base","L":128,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8192,"lanes":1048576,"min":585.074,"med":628.408,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":307.9824999999837,"probe":75.416}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":256,"min":7.667,"med":7.834,"probe":75.749}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":512,"min":7.792,"med":7.874,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":305.0913329999894,"probe":75.374}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":1024,"min":7.792,"med":7.875,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":305.63441699999385,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":305.40749999997206,"probe":75.332}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":2048,"min":10.25,"med":10.917,"probe":75.249}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":4096,"min":10.458,"med":10.625,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":302.43987499998184,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":302.6382079999894,"probe":75.499}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":8192,"min":10.541,"med":10.791,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":305.5330829999875,"probe":75.498}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":16384,"min":16.291,"med":16.292,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":305.18029099999694,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":304.2923329999903,"probe":75.333}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":32768,"min":28.249,"med":28.583,"probe":99.916}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":65536,"min":50.374,"med":50.416,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":304.4928749999963,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":304.90704099996947,"probe":75.332}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":131072,"min":77.958,"med":95.999,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":304.93820899998536,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":304.86833299999125,"probe":75.415}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":262144,"min":161.831,"med":163.456,"probe":101.082}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":524288,"min":295.287,"med":296.161,"probe":75.624}
+{"kind":"base","L":256,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":1048576,"min":584.825,"med":628.532,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":304.9575000000186,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":304.64395800000057,"probe":75.373}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":512,"min":11.958,"med":12.125,"probe":100.082}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":1024,"min":10.625,"med":10.708,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":307.45220900001004,"probe":75.54}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":2048,"min":10.667,"med":10.959,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":308.47891700000037,"probe":75.499}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":4096,"min":15.667,"med":15.833,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":308.9035000000149,"probe":75.456}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":8192,"min":15.999,"med":16,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":310.84083400003146,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":312.9975830000476,"probe":75.541}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":16384,"min":17.125,"med":17.375,"probe":99.915}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":32768,"min":27.707,"med":27.75,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":310.71100000001024,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":311.6042090000119,"probe":75.541}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":65536,"min":51.291,"med":51.667,"probe":100.291}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":131072,"min":82.832,"med":95.956,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":310.6094579999917,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":311.3926250000368,"probe":75.499}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":262144,"min":161.538,"med":163.831,"probe":99.582}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":524288,"min":296.412,"med":297.411,"probe":75.458}
+{"kind":"base","L":512,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":1048576,"min":585.991,"med":629.032,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":329.5731669999659,"probe":75.498}
+{"kind":"ramp","why":"probe 100","ms":306.9358329999959,"probe":75.373}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":1024,"min":18.333,"med":18.416,"probe":99.915}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":2048,"min":16.292,"med":16.374,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":307.21420899999794,"probe":75.414}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":4096,"min":16.749,"med":17.041,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":306.10404200002085,"probe":75.582}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":8192,"min":27.167,"med":27.415,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":305.5596670000232,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":307.3880839999765,"probe":75.582}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":16384,"min":27.334,"med":27.417,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":476.89166700001806,"probe":75.457}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":32768,"min":27.708,"med":28,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":307.6920829999726,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":309.90441699995426,"probe":75.541}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":65536,"min":51.124,"med":51.541,"probe":99.749}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":131072,"min":78.207,"med":96.207,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":308.700291999965,"probe":75.373}
+{"kind":"ramp","why":"probe 99","ms":309.9261669999687,"probe":75.332}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":262144,"min":150.789,"med":151.457,"probe":75.374}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":524288,"min":297.536,"med":319.162,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":311.0262079999666,"probe":75.332}
+{"kind":"base","L":1024,"M":2,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":1048576,"min":588.449,"med":631.949,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":308.53516600001603,"probe":75.373}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":32,"min":6.417,"med":6.417,"probe":75.374}
+{"kind":"ramp","why":"probe 103","ms":308.4590420000022,"probe":75.208}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":64,"min":6.25,"med":6.459,"probe":75.456}
+{"kind":"ramp","why":"probe 100","ms":309.4794160000165,"probe":75.208}
+{"kind":"ramp","why":"probe 100","ms":307.48191699996823,"probe":75.166}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":128,"min":6.792,"med":6.875,"probe":75.665}
+{"kind":"ramp","why":"probe 100","ms":306.75245800003177,"probe":75.208}
+{"kind":"ramp","why":"probe 100","ms":306.3958749999874,"probe":75.291}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":256,"min":7.125,"med":7.457,"probe":75.749}
+{"kind":"ramp","why":"probe 100","ms":305.8693750000093,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":302.06983399996534,"probe":75.374}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":512,"min":8.334,"med":8.417,"probe":99.874}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":1024,"min":7.375,"med":7.624,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":303.96354199998314,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":302.69229199999245,"probe":75.249}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":2048,"min":8.499,"med":8.542,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":303.0364999999874,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":306.1777080000029,"probe":75.415}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":4096,"min":11.083,"med":11.208,"probe":75.748}
+{"kind":"ramp","why":"probe 100","ms":304.0216669999645,"probe":75.374}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":8192,"min":16.875,"med":17.125,"probe":75.832}
+{"kind":"ramp","why":"probe 100","ms":305.6148750000284,"probe":75.166}
+{"kind":"ramp","why":"probe 100","ms":305.1622920000227,"probe":75.374}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":16384,"min":28.958,"med":29.125,"probe":99.957}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":32768,"min":57.082,"med":59.54,"probe":75.373}
+{"kind":"ramp","why":"probe 100","ms":305.03670799999963,"probe":75.333}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":65536,"min":85.332,"med":108.123,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":304.8971250000177,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":304.4794589999947,"probe":75.249}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":131072,"min":160.289,"med":181.372,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":305.20295800000895,"probe":75.541}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8192,"lanes":262144,"min":305.537,"med":307.746,"probe":75.499}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16384,"lanes":524288,"min":592.825,"med":604.448,"probe":75.374}
+{"kind":"base","L":32,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32768,"lanes":1048576,"min":1168.607,"med":1191.69,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":304.6165409999667,"probe":75.332}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":64,"min":7.25,"med":7.25,"probe":75.665}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":128,"min":6.833,"med":7.041,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":304.4088749999646,"probe":75.291}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":256,"min":6.75,"med":7.125,"probe":75.499}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":512,"min":8.083,"med":8.334,"probe":75.416}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":1024,"min":9.291,"med":9.459,"probe":78.039}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":2048,"min":8.542,"med":8.75,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":303.85041700000875,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":305.4014159999788,"probe":75.583}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":4096,"min":10.833,"med":11.25,"probe":75.707}
+{"kind":"ramp","why":"probe 100","ms":305.2481249999837,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":305.7386670000269,"probe":75.374}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":8192,"min":17.04,"med":17.459,"probe":99.914}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":16384,"min":28.417,"med":28.749,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":305.09887500002515,"probe":75.539}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":32768,"min":50.374,"med":50.541,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":305.35316699999385,"probe":75.289}
+{"kind":"ramp","why":"probe 100","ms":306.0512919999892,"probe":75.29}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":65536,"min":85.291,"med":101.915,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":309.0061670000432,"probe":75.248}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":131072,"min":157.456,"med":181.247,"probe":75.208}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":262144,"min":296.371,"med":299.954,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":306.44362500001444,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":306.27974999998696,"probe":75.333}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8192,"lanes":524288,"min":583.616,"med":584.158,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":307.0588749999879,"probe":75.29}
+{"kind":"base","L":64,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16384,"lanes":1048576,"min":1162.316,"med":1217.398,"probe":75.208}
+{"kind":"ramp","why":"probe 100","ms":304.9189159999951,"probe":75.289}
+{"kind":"ramp","why":"probe 100","ms":304.5927919999813,"probe":75.374}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":128,"min":9,"med":9.166,"probe":99.874}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":256,"min":8.042,"med":8.209,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":305.74225000001024,"probe":75.582}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":512,"min":7.959,"med":8.292,"probe":75.416}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":1024,"min":10.749,"med":10.958,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":304.52908299997216,"probe":75.208}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":2048,"min":10.625,"med":10.916,"probe":75.29}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":4096,"min":10.959,"med":11.125,"probe":75.623}
+{"kind":"ramp","why":"probe 100","ms":306.2290000000503,"probe":75.291}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":8192,"min":16.542,"med":16.917,"probe":75.54}
+{"kind":"ramp","why":"probe 100","ms":305.86833399999887,"probe":75.414}
+{"kind":"ramp","why":"probe 100","ms":304.21916700003203,"probe":75.458}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":16384,"min":27.749,"med":27.874,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":305.50158300000476,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":306.15983399999095,"probe":75.458}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":32768,"min":50.333,"med":50.749,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":306.8862499999814,"probe":75.29}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":65536,"min":81.499,"med":97.166,"probe":75.581}
+{"kind":"ramp","why":"probe 100","ms":306.0949159999727,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":306.3427919999813,"probe":75.249}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":131072,"min":159.706,"med":162.122,"probe":75.249}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":262144,"min":310.621,"med":310.829,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":305.6346669999766,"probe":75.166}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":524288,"min":583.574,"med":584.449,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":304.9493750000256,"probe":75.249}
+{"kind":"base","L":128,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8192,"lanes":1048576,"min":1160.898,"med":1161.19,"probe":76.499}
+{"kind":"ramp","why":"probe 100","ms":304.9947500000126,"probe":75.207}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":256,"min":10.666,"med":10.875,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":305.5553330000257,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":304.26512499997625,"probe":75.373}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":512,"min":12.458,"med":12.541,"probe":99.832}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":1024,"min":11.292,"med":11.458,"probe":75.54}
+{"kind":"ramp","why":"probe 100","ms":304.76570899999933,"probe":75.249}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":2048,"min":16.292,"med":19.166,"probe":75.624}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":4096,"min":16.25,"med":16.417,"probe":75.624}
+{"kind":"ramp","why":"probe 100","ms":305.381166999985,"probe":75.582}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":8192,"min":16.499,"med":16.875,"probe":75.916}
+{"kind":"ramp","why":"probe 100","ms":305.187249999959,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":305.3562080000411,"probe":75.29}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":16384,"min":28,"med":28.375,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":306.21870799997123,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":304.6698749999632,"probe":75.249}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":32768,"min":51.416,"med":51.874,"probe":99.707}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":65536,"min":78.208,"med":95.916,"probe":75.374}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":131072,"min":150.58,"med":184.955,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":305.2089580000029,"probe":75.374}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":262144,"min":296.037,"med":312.245,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":305.6027499999618,"probe":75.457}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":524288,"min":583.701,"med":584.325,"probe":75.832}
+{"kind":"ramp","why":"probe 100","ms":305.58579199999804,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":305.49787500000093,"probe":75.207}
+{"kind":"base","L":256,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4096,"lanes":1048576,"min":1161.358,"med":1168.732,"probe":99.748}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":512,"min":16.5,"med":16.791,"probe":75.498}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":1024,"min":16.707,"med":16.875,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":302.7327079999959,"probe":75.373}
+{"kind":"ramp","why":"probe 100","ms":304.61837500002,"probe":75.249}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":2048,"min":19.833,"med":20,"probe":99.915}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":4096,"min":27.167,"med":27.583,"probe":75.666}
+{"kind":"ramp","why":"probe 100","ms":305.13804200000595,"probe":75.665}
+{"kind":"ramp","why":"probe 100","ms":304.74950000003446,"probe":75.374}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":8192,"min":27.5,"med":27.667,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":305.9416670000064,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":304.3258330000099,"probe":75.165}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":16384,"min":27.709,"med":28.082,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":305.31245800002944,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":305.8700839999947,"probe":75.457}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":32768,"min":51.583,"med":51.958,"probe":99.956}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":65536,"min":84.624,"med":96.041,"probe":75.208}
+{"kind":"ramp","why":"probe 100","ms":304.3804170000367,"probe":75.249}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":131072,"min":151.04,"med":168.164,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":304.39320900000166,"probe":75.248}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":262144,"min":296.413,"med":297.246,"probe":75.332}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":524288,"min":592.907,"med":617.158,"probe":75.291}
+{"kind":"base","L":512,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2048,"lanes":1048576,"min":1161.524,"med":1220.773,"probe":75.083}
+{"kind":"ramp","why":"probe 100","ms":305.4806249999674,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":305.15233300003456,"probe":75.249}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1,"lanes":1024,"min":27.124,"med":27.584,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":305.20262499997625,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":306.1601250000531,"probe":75.332}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":2,"lanes":2048,"min":31.958,"med":32.541,"probe":99.666}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":4,"lanes":4096,"min":29.291,"med":29.334,"probe":75.54}
+{"kind":"ramp","why":"probe 100","ms":307.53800000000047,"probe":75.249}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":8,"lanes":8192,"min":48.999,"med":49.165,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":306.20370799995726,"probe":75.249}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":16,"lanes":16384,"min":49.166,"med":49.541,"probe":75.54}
+{"kind":"ramp","why":"probe 100","ms":306.8515419999603,"probe":75.207}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":32,"lanes":32768,"min":50.207,"med":50.54,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":306.5619159999769,"probe":75.374}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":64,"lanes":65536,"min":78.29,"med":95.54,"probe":75.416}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":128,"lanes":131072,"min":150.539,"med":150.873,"probe":75.416}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":256,"lanes":262144,"min":300.746,"med":313.913,"probe":77.958}
+{"kind":"ramp","why":"probe 100","ms":304.6723340000026,"probe":75.208}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":512,"lanes":524288,"min":585.949,"med":587.199,"probe":75.124}
+{"kind":"ramp","why":"probe 100","ms":304.51587499998277,"probe":75.249}
+{"kind":"base","L":1024,"M":4,"R":0,"WGB":0,"bytes":8388608,"D":4,"G":1024,"lanes":1048576,"min":1168.44,"med":1225.232,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":304.31158300000243,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":304.7064590000082,"probe":75.206}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1,"lanes":32,"min":10.207,"med":10.333,"probe":100.081}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2,"lanes":64,"min":8.875,"med":8.917,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":305.46737500000745,"probe":75.166}
+{"kind":"ramp","why":"probe 100","ms":305.01141700003063,"probe":75.333}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":4,"lanes":128,"min":8.792,"med":8.959,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":305.64850000001024,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":304.9820830000099,"probe":75.416}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":8,"lanes":256,"min":10.499,"med":10.709,"probe":99.832}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":16,"lanes":512,"min":9.25,"med":9.459,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":304.56716700003017,"probe":75.208}
+{"kind":"ramp","why":"probe 95","ms":306.95891700003995,"probe":75.416}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":24,"lanes":768,"min":9.416,"med":9.541,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":307.9022920000134,"probe":75.207}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":31,"lanes":992,"min":9.208,"med":9.417,"probe":75.456}
+{"kind":"ramp","why":"probe 100","ms":308.2859579999931,"probe":75.249}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":32,"lanes":1024,"min":9.375,"med":9.457,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":310.1956670000218,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":310.7240420000162,"probe":75.249}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":33,"lanes":1056,"min":10.875,"med":11.083,"probe":99.915}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":40,"lanes":1280,"min":9.459,"med":9.583,"probe":75.332}
+{"kind":"ramp","why":"probe 91","ms":310.4261669999687,"probe":75.207}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":48,"lanes":1536,"min":9.791,"med":9.875,"probe":75.624}
+{"kind":"ramp","why":"probe 100","ms":309.21549999999115,"probe":75.414}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":63,"lanes":2016,"min":9.917,"med":9.958,"probe":75.791}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":64,"lanes":2048,"min":9.542,"med":9.666,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":307.9540830000187,"probe":75.332}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":65,"lanes":2080,"min":9.791,"med":9.875,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":306.51733399997465,"probe":75.208}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":80,"lanes":2560,"min":9.875,"med":10.04,"probe":75.623}
+{"kind":"ramp","why":"probe 100","ms":306.5865830000257,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":307.47066699998686,"probe":75.498}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":96,"lanes":3072,"min":9.959,"med":10.124,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":304.6447080000071,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":302.01566700002877,"probe":75.207}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":97,"lanes":3104,"min":11.75,"med":11.958,"probe":100.166}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":127,"lanes":4064,"min":10.75,"med":10.917,"probe":75.583}
+{"kind":"ramp","why":"probe 100","ms":304.6854159999639,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":300.5584170000511,"probe":75.249}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":128,"lanes":4096,"min":10.792,"med":11.041,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":300.6982499999576,"probe":75.207}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":129,"lanes":4128,"min":10.833,"med":10.917,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":301.91049999999814,"probe":75.291}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":160,"lanes":5120,"min":12.166,"med":12.5,"probe":75.624}
+{"kind":"ramp","why":"probe 100","ms":300.7233750000014,"probe":75.374}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":192,"lanes":6144,"min":13.584,"med":13.792,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":356.37650000001304,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":301.11845899996115,"probe":75.332}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":255,"lanes":8160,"min":16.333,"med":16.708,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":301.08454100001836,"probe":75.29}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":256,"lanes":8192,"min":16.625,"med":16.791,"probe":75.54}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":257,"lanes":8224,"min":16.541,"med":16.708,"probe":75.582}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":512,"lanes":16384,"min":27.5,"med":27.791,"probe":75.54}
+{"kind":"ramp","why":"probe 100","ms":300.7872080000234,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":301.7266659999732,"probe":75.249}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1024,"lanes":32768,"min":68.707,"med":69.291,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":303.06862500001444,"probe":75.665}
+{"kind":"ramp","why":"probe 100","ms":302.5850419999915,"probe":75.291}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2048,"lanes":65536,"min":100.456,"med":112.748,"probe":102.373}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":4096,"lanes":131072,"min":168.372,"med":176.913,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":304.703125,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":305.54529199999524,"probe":75.374}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":8192,"lanes":262144,"min":306.787,"med":325.121,"probe":75.624}
+{"kind":"ramp","why":"probe 100","ms":305.3671670000185,"probe":75.166}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":16384,"lanes":524288,"min":590.324,"med":598.199,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":305.42016699997475,"probe":75.206}
+{"kind":"ramp","why":"probe 100","ms":306.0650000000023,"probe":75.207}
+{"kind":"base","L":32,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":32768,"lanes":1048576,"min":1172.732,"med":1230.231,"probe":99.999}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1,"lanes":64,"min":8.875,"med":9.082,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":308.2197499999893,"probe":75.374}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2,"lanes":128,"min":9.042,"med":9.125,"probe":75.54}
+{"kind":"ramp","why":"probe 100","ms":306.5270419999724,"probe":75.291}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":4,"lanes":256,"min":8.917,"med":9.166,"probe":75.79}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":8,"lanes":512,"min":9.249,"med":9.542,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":306.2585839999956,"probe":75.332}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":16,"lanes":1024,"min":9.416,"med":9.75,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":307.5534589999588,"probe":75.415}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":24,"lanes":1536,"min":9.458,"med":9.917,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":306.9664580000099,"probe":75.124}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":31,"lanes":1984,"min":9.707,"med":9.792,"probe":75.373}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":32,"lanes":2048,"min":9.708,"med":10.083,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":306.571333000029,"probe":75.374}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":33,"lanes":2112,"min":9.459,"med":9.959,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":306.2469999999739,"probe":75.458}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":40,"lanes":2560,"min":10.5,"med":10.624,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":306.27995799999917,"probe":75.166}
+{"kind":"ramp","why":"probe 100","ms":303.3299999999581,"probe":75.457}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":48,"lanes":3072,"min":12.042,"med":12.375,"probe":99.791}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":63,"lanes":4032,"min":10.709,"med":10.792,"probe":75.583}
+{"kind":"ramp","why":"probe 100","ms":304.24870799999917,"probe":75.456}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":64,"lanes":4096,"min":10.875,"med":10.958,"probe":75.666}
+{"kind":"ramp","why":"probe 100","ms":301.4079159999965,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":301.3074590000324,"probe":75.582}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":65,"lanes":4160,"min":11.333,"med":11.375,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":301.95175000000745,"probe":75.29}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":80,"lanes":5120,"min":13.666,"med":13.708,"probe":75.499}
+{"kind":"ramp","why":"probe 102","ms":300.19349999999395,"probe":75.249}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":96,"lanes":6144,"min":13.666,"med":13.834,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":354.49312499997905,"probe":75.623}
+{"kind":"ramp","why":"probe 100","ms":301.23300000000745,"probe":75.333}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":97,"lanes":6208,"min":14.541,"med":14.625,"probe":75.54}
+{"kind":"ramp","why":"probe 100","ms":301.5228750000242,"probe":75.374}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":127,"lanes":8128,"min":16.375,"med":16.583,"probe":75.581}
+{"kind":"ramp","why":"probe 100","ms":301.57654199999524,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":303.2505409999867,"probe":75.207}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":128,"lanes":8192,"min":16.375,"med":16.542,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":302.40204200003063,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":303.1271660000202,"probe":75.29}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":129,"lanes":8256,"min":18.166,"med":18.292,"probe":99.873}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":160,"lanes":10240,"min":19.249,"med":19.332,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":305.48454199999105,"probe":75.664}
+{"kind":"ramp","why":"probe 100","ms":305.25137499999255,"probe":75.582}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":192,"lanes":12288,"min":23.75,"med":24,"probe":100.04}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":255,"lanes":16320,"min":28.417,"med":28.708,"probe":75.623}
+{"kind":"ramp","why":"probe 100","ms":304.1325829999987,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":305.02887499995995,"probe":75.291}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":256,"lanes":16384,"min":28.457,"med":28.667,"probe":75.499}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":257,"lanes":16448,"min":28.542,"med":28.709,"probe":78.958}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":512,"lanes":32768,"min":50.416,"med":50.582,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":302.73345899995184,"probe":75.249}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1024,"lanes":65536,"min":119.54,"med":132.123,"probe":75.332}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2048,"lanes":131072,"min":162.872,"med":172.497,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":303.8717909999541,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":304.2345000000205,"probe":75.249}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":4096,"lanes":262144,"min":309.954,"med":311.62,"probe":99.623}
+{"kind":"ramp","why":"probe 100","ms":303.0621669999673,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":303.4145000000135,"probe":75.457}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":8192,"lanes":524288,"min":583.741,"med":585.366,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":305.0148749999935,"probe":75.332}
+{"kind":"base","L":64,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":16384,"lanes":1048576,"min":1160.316,"med":1205.273,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":304.920999999973,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":304.5016670000041,"probe":75.206}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1,"lanes":128,"min":8.875,"med":8.957,"probe":75.457}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2,"lanes":256,"min":9.125,"med":9.208,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":306.90983299998334,"probe":75.541}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":4,"lanes":512,"min":9.333,"med":9.417,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":306.4003329999978,"probe":75.332}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":8,"lanes":1024,"min":10.541,"med":10.708,"probe":75.54}
+{"kind":"ramp","why":"probe 100","ms":306.8248329999624,"probe":75.249}
+{"kind":"ramp","why":"probe 88","ms":307.83487500000047,"probe":75.624}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":16,"lanes":2048,"min":10.666,"med":10.833,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":306.79925000004005,"probe":75.207}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":24,"lanes":3072,"min":10.832,"med":11.125,"probe":75.581}
+{"kind":"ramp","why":"probe 100","ms":304.4130409999634,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":304.7931669999962,"probe":75.333}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":31,"lanes":3968,"min":10.792,"med":10.959,"probe":75.458}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":32,"lanes":4096,"min":10.875,"med":11.166,"probe":75.541}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":33,"lanes":4224,"min":12.333,"med":12.583,"probe":75.416}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":40,"lanes":5120,"min":15.916,"med":16.208,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":302.74716600001557,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":304.6286250000121,"probe":75.332}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":48,"lanes":6144,"min":16.708,"med":16.917,"probe":100.04}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":63,"lanes":8064,"min":16.5,"med":16.583,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":301.76458299998194,"probe":75.332}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":64,"lanes":8192,"min":16.292,"med":16.459,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":301.0970420000376,"probe":75.29}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":65,"lanes":8320,"min":18.916,"med":19.042,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":352.76433299999917,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":352.5743749999674,"probe":75.541}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":80,"lanes":10240,"min":22.667,"med":22.874,"probe":99.874}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":96,"lanes":12288,"min":22.125,"med":22.292,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":354.0392499999725,"probe":75.332}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":97,"lanes":12416,"min":24.333,"med":24.541,"probe":75.458}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":127,"lanes":16256,"min":27.792,"med":28.374,"probe":75.541}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":128,"lanes":16384,"min":27.791,"med":27.999,"probe":75.539}
+{"kind":"ramp","why":"probe 100","ms":353.68137499998556,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":300.88308300002245,"probe":75.499}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":129,"lanes":16512,"min":29.958,"med":30.125,"probe":75.666}
+{"kind":"ramp","why":"probe 100","ms":302.97829200001433,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":306.5313750000205,"probe":75.291}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":160,"lanes":20480,"min":33.333,"med":33.584,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":306.03583400003845,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":307.46716699999524,"probe":75.374}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":192,"lanes":24576,"min":39.042,"med":39.292,"probe":75.791}
+{"kind":"ramp","why":"probe 100","ms":308.8431660000351,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":308.2571250000037,"probe":75.291}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":255,"lanes":32640,"min":50.54,"med":50.625,"probe":75.666}
+{"kind":"ramp","why":"probe 100","ms":306.72749999997905,"probe":75.249}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":256,"lanes":32768,"min":50.415,"med":50.749,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":307.62966699997196,"probe":75.249}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":257,"lanes":32896,"min":51.54,"med":52.666,"probe":75.083}
+{"kind":"ramp","why":"probe 100","ms":306.37550000002375,"probe":75.166}
+{"kind":"ramp","why":"probe 100","ms":304.3492500000284,"probe":75.291}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":512,"lanes":65536,"min":77.624,"med":95.582,"probe":75.081}
+{"kind":"ramp","why":"probe 100","ms":303.65883400000166,"probe":75.583}
+{"kind":"ramp","why":"probe 100","ms":300.4021669999929,"probe":75.749}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1024,"lanes":131072,"min":159.914,"med":174.332,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":300.07541599997785,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":300.1268329999875,"probe":75.499}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2048,"lanes":262144,"min":294.787,"med":295.37,"probe":75.333}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":4096,"lanes":524288,"min":583.991,"med":607.824,"probe":75.374}
+{"kind":"base","L":128,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":8192,"lanes":1048576,"min":1160.357,"med":1218.232,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":353.1675830000313,"probe":75.166}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1,"lanes":256,"min":10.5,"med":10.667,"probe":75.582}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2,"lanes":512,"min":10.583,"med":10.833,"probe":75.541}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":4,"lanes":1024,"min":10.958,"med":11.416,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":353.1599999999744,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":353.82454100000905,"probe":75.374}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":8,"lanes":2048,"min":15.833,"med":16.625,"probe":99.791}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":16,"lanes":4096,"min":15.832,"med":15.917,"probe":75.499}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":24,"lanes":6144,"min":16.125,"med":16.334,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":302.72662500001024,"probe":75.373}
+{"kind":"ramp","why":"probe 100","ms":301.30866599996807,"probe":75.249}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":31,"lanes":7936,"min":16.208,"med":16.583,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":301.23133300000336,"probe":75.29}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":32,"lanes":8192,"min":16.374,"med":16.542,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":301.72870799998054,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":303.85995800001547,"probe":75.249}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":33,"lanes":8448,"min":21.334,"med":21.583,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":302.3060420000111,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":303.25445800001035,"probe":75.249}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":40,"lanes":10240,"min":27.915,"med":28.291,"probe":99.957}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":48,"lanes":12288,"min":27.374,"med":27.542,"probe":75.583}
+{"kind":"ramp","why":"probe 100","ms":303.2243329999619,"probe":75.249}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":63,"lanes":16128,"min":27.625,"med":27.957,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":301.3017500000424,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":300.7505419999943,"probe":75.291}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":64,"lanes":16384,"min":27.75,"med":27.959,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":302.76820799999405,"probe":75.416}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":65,"lanes":16640,"min":32.292,"med":32.582,"probe":75.332}
+{"kind":"ramp","why":"probe 100","ms":300.58862500003306,"probe":75.374}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":80,"lanes":20480,"min":38.625,"med":38.708,"probe":75.458}
+{"kind":"ramp","why":"probe 100","ms":300.7753329999978,"probe":75.29}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":96,"lanes":24576,"min":39.208,"med":39.249,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":300.9469590000226,"probe":75.291}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":97,"lanes":24832,"min":44.583,"med":48.374,"probe":75.708}
+{"kind":"ramp","why":"probe 100","ms":300.95195800001966,"probe":75.291}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":127,"lanes":32512,"min":50.29,"med":50.416,"probe":75.373}
+{"kind":"ramp","why":"probe 100","ms":300.8261250000214,"probe":75.289}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":128,"lanes":32768,"min":50.374,"med":50.417,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":301.3573749999632,"probe":75.333}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":129,"lanes":33024,"min":51.499,"med":55.833,"probe":75.581}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":160,"lanes":40960,"min":62.249,"med":62.582,"probe":75.749}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":192,"lanes":49152,"min":73.249,"med":73.249,"probe":75.541}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":255,"lanes":65280,"min":83.248,"med":95.624,"probe":75.332}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":256,"lanes":65536,"min":77.666,"med":95.707,"probe":75.333}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":257,"lanes":65792,"min":81.082,"med":99.248,"probe":75.166}
+{"kind":"ramp","why":"probe 100","ms":300.51779200002784,"probe":75.29}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":512,"lanes":131072,"min":150.414,"med":160.998,"probe":75.416}
+{"kind":"ramp","why":"probe 100","ms":301.0501670000376,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":301.3090000000084,"probe":75.249}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1024,"lanes":262144,"min":296.036,"med":297.246,"probe":75.415}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2048,"lanes":524288,"min":584.074,"med":584.491,"probe":75.249}
+{"kind":"ramp","why":"probe 100","ms":301.79750000004424,"probe":75.291}
+{"kind":"ramp","why":"probe 100","ms":300.5835420000367,"probe":75.291}
+{"kind":"base","L":256,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":4096,"lanes":1048576,"min":1161.025,"med":1217.732,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":355.47849999996834,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":301.31341599998996,"probe":75.415}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1,"lanes":512,"min":16.125,"med":16.207,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":353.8021670000162,"probe":75.541}
+{"kind":"ramp","why":"probe 100","ms":301.0583340000012,"probe":75.207}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2,"lanes":1024,"min":16.333,"med":16.416,"probe":75.374}
+{"kind":"ramp","why":"probe 100","ms":301.25554199999897,"probe":75.249}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":4,"lanes":2048,"min":16.834,"med":16.917,"probe":75.373}
+{"kind":"ramp","why":"probe 100","ms":300.36391600000206,"probe":75.249}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":8,"lanes":4096,"min":26.667,"med":26.749,"probe":75.499}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":16,"lanes":8192,"min":27.249,"med":27.5,"probe":75.541}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":24,"lanes":12288,"min":27.249,"med":27.416,"probe":75.499}
+{"kind":"ramp","why":"probe 100","ms":301.3977500000037,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":307.06379200000083,"probe":75.499}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":31,"lanes":15872,"min":27.707,"med":27.957,"probe":75.623}
+{"kind":"ramp","why":"probe 100","ms":300.4285839999793,"probe":75.374}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":32,"lanes":16384,"min":27.499,"med":27.833,"probe":75.666}
+{"kind":"ramp","why":"probe 100","ms":302.676083999977,"probe":75.249}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":33,"lanes":16896,"min":38.375,"med":38.708,"probe":75.333}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":40,"lanes":20480,"min":50.374,"med":51.083,"probe":75.457}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":48,"lanes":24576,"min":49.833,"med":50.082,"probe":75.415}
+{"kind":"ramp","why":"probe 100","ms":301.8652920000022,"probe":75.164}
+{"kind":"ramp","why":"probe 100","ms":303.1946660000249,"probe":75.29}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":63,"lanes":32256,"min":51.457,"med":51.666,"probe":99.873}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":64,"lanes":32768,"min":50.457,"med":50.542,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":303.06649999995716,"probe":75.207}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":65,"lanes":33280,"min":60.457,"med":61.041,"probe":75.54}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":80,"lanes":40960,"min":72.916,"med":73.999,"probe":75.332}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":96,"lanes":49152,"min":72.832,"med":73.081,"probe":75.333}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":97,"lanes":49664,"min":83.124,"med":85.415,"probe":75.291}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":127,"lanes":65024,"min":77.749,"med":95.54,"probe":75.249}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":128,"lanes":65536,"min":90.082,"med":96.832,"probe":75.166}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":129,"lanes":66048,"min":86.707,"med":105.165,"probe":75.249}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":160,"lanes":81920,"min":96.291,"med":118.748,"probe":75.248}
+{"kind":"ramp","why":"probe 100","ms":302.35175000003073,"probe":75.582}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":192,"lanes":98304,"min":114.207,"med":140.582,"probe":75.291}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":255,"lanes":130560,"min":156.372,"med":180.163,"probe":75.291}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":256,"lanes":131072,"min":150.415,"med":158.206,"probe":76.082}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":257,"lanes":131584,"min":157.456,"med":186.331,"probe":75.331}
+{"kind":"ramp","why":"probe 100","ms":302.4508339999593,"probe":75.333}
+{"kind":"ramp","why":"probe 100","ms":303.80054199998267,"probe":75.332}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":512,"lanes":262144,"min":310.453,"med":310.745,"probe":99.916}
+{"kind":"ramp","why":"probe 100","ms":303.87120900000446,"probe":75.29}
+{"kind":"ramp","why":"probe 100","ms":302.7507919999771,"probe":75.374}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1024,"lanes":524288,"min":585.324,"med":585.699,"probe":75.457}
+{"kind":"base","L":512,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2048,"lanes":1048576,"min":1161.274,"med":1162.733,"probe":75.29}
+{"kind":"ramp","why":"probe 85","ms":304.3960419999785,"probe":75.415}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":1,"lanes":1024,"min":27.291,"med":27.457,"probe":75.457}
+{"kind":"ramp","why":"probe 100","ms":305.2334170000395,"probe":75.207}
+{"kind":"ramp","why":"probe 100","ms":304.5576670000446,"probe":75.29}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":2,"lanes":2048,"min":31.999,"med":32.249,"probe":99.956}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":4,"lanes":4096,"min":29.125,"med":29.375,"probe":75.582}
+{"kind":"ramp","why":"probe 100","ms":305.0030829999596,"probe":75.166}
+{"kind":"base","L":1024,"M":1,"R":0,"WGB":0,"bytes":8388608,"D":16,"G":8,"lanes":8192,"min":49.249,"med":49.458,"probe":75.498}
