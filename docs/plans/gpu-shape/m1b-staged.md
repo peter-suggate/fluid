@@ -1,8 +1,8 @@
 # GPU-shape M1b: phase attribution of the staged kernels (2026-11-23/24)
 
 Plan: docs/plans/gpu-shape-2026-11-23.md. Tool: tools/experiments/gpu-shape/staged.mts (lane B, finished by lane B2).
-Data: docs/plans/gpu-shape/m1b/<scene>/ (staged.json with the run's HEAD and `git status`, counters.tsv, caps.json) and
-the run logs m1b/*.log; bulky traces stay in ~/code/me/fluid-scratch/gpu-shape/m1b/.
+Data: docs/plans/gpu-shape/m1b/<scene>/ (staged.json with the run's HEAD and `git status`, counters.tsv, caps.json); run logs
+(m1b-<scene>.log) and bulky traces stay in ~/code/me/fluid-scratch/gpu-shape/ (logs are gitignored).
 
 ## Method
 

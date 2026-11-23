@@ -6,7 +6,8 @@
 step suffices (verified), but its net is **−0.03 to −0.18 ms a step (0.1–0.5%)**. No landing design is proposed.
 
 Plan: docs/plans/gpu-shape-2026-11-23.md (M2). Tool: tools/experiments/gpu-shape/wintable.mts. Data:
-docs/plans/gpu-shape/m2/ (wintable JSON per run with HEAD and `git status`, logs, caps.txt).
+docs/plans/gpu-shape/m2/ (wintable JSON per run with HEAD and `git status`, caps.txt); run logs in
+~/code/me/fluid-scratch/gpu-shape/m2-*.log (gitignored here).
 Phase attribution of the four staged kernels: m1b-staged.md.
 
 ## Hypothesis tested
@@ -19,8 +20,8 @@ coalesced loads in every staging kernel. Lane B's M1b numbers suggested ~0.7 ms 
 ## Runs
 
 All `tools/gpu/fluid-gpu-run.sh timing`, HEAD 734dd9e2, rc 0, no GPU errors; frozen step 100 (census settings).
-dam: dump, ceiling (`m2/dam-ceiling.*`), proto + step (`m2/dam-proto.*`), exactness re-run (`m2/dam-exact.*`);
-paddleboats: one run of all modes (`m2/paddleboats.*`). Caps: `m2/caps.txt` (regcap.sh / psoinfo). Clock probe after
+dam: dump, ceiling (`m2/dam-ceiling.json`), proto + step (`m2/dam-proto.json`), exactness re-run (`m2/dam-exact.json`);
+paddleboats: one run of all modes (`m2/paddleboats.json`). Caps: `m2/caps.txt` (regcap.sh / psoinfo). Clock probe after
 every round: 75.8–77.2 µs (top clock) except paddleboats' ceiling rounds 1 and 6 (153, 504 µs) and proto round 1
 (178 µs); the minima used come from top-clock rounds (min of 7). Other sessions' uncommitted files were as listed in
 m1b-staged.md; none is a brick kernel.
