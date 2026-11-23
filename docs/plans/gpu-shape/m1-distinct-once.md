@@ -222,3 +222,78 @@ check:types (`tsc --noEmit`):
 - In the main working tree at 09:2x it passes. The uncommitted lane-n edits fix it there.
 - The untracked tools/experiments/gpu-shape/m4.mts error seen earlier (388,103: `unknown[]` vs `GPUBuffer[]`) no
   longer reproduces. m4.mts is lane B2's (it ran as `m4.mts paddleboats` in B2's process tree).
+
+## phiSolid revert, nbOperator and pSeed (lane A2, 2026-11-24, third task)
+
+Every row below comes from stepab.mts (step 100, S=9, written buffers compared per changed placement). The Δ is
+in-step (the family's min over samples) with the run's A/A.
+
+**phiSolid (a89eff60, landed).** phiSolid runs on seep only: dam, letters and paddleboats schedule no phiSolid (no
+static solid), so they are neutral by construction. On seep, reverting phiSolid's text to its pre-e8a33481 form was
+exact in every run:
+
+| candidate | phiSolid in step |
+|---|---|
+| both halves reverted | 0.932 → 0.841 ms (−9.8%) |
+| landed text, run 1 | −2.3% |
+| landed text, run 2 (S=18) | −9.6% |
+| landed text, run 3 (S=18) | −9.4% |
+| foot taps only | −2.4% |
+| cubic only | +6.5% |
+
+- The landed text is "both halves" plus two comment lines.
+- Whole step: −0.48% (GPU wall −0.44%).
+- The halves are not additive. All four texts cap at 384 threads (regcap), so the cap is not the cause.
+- Inference, not verified: Metal's codegen of the combined text, or the lStencil misses.
+
+**nbOperator.** Ablations on the frozen state (m1fix, min ms):
+
+| ablation | paddleboats | dam |
+|---|---|---|
+| base | 2.431 | 0.933 |
+| stage run twice (stage ≈ 0.49 / 0.25) | +20% | +27% |
+| rows skipped | −70% | — |
+| face loop skipped (faces ≈ 1.12 / 0.2) | −46% | −21% |
+| starts skipped | −1.6% | −0.8% |
+
+Variants tried:
+- **frac, landed 9c82f1df.** With cuts, a row's own FRAC is read once a row (openC → poBandFaceO), not once a face
+  plus twice more. Exact. Operator: paddleboats −3.3%, seep −6.4%. dam and letters have no cuts, so their text is
+  unchanged. Cap 512 = 512.
+- **pre, not landed.** The face plane velocities (and W) are loaded ahead of the loop. Exact, but paddleboats +8.5%
+  and dam +3.0% on the frozen state.
+- **roots, not landed.** poTiles' roots are always staged. Exact; dam −2.4% (noisy), paddleboats +2.4%.
+- **page, not landed.** The row's own page word is read once a lane for poAcross. Exact, but mixed in step:
+
+  | scene | operator in step |
+  |---|---|
+  | dam | +1.2% |
+  | seep | +1.4% |
+  | paddleboats | −1.2% |
+  | letters | −0.6% |
+
+  Paddleboats' cap fell 512 → 448.
+
+**pSeed (landed 9b8f98db).** A cell's centre and its sites share one floor cell. psCellGate loads that cell's reach
+bit and 8 staged depth vertices once (private), and the count pass's sites read them (psDepthCell).
+- "depth" also cached the write pass. z0 parts DIFFERS as a multiset on all four scenes, though set (counts) stayed
+  identical.
+- The generated MSL carries `#pragma METAL fp math_mode(relaxed)`, so the same sum in another context may round
+  differently.
+- "depth-w" took the write pass's depth through `select(psDepth, fgPhiAt)`, which evaluates both. It was exact but
+  lost the win (letters +2.4%), because the write pass then reads fgPhiAt for every site.
+- "depth-x" (landed) keeps psSiteDistance in the write pass. Exact on all four scenes, z1 and z0, pSeed in step:
+
+  | scene | pSeed in step |
+  |---|---|
+  | letters | 2.415 → 2.190 ms (−9.3%) |
+  | dam | 1.256 → 1.134 ms (−9.7%) |
+  | paddleboats | 0.646 → 0.599 ms (−7.3%) |
+  | seep | 0.421 → 0.382 ms (−9.2%) |
+
+- Cap 576 → 512.
+- The landed lib text, dumped, equals the gated candidate's pSeed text, apart from comments and one ABI constant that
+  lane B2 added meanwhile.
+- Caveat: exactness here is measured, not by construction. Under relaxed math the count pass's cached site depths
+  could differ from psDepth's in the last bit. That would flip a seed decision only at a threshold, and none
+  flipped on the four gate states.

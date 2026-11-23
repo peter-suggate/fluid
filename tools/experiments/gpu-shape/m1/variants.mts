@@ -171,7 +171,102 @@ export function depthHead(code: string): string {
   if (at < 0 || code.indexOf(f) < at) throw new Error("no landed fgDepth");
   return code.slice(0, at) + FD_HEAD + code.slice(code.indexOf(f) + f.length);
 }
+// nbOperator (rowsF): the tile roots staged for every brick, not only a cold one. A warm brick's seam faces (a face
+// into a 4h-owned tile) walked poRootPhiG a face (page, tile bit, child, then PPHI: a chain of dependent loads); the
+// 96 tiles of the window are staged once by 96 lanes in parallel. The starts stay cold-only (a warm brick reads none:
+// poStartRoot / poStartTile run only on a cold row's prolongation, and poTileStart is unused).
+const OP_TILES_OLD = `fn poTiles(lid:u32,cold:bool){
+  poRC=false;
+  if(cold){
+    if(lid<96u){
+      let T=(poSO>>vec3u(2u))-vec3i(1,2,1)+vec3i(i32(lid%4u),i32((lid/4u)%6u),i32(lid/24u));
+      let root=poRootPhiG(T);poSR[lid]=root;poSS[lid]=poTileStartR(T,root);
+    }
+    workgroupBarrier();
+  }
+  poRC=cold;
+}`;
+const OP_TILES_ROOTS = `var<private> poRS:bool;
+fn poTiles(lid:u32,cold:bool){
+  poRC=false;
+  if(lid<96u){
+    let T=(poSO>>vec3u(2u))-vec3i(1,2,1)+vec3i(i32(lid%4u),i32((lid/4u)%6u),i32(lid/24u));
+    let root=poRootPhiG(T);poSR[lid]=root;if(cold){poSS[lid]=poTileStartR(T,root);}
+  }
+  workgroupBarrier();
+  poRC=true;poRS=cold;
+}`;
+const opRoots = (c: string) => sub(sub(c, OP_TILES_OLD, OP_TILES_ROOTS),
+  "fn poWindowAt(T:vec3i)->u32{let i=poTileWindow(T);if(i<0||!poRC){", "fn poWindowAt(T:vec3i)->u32{let i=poTileWindow(T);if(i<0||!poRS){");
+// nbOperator's face loop (the faces are 46% of paddleboats' operator, 21% of dam's: the abl-nofaces attribution).
+// frac: the row's own open fraction once a lane (poBandFace asked it a face, the capacity and the RHS again).
+const LOOP_HEAD = "      for(var f=0u;f<6u;f++){\n        let a=f/2u;let sign=npSign(f);let pf=";
+const opFrac = (c: string) => {
+  if (!c.includes("fn poFrac(")) return c;
+  c = sub(c, "struct PoFace {face:NpFace,qWet:bool,native:bool}", "var<private> poFracC:f32;\nstruct PoFace {face:NpFace,qWet:bool,native:bool}");
+  c = sub(c, "let open=poFrac(c);", "let open=poFracC;");
+  c = sub(c, "      let capacity=poFrac(c);", "      let capacity=poFracC;");
+  c = sub(c, "rate*poFrac(c)+extra", "rate*poFracC+extra");
+  return sub(c, "  let liquid=owned&&poRowWet(c,own);", "  let liquid=owned&&poRowWet(c,own);poFracC=poFrac(c);");
+};
+// pre: the loop's own loads issued together before it, a face each (the face plane's velocity, and with cuts the
+// moving wall's W): the loop's branches no longer hold them back.
+const opPre = (c: string) => {
+  const cuts = c.includes("fn poFaceW(");
+  c = sub(c, LOOP_HEAD, `      var preUS:array<f32,6>;${cuts ? "var preW:array<f32,6>;" : ""}
+      for(var f=0u;f<6u;f++){let a=f/2u;var fc=c;if(npSign(f)>0){fc[a]+=1;}preUS[f]=poFacePlane(fc,a);${cuts ? "preW[f]=poFaceW(fc,a);" : ""}}
+${LOOP_HEAD}`);
+  c = sub(c, "        let us=poFacePlane(fc,a);", "        let us=preUS[f];");
+  return cuts ? sub(c, "*(capacity-face.fraction)*poFaceW(fc,a);}", "*(capacity-face.fraction)*preW[f];}") : c;
+};
+// page: the row's own page word once a lane; a face whose cell across lies in the same page takes it (poAcross read it
+// a face: the dir word, then its branches, ahead of the face's other reads).
+const opPage = (c: string) => {
+  c = sub(c, "fn poAcross(q:vec3i)->u32{", "var<private> poPP0:vec3i;var<private> poPW0:u32;\nfn poPageOf(p:vec3i)->u32{if(all(p==poPP0)){return poPW0;}return nbPageWord(p);}\nfn poAcross(q:vec3i)->u32{");
+  c = sub(c, "  let w=nbPageWord(q>>vec3u(5u));\n  if(w==NB_NONE){return NP_ACROSS_AIR;}", "  let w=poPageOf(q>>vec3u(5u));\n  if(w==NB_NONE){return NP_ACROSS_AIR;}");
+  return sub(c, "  let liquid=owned&&", "  poPP0=c>>vec3u(5u);poPW0=nbPageWord(poPP0);\n  let liquid=owned&&");
+};
+// pSeed's depth: a cell's centre and its sites share one floor cell (a site lies in its cell, but for a rounding to
+// c + 1), so the cell's reach bit and 8 staged depth vertices are read once a cell, not once a site; the sum as psDepth's.
+const PS_DEPTH = `fn psDepth(p:vec3f)->f32{
+ let c=vec3i(floor(p));
+ if(!psReach1(c)){let far=fgPhiAt(p);return select(max(far,6.0),min(far,-6.0),far<0.0);}`;
+const psDepthOnce = (c: string) => {
+  c = sub(c, PS_DEPTH, `var<private> psCC:vec3i=vec3i(-2147483647);var<private> psCR:bool;var<private> psCV:array<f32,8>;
+fn psDepthCell(p:vec3f)->f32{
+ let c=vec3i(floor(p));
+ if(any(c!=psCC)){return psDepth(p);}
+ if(!psCR){let far=fgPhiAt(p);return select(max(far,6.0),min(far,-6.0),far<0.0);}
+ let f=p-vec3f(c);var value=0.0;
+ for(var k=0u;k<8u;k++){
+  let corner=vec3u(k&1u,(k>>1u)&1u,k>>2u);let w=select(1.0-f,f,corner!=vec3u(0));
+  value+=w.x*w.y*w.z*psCV[k];
+ }
+ return value;
+}
+${PS_DEPTH}`);
+  c = sub(c, "fn psSiteDistance(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site);}return psDepth(site);}", "fn psSiteDistance(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site);}return psDepthCell(site);}");
+  return sub(c, " else{d=psDepth(centre);}", " else{psCC=c;psCR=psReach1(c);if(psCR){for(var k=0u;k<8u;k++){psCV[k]=psDepthVertex(c+vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u)));}}d=psDepthCell(centre);}");
+};
 export const variants: Variant[] = [
+  { kernel: "pSeed", name: "depth", apply: psDepthOnce },
+  // depth-w: the write pass takes the uncached depth (a probe of where depth's difference lies).
+  { kernel: "pSeed", name: "depth-w", apply: c => sub(psDepthOnce(c), "let distance=psSiteDistance(site,reentry);\n  let u=fgSampleVel", "let distance=select(psDepth(site),fgPhiAt(site),reentry);\n  let u=fgSampleVel") },
+  // depth-x: the count pass's sites cached (psSiteDistanceCell); the write pass keeps psSiteDistance (uncached).
+  { kernel: "pSeed", name: "depth-x", apply: c => sub(sub(psDepthOnce(c), "fn psSiteDistance(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site);}return psDepthCell(site);}", "fn psSiteDistance(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site);}return psDepth(site);}\nfn psSiteDistanceCell(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site);}return psDepthCell(site);}"), "let distance=psSiteDistance(site,reentry);\n  if(!known", "let distance=psSiteDistanceCell(site,reentry);\n  if(!known") },
+  // depth-c: only the count pass's sites cached; the centre's depth stays psDepth's.
+  { kernel: "pSeed", name: "depth-c", apply: c => sub(psDepthOnce(c), "d=psDepthCell(centre);}", "d=psDepth(centre);}") },
+  { kernel: "operator", name: "page", apply: opPage },
+  { kernel: "operator", name: "frac", apply: opFrac },
+  { kernel: "operator", name: "pre", apply: opPre },
+  { kernel: "operator", name: "frac+pre", apply: c => opPre(opFrac(c)) },
+  { kernel: "operator", name: "roots", apply: opRoots },
+  // Attribution only (not exact, not landings): the stage run twice; the rows skipped after the stage; the faces
+  // skipped (the starts kept); the starts skipped (0) with the faces kept.
+  { kernel: "operator", name: "abl-stage2x", apply: c => sub(c, "  poStage(nbFOrigin(slot),lid,512u);", "  poStage(nbFOrigin(slot),lid,512u);poStage(nbFOrigin(slot),lid,512u);") },
+  { kernel: "operator", name: "abl-norows", apply: c => sub(c, "  poTiles(lid,workgroupUniformLoad(&poGo)!=0u);", "  poTiles(lid,workgroupUniformLoad(&poGo)!=0u);if(cfg.w!=12345u){return;}") },
+  { kernel: "operator", name: "abl-nofaces", apply: c => sub(c, "      for(var f=0u;f<6u;f++){\n        let a=f/2u;let sign=npSign(f);let pf=", "      for(var f=0u;f<6u*u32(cfg.w==12345u);f++){\n        let a=f/2u;let sign=npSign(f);let pf=") },
+  { kernel: "operator", name: "abl-nostart", apply: c => sub(c, "var start=0.0;if(liquid){start=poStart(c,own);}", "var start=0.0;if(liquid&&cfg.w==12345u){start=poStart(c,own);}") },
   ...["pMove", "pSolid", "uTransfer"].map(kernel => ({ kernel, name: "depth-head", apply: depthHead })),
   { kernel: "pMove", name: "depthc", apply: c => pmDepthCached(pmSlots(c)) },
   { kernel: "pMove", name: "depthc+corners", apply: c => pmCorners(pmDepthCached(pmSlots(c))) },
