@@ -1,0 +1,44 @@
+{
+ "scene": "high-resolution-dam-break",
+ "key": "dam",
+ "warmup": 100,
+ "R": 3,
+ "detail": null,
+ "date": "2026-11-23T08:09:04.762Z",
+ "git": {
+  "head": "7d2424f4",
+  "status": " M lib/cloth/stage-timing.ts\n M lib/core/webgpu-water-pipeline.ts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n?? tools/experiments/gpu-shape/\n"
+ },
+ "floor": {
+  "min": 3.291,
+  "median": 3.459
+ },
+ "engines": [
+  {
+   "name": "parent",
+   "wall_us": {
+    "part1": 7798.923,
+    "part2": 23667.222,
+    "step": 31575.977000000003
+   },
+   "replaySpan_us": 41203.163,
+   "sumPlacements_us": 31979.188999999988,
+   "alloc_us": 0,
+   "placements": 283,
+   "unstableArgs": 0,
+   "lattice": [
+    128,
+    128,
+    128
+   ],
+   "cap": {
+    "f": 4913,
+    "c": 125,
+    "b": 16,
+    "k": 64,
+    "particles": 1250000,
+    "t": 9826
+   }
+  }
+ ]
+}

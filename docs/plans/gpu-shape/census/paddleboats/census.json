@@ -1,0 +1,44 @@
+{
+ "scene": "paddleboats",
+ "key": "paddleboats",
+ "warmup": 100,
+ "R": 3,
+ "detail": null,
+ "date": "2026-11-23T08:10:49.672Z",
+ "git": {
+  "head": "e8287a76",
+  "status": " M lib/core/webgpu-water-pipeline.ts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n?? tools/experiments/gpu-shape/\n"
+ },
+ "floor": {
+  "min": 3.291,
+  "median": 4
+ },
+ "engines": [
+  {
+   "name": "parent",
+   "wall_us": {
+    "part1": 8169.042,
+    "part2": 25390.446,
+    "step": 33566.363
+   },
+   "replaySpan_us": 44637.819,
+   "sumPlacements_us": 34287.34099999999,
+   "alloc_us": 0,
+   "placements": 307,
+   "unstableArgs": 0,
+   "lattice": [
+    512,
+    64,
+    192
+   ],
+   "cap": {
+    "f": 10240,
+    "c": 384,
+    "b": 16,
+    "k": 10240,
+    "particles": 480000,
+    "t": 20480
+   }
+  }
+ ]
+}

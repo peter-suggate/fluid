@@ -1,0 +1,70 @@
+{
+ "scene": "nbflip-figure-9-teaser",
+ "key": "teaser",
+ "warmup": 100,
+ "R": 3,
+ "detail": "2",
+ "date": "2026-11-23T08:11:46.055Z",
+ "git": {
+  "head": "e8287a76",
+  "status": " M lib/core/webgpu-water-pipeline.ts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n?? tools/experiments/gpu-shape/\n"
+ },
+ "floor": {
+  "min": 3.375,
+  "median": 4.042
+ },
+ "engines": [
+  {
+   "name": "parent",
+   "wall_us": {
+    "part1": 18621.049,
+    "part2": 55362.906,
+    "step": 73983.955
+   },
+   "replaySpan_us": 82742.03,
+   "sumPlacements_us": 71328.69100000008,
+   "alloc_us": 0,
+   "placements": 290,
+   "unstableArgs": 0,
+   "lattice": [
+    224,
+    224,
+    224
+   ],
+   "cap": {
+    "f": 8213,
+    "c": 512,
+    "b": 16,
+    "k": 8213,
+    "particles": 4493256,
+    "t": 16426
+   }
+  },
+  {
+   "name": "fine",
+   "wall_us": {
+    "part1": 1709.474,
+    "part2": 7680.341,
+    "step": 9389.815
+   },
+   "replaySpan_us": 18782.672,
+   "sumPlacements_us": 9919.766000000001,
+   "alloc_us": 628.7,
+   "placements": 264,
+   "unstableArgs": 0,
+   "lattice": [
+    416,
+    416,
+    416
+   ],
+   "cap": {
+    "f": 1280,
+    "c": 256,
+    "b": 16,
+    "k": 1280,
+    "particles": 512000,
+    "t": 8192
+   }
+  }
+ ]
+}

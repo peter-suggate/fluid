@@ -1,0 +1,561 @@
+engine	part	index	label	entry	z	w	occurrence	dispatch	gx	gy	gz	groups	argsStable	t_min_us	t_med_us	hash	reads	writes	rwUnwritten	L	lanes	cap	wgmem	slab32	fill32
+parent	part1	0	censusBegin	censusBegin	0	0	0	direct	1	1	1	1	1	6.75	7.38	dd65c27ed8ad44ab	set	set		1	1	1024	0	32768	0.000
+parent	part1	1	regionHeat	regionHeat	0	0	0	indirect@141	2656	1	1	2656	1	40.00	41.58	5f93234e513fccc3	set,dir,vel,phi,census,pmgC,src	set,census		64	169984	1024	16	32768	5.188
+parent	part1	2	regionSpread	regionSpread	0	0	0	indirect@135	42	1	1	42	1	23.50	24.00	d8d00c95cd4d8353	set,dir,vel,phi,census	set,census		64	2688	1024	0	32768	0.082
+parent	part1	3	regionStill	regionStill	0	0	0	indirect@132	332	1	1	332	1	18.13	18.16	b59d07c9db57ad77	set,dir,vel,phi,census	set,dir,census		64	21248	1024	8	32768	0.648
+parent	part1	4	regionDeep	regionDeep	0	0	0	indirect@141	2656	1	1	2656	1	109.87	110.12	15898c871dc2bd4f	set,dir,vel,phi,census	set,census		64	169984	896	316	28672	5.929
+parent	part1	5	censusFine	censusFine	0	1	0	indirect@9	32768	2	1	65536	1	2005.09	2017.80	d5859432ae89f83a	set,dir,vel,phi,census	set,census		64	4194304	640	2712	20480	204.800
+parent	part1	6	censusCoarse	censusCoarse	0	1	0	indirect@141	2656	1	1	2656	1	1066.65	1085.36	d2158696409d48ae	set,dir,vel,phi,census	set,census		64	169984	704	7148	22528	7.545
+parent	part1	7	censusCubes	censusCubes	0	0	0	indirect@132	332	1	1	332	1	27.96	28.79	b68ca455c6010907	set,dir,census	census		64	21248	1024	1732	32768	0.648
+parent	part1	8	censusImportance	censusImportance	0	0	0	indirect@141	2656	1	1	2656	1	179.00	184.54	18bb3ebf8b2e2d1c	set,dir,vel,phi,census,src	set,census		64	169984	896	24	28672	5.929
+parent	part1	9	censusDecide	censusDecide	1	3	0	indirect@141	2656	1	1	2656	1	2487.34	2523.59	980a067814ca21e0	set,dir,vel,phi,census,src	set,census		64	169984	576	52	18432	9.222
+parent	part1	10	censusStaticActive	censusStaticActive	1	0	0	indirect@141	2656	1	1	2656	1	101.12	102.62	f391e58b2b99f1cd	set,dir,phi,solid,staticNeed	set,staticNeed		64	169984	1024	12	32768	5.188
+parent	part1	11	censusStaticPromote	censusStaticPromote	1	1	0	indirect@141	2656	1	1	2656	1	29.63	30.50	dbb6fc4a55c3805e	set,dir,phi,solid,staticNeed	set,staticNeed		64	169984	1024	8	32768	5.188
+parent	part1	12	resMark	resMark	0	0	0	indirect@384	6004	1	1	6004	1	174.46	174.71	b91d65508c8a82f8	set,dir,phi,vel	set,dir		64	384256	1024	360	32768	11.727
+parent	part1	13	resSource	resSource	0	0	0	direct	8	1	1	8	1	6.83	6.83	20bc9f571027f059	set,dir	set,dir		64	512	1024	0	32768	0.016
+parent	part1	14	setClaimPages	setClaimPages	0	0	0	direct	129	1	1	129	1	15.33	15.92	232173ed631630cf	set,dir	set,dir		64	8256	448	0	14336	0.576
+parent	part1	15	resMark	resMark	1	0	0	indirect@0	5672	1	1	5672	1	123.83	124.08	b91d65508c8a82f8	set,dir,phi,vel	set,dir		64	363008	1024	360	32768	11.078
+parent	part1	16	resSource	resSource	1	0	0	direct	8	1	1	8	1	6.25	6.38	20bc9f571027f059	set,dir	set,dir		64	512	1024	0	32768	0.016
+parent	part1	17	setClaimBricks	setClaimBricks	0	0	0	direct	129	1	1	129	1	15.67	15.83	612f1143311f85d8	set,dir	set,dir		64	8256	704	0	22528	0.366
+parent	part1	18	setLeave	setLeave	0	0	0	indirect@6	89	1	1	89	1	10.96	11.04	0e2c44e9d132d427	set,dir	set,dir		64	5696	1024	0	32768	0.174
+parent	part1	19	setLeavePages	setLeavePages	0	0	0	indirect@138	6	1	1	6	1	9.29	9.38	c11cc3fc7604dbf2	set,dir	set,dir		64	384	1024	0	32768	0.012
+parent	part1	20	setRecords	setRecords	0	0	0	direct	256	1	1	256	1	8.25	8.46	5d36db708dabf804	set,dir	set,dir		32	8192	1024	0	32768	0.250
+parent	part1	21	setInit	setInit	0	0	0	direct	256	1	1	256	1	36.33	36.58	a46eb78a2da45b73	set,dir,vel,phi,pres	vel,phi,pres		128	32768	1024	0	32768	1.000
+parent	part1	22	setLists	setLists	1	0	0	direct	129	1	1	129	1	16.04	16.25	a4516c2c296474e4	set,dir	set,dir		64	8256	1024	0	32768	0.252
+parent	part1	23	setArgs	setArgs	0	0	0	direct	1	1	1	1	1	12.79	12.88	c86e1e08ccfad7f7	set,args	set,args		64	64	1024	0	32768	0.002
+parent	part1	24	censusWant	censusWant	0	0	0	indirect@141	2664	1	1	2664	1	15.92	17.63	9959caf4afde534c	set,dir	set		64	170496	1024	0	32768	5.203
+parent	part1	25	setTransferList	setTransferList	0	1	0	indirect@141	2664	1	1	2664	1	43.25	44.08	d2a1005516f690da	set,dir,vel,phi,census	set,census		64	170496	1024	0	32768	5.203
+parent	part1	26	setTransferArgs	setTransferArgs	0	0	0	direct	1	1	1	1	1	4.83	5.08	e7aefa4f74708be7	set,args	set,args		1	1	1024	0	32768	0.000
+parent	part1	27	setTransferFaces	setTransferFaces	0	0	0	indirect@396	2797	1	1	2797	1	291.91	294.95	836eb1ecf24992f6	set,dir,vel,phi,xfer	xfer		192	537024	832	9944	26624	20.171
+parent	part1	28	setTransferCells	setTransferCells	0	0	0	indirect@396	2797	1	1	2797	1	132.08	132.96	4a49e5d43019ef31	set,dir,vel,phi	set,phi		64	179008	1024	532	32768	5.463
+parent	part1	29	setTransferCommit	setTransferCommit	0	0	0	indirect@396	2797	1	1	2797	1	43.29	43.58	b87dea5eef9e2e6e	set,dir,vel,phi,xfer	set,vel		192	537024	1024	0	32768	16.389
+parent	part1	30	setCommitMask	setCommitMask	0	0	0	indirect@132	333	1	1	333	1	13.13	13.38	dd7e8b528c8a3466	set,dir	dir		64	21312	1024	0	32768	0.650
+parent	part1	31	certCoarse	certCoarse	0	0	0	indirect@141	2664	1	1	2664	1	336.12	338.41	ae9be83eabe0fb48	set,dir,vel,phi,census	set,census		64	170496	832	4	26624	6.404
+parent	part1	32	certFine	certFine	0	0	0	indirect@9	32768	2	1	65536	1	600.66	601.12	8a06308be9eb40c0	set,dir,vel,phi,census	set,census		64	4194304	1024	1816	32768	128.000
+parent	part1	33	certError	certError	0	0	0	indirect@141	2664	1	1	2664	1	312.66	316.83	b8609da1945c2e88	set,dir,vel,phi,census	set,census		64	170496	1024	6292	32768	5.203
+parent	part1	34	solidStamp	solidStamp	0	0	0	indirect@96	159	1	1	159	1	110.08	110.54	abd16d2c5d81ac9a	set,dir,phi,cut,solid	set,dir,phi,cut		64	10176	1024	28	32768	0.311
+parent	part1	35	setKRelease	setKRelease	0	0	0	indirect@6	91	1	1	91	1	10.50	10.79	f913c3dd44024420	set,dir	set,dir		64	5824	1024	0	32768	0.178
+parent	part1	36	setKRelease	setKRelease	1	0	0	indirect@114	2	1	1	2	1	9.46	10.63	f913c3dd44024420	set,dir	set,dir		64	128	1024	0	32768	0.004
+parent	part1	37	stepEnd	stepEnd	1	0	0	direct	1	1	1	1	1	4.54	4.71	5334b5ae3015eeda	set	set		1	1	1024	0	32768	0.000
+parent	part1	38	nrReach	nrReach	0	0	0	indirect@384	6096	1	1	6096	1	236.00	245.37	e249c4fa6aaa4c4e	set,dir,vel,phi	set		256	1560576	1024	200	32768	47.625
+parent	part1	39	nrSpread	nrSpread	0	0	0	indirect@132	333	1	1	333	1	36.38	37.25	30be7f2da0648223	set,dir,vel,phi	set		256	85248	1024	0	32768	2.602
+parent	part1	40	nrSpread	nrSpread	1	0	0	indirect@132	333	1	1	333	1	36.62	37.04	30be7f2da0648223	set,dir,vel,phi	set		256	85248	1024	0	32768	2.602
+parent	part1	41	nrSpread	nrSpread	2	0	0	indirect@132	333	1	1	333	1	33.92	34.08	30be7f2da0648223	set,dir,vel,phi	set		256	85248	1024	0	32768	2.602
+parent	part1	42	lResolve	lResolve	0	0	0	indirect@0	5763	1	1	5763	1	565.74	566.03	d8da8a224560a5db	set,dir,phi,fcell	set,phi		256	1475328	1024	1260	32768	45.023
+parent	part1	43	uCache	uCache	0	0	0	indirect@0	5763	1	1	5763	1	1166.07	1172.98	164e020ad9010196	set,dir,vel,phi,fcell	set,fcell		256	1475328	1024	2644	32768	45.023
+parent	part1	44	uCache4	uCache4	0	0	0	indirect@132	333	1	1	333	1	89.12	90.46	c4c611e6d94088f2	set,dir,vel,phi,fcell	set,fcell		256	85248	1024	972	32768	2.602
+parent	part1	45	pLiquid	pLiquid	0	0	0	indirect@0	5763	1	1	5763	1	387.41	392.70	12cfbdcfc602d32c	set,dir,phi	set		128	737664	1024	3984	32768	22.512
+parent	part1	46	pSeed	pSeed	1	2	0	indirect@0	5763	1	1	5763	1	730.65	781.78	ec9b4b0fc054cbe0	set,dir,vel,phi,parts,fcell,src	set,parts		256	1475328	576	3312	18432	80.042
+parent	part1	47	pArgs	pArgs	0	0	0	direct	1	1	1	1	1	5.21	5.54	c7c70f3cfe5785ee	set,dir,args	set,args		1	1	1024	0	32768	0.000
+parent	part1	48	pSeparate	pSeparate	0	0	0	indirect@2048	5983	1	1	5983	1	2673.04	2686.67	eff40135c55709b4	set,dir,vel,phi,parts,fcell,fpart,fmoved	set,fcell,fpart,fmoved		128	765824	1024	0	32768	23.371
+parent	part1	49	pMove	pMove	0	0	0	indirect@2048	5983	1	1	5983	1	2393.26	2419.88	125afafea3a074c3	set,dir,vel,phi,parts,fcell,fpart,fmoved	set,fcell,fpart,fmoved		128	765824	512	0	16384	46.742
+parent	part1	50	pSolid	pSolid	0	0	0	indirect@2048	5983	1	1	5983	1	635.24	636.91	1cb0188d6cb75286	set,dir,vel,phi,parts,fcell,fpart,fmoved	set,fcell,fpart,fmoved		128	765824	512	0	16384	46.742
+parent	part1	51	pScan	pScan	0	0	0	indirect@0	5763	1	1	5763	1	329.87	347.08	7b853bf4d4c54ece	set,dir,fcell	set,fcell		256	1475328	1024	1032	32768	45.023
+parent	part1	52	pScatter	pScatter	0	0	0	indirect@2048	5983	1	1	5983	1	248.08	284.50	b4262bc7a74fabf4	set,dir,parts,fcell,fpart,fmoved	set,parts	fpart,fmoved	128	765824	1024	0	32768	23.371
+parent	part1	53	pTiles	pTiles	0	0	0	indirect@0	5763	1	1	5763	1	121.42	133.41	2f5c1d222cc68e3e	set,dir,parts,fcell	set,fcell		256	1475328	1024	288	32768	45.023
+parent	part2	0	setMark	setMark	0	0	0	indirect@0	5763	1	1	5763	1	210.46	215.50	e9923f34439714d0	set,dir,phi,vel	set,dir		64	368832	1024	128	32768	11.256
+parent	part2	1	setMarkPages	setMarkPages	0	0	0	indirect@132	333	1	1	333	1	27.54	32.21	a6ef14f86646fd74	set,dir,phi,vel	set,dir		64	21312	1024	4	32768	0.650
+parent	part2	2	setRecords	setRecords	0	0	1	direct	256	1	1	256	1	5.67	5.71	5d36db708dabf804	set,dir	set,dir		32	8192	1024	0	32768	0.250
+parent	part2	3	setLists	setLists	0	0	0	direct	129	1	1	129	1	13.75	14.71	a4516c2c296474e4	set,dir	set,dir		64	8256	1024	0	32768	0.252
+parent	part2	4	setArgs	setArgs	1	0	0	direct	1	1	1	1	1	10.83	10.92	c86e1e08ccfad7f7	set,args	set,args		64	64	1024	0	32768	0.002
+parent	part2	5	nrWallReach	nrWallReach	0	0	0	indirect@132	333	1	1	333	1	28.04	29.42	339c43afcc536cfd	set,dir,vel,phi	set		256	85248	1024	0	32768	2.602
+parent	part2	6	vGauge	vGauge	0	0	0	indirect@384	6096	1	1	6096	1	578.37	602.99	fc0d57740e90355f	set,dir,phi,cut	set		64	390144	1024	2924	32768	11.906
+parent	part2	7	lInit	lInit	0	0	0	indirect@0	5763	1	1	5763	1	173.66	225.91	1a3a040616256091	set,dir,phi,fcell	set,fcell		256	1475328	1024	4	32768	45.023
+parent	part2	8	lAdvect	lAdvect	0	0	0	indirect@0	5763	1	1	5763	1	2226.22	2587.29	71450dfc27c08ef9	set,dir,vel,phi,fcell,src	set,phi		256	1475328	384	0	12288	120.063
+parent	part2	9	phiSolid	phiSolid	0	0	0	indirect@0	5763	1	1	5763	1	2456.05	2538.67	ef9e7fb7881a1a94	set,dir,vel,phi,fcell,src	set,phi		256	1475328	384	0	12288	120.063
+parent	part2	10	lcAdvect	lcAdvect	0	0	0	indirect@225	2664	1	1	2664	1	1317.77	1353.15	c4f8777483766945	set,dir,vel,phi,fcell,src	set,phi		64	170496	512	3388	16384	10.406
+parent	part2	11	lSplat	lSplat	0	0	0	indirect@0	5763	1	1	5763	1	686.45	706.16	1d8fd71b65e359c1	set,dir,parts,fcell	set,fcell		256	1475328	1024	10652	32768	45.023
+parent	part2	12	lUnion	lUnion	0	0	0	indirect@0	5763	1	1	5763	1	832.40	836.90	07548fcf5c9e6e30	set,dir,phi,fcell,src	set,phi		256	1475328	896	0	28672	51.455
+parent	part2	13	lcCouple	lcCouple	0	0	0	indirect@225	2664	1	1	2664	1	269.12	291.00	ebbcb1caaa222ddb	set,dir,vel,phi,fcell,src	set,phi		64	170496	448	0	14336	11.893
+parent	part2	14	lResolve	lResolve	0	0	1	indirect@0	5763	1	1	5763	1	565.28	566.08	d8da8a224560a5db	set,dir,phi,fcell	set,phi		256	1475328	1024	1260	32768	45.023
+parent	part2	15	lTiles	lTiles	0	0	0	indirect@0	5763	1	1	5763	1	472.78	479.41	e041011bf4b6e598	set,dir,phi,fcell	set,fcell		256	1475328	1024	3932	32768	45.023
+parent	part2	16	lDilateC	lDilateC	0	1	0	indirect@216	333	1	1	333	1	122.12	122.25	4585acc43dc28ca3	set,dir,phi,fcell	set,fcell		256	85248	1024	8392	32768	2.602
+parent	part2	17	lDilate	lDilate	0	1	0	indirect@3	721	1	1	721	1	63.87	64.33	5df5c30028d66532	set,dir,fcell,census	set,fcell		64	46144	1024	0	32768	1.408
+parent	part2	18	lDilate	lDilate	1	1	0	indirect@3	721	1	1	721	1	63.37	63.58	5df5c30028d66532	set,dir,fcell,census	set,fcell		64	46144	1024	0	32768	1.408
+parent	part2	19	lDilate	lDilate	2	1	0	indirect@3	721	1	1	721	1	53.37	53.75	5df5c30028d66532	set,dir,fcell,census	set,fcell		64	46144	1024	0	32768	1.408
+parent	part2	20	lClear	lClear	0	0	0	indirect@0	5763	1	1	5763	1	609.78	614.07	951a8266c127909b	set,dir,phi,fcell	set,phi,fcell		256	1475328	1024	6904	32768	45.023
+parent	part2	21	lcClear	lcClear	0	0	0	indirect@216	333	1	1	333	1	167.91	169.21	2d20e0cfc527a27a	set,dir,vel,phi,fcell,src	set,phi,fcell		256	85248	1024	7376	32768	2.602
+parent	part2	22	lResolveD	lResolveD	0	0	0	indirect@0	5763	1	1	5763	1	194.50	196.91	ce743da73e8d1bb6	set,dir,phi,fcell	set,phi		256	1475328	1024	1268	32768	45.023
+parent	part2	23	lDilateC	lDilateC	0	2	0	indirect@216	333	1	1	333	1	118.37	120.17	4585acc43dc28ca3	set,dir,phi,fcell	set,fcell		256	85248	1024	8392	32768	2.602
+parent	part2	24	lDilate	lDilate	0	2	0	indirect@3	721	1	1	721	1	70.92	71.21	5df5c30028d66532	set,dir,fcell,census	set,fcell		64	46144	1024	0	32768	1.408
+parent	part2	25	lDilate	lDilate	1	2	0	indirect@3	721	1	1	721	1	69.79	69.96	5df5c30028d66532	set,dir,fcell,census	set,fcell		64	46144	1024	0	32768	1.408
+parent	part2	26	lDilate	lDilate	2	2	0	indirect@3	721	1	1	721	1	98.91	99.46	5df5c30028d66532	set,dir,fcell,census	set,fcell		64	46144	1024	0	32768	1.408
+parent	part2	27	lNear	lNear	0	0	0	indirect@0	5763	1	1	5763	1	247.62	250.08	5adeb02415c827c8	set,dir,fcell	set,fcell		256	1475328	1024	16	32768	45.023
+parent	part2	28	lNear	lNear	1	0	0	indirect@0	5763	1	1	5763	1	319.79	321.00	5adeb02415c827c8	set,dir,fcell	set,fcell		256	1475328	1024	16	32768	45.023
+parent	part2	29	lNear	lNear	2	0	0	indirect@0	5763	1	1	5763	1	426.04	426.62	5adeb02415c827c8	set,dir,fcell	set,fcell		256	1475328	1024	16	32768	45.023
+parent	part2	30	lDistance	lDistance	0	0	0	indirect@0	5763	1	1	5763	1	2350.55	2364.84	fd8dcf1487f975aa	set,dir,phi,fcell	set,fcell		256	1475328	832	10228	26624	55.413
+parent	part2	31	lcRetire	lcRetire	0	0	0	indirect@225	2664	1	1	2664	1	2015.89	2123.59	18f42030acad04cd	set,dir,vel,phi,fcell,src	set,phi		64	170496	704	0	22528	7.568
+parent	part2	32	lPublish	lPublish	0	0	0	indirect@0	5763	1	1	5763	1	438.79	438.91	92678e1aa92579b0	set,dir,phi,fcell	set,phi		256	1475328	1024	0	32768	45.023
+parent	part2	33	lcPublish	lcPublish	0	0	0	indirect@216	333	1	1	333	1	28.58	31.46	d0fcde68684a61c5	set,dir,vel,phi,fcell,src	set,phi		256	85248	1024	0	32768	2.602
+parent	part2	34	lResolve	lResolve	0	0	2	indirect@0	5763	1	1	5763	1	566.03	568.49	d8da8a224560a5db	set,dir,phi,fcell	set,phi		256	1475328	1024	1260	32768	45.023
+parent	part2	35	pSeed	pSeed	0	0	0	indirect@0	5763	1	1	5763	1	2460.88	2469.80	ec9b4b0fc054cbe0	set,dir,vel,phi,parts,fcell,src	set,parts		256	1475328	576	3312	18432	80.042
+parent	part2	36	uAdvect	uAdvect	0	0	0	indirect@412	6096	1	1	6096	1	1900.18	1957.43	460137d58f2c01eb	set,dir,vel,phi,fcell,src	set,vel		256	1560576	768	11272	24576	63.500
+parent	part2	37	pDeposit	pDeposit	0	0	0	indirect@0	5763	1	1	5763	1	1621.14	1649.52	97b078341a230bd3	set,dir,phi,parts,fdep	set,parts,fdep		256	1475328	832	27532	26624	55.413
+parent	part2	38	uTransfer	uTransfer	0	0	0	indirect@412	6096	1	1	6096	1	4674.64	4795.72	85b75c93c9ce4017	set,dir,vel,phi,fcell,fdep,parts	set,vel,phi,fcell,fdep		256	1560576	512	12844	16384	95.250
+parent	part2	39	pressureRowsList	pressureRowsList	0	0	0	indirect@0	5763	1	1	5763	1	25.25	25.33	50a1571bfb49cbc1	set,dir,pmgF,pmgTop	set,pmgF,pmgTop		64	368832	1024	36	32768	11.256
+parent	part2	40	pmgListArgs	pmgListArgs	0	0	0	direct	1	1	1	1	1	6.92	7.00	5c742a1da62b6f2b	set,pmgF,args,pmgTop	set,pmgF,args,pmgTop		1	1	1024	0	32768	0.000
+parent	part2	41	pressureRowsZero	pressureRowsZero	0	0	0	indirect@539	221	1	1	221	1	36.71	39.29	8dec0ffe987efb98	set,dir,pres,pmgF,pmgC	set,pres,pmgF,pmgC		64	14144	1024	0	32768	0.432
+parent	part2	42	pressureTileRoots	pressureTileRoots	0	0	0	indirect@533	1596	1	1	1596	1	323.62	323.95	a4b91c5246f28a3d	set,dir,vel,phi,pres,cut,pmgF	set,phi,pres	pmgF	256	408576	1024	3720	32768	12.469
+parent	part2	43	operator	nbOperator	0	0	0	indirect@533	1596	1	1	1596	1	3817.90	3997.36	0a8519567220f75d	set,dir,vel,phi,pres,cut,pmgF	set,phi,pres,pmgF		512	817152	512	16076	16384	49.875
+parent	part2	44	pressureRowsC	pressureRowsC	0	0	0	indirect@132	333	1	1	333	1	826.95	851.11	885ce0a4d418e250	set,dir,vel,phi,pres,cut	set,phi,pres		512	170496	576	20488	18432	9.250
+parent	part2	45	pmgSetupClear	pmgSetupClear	0	0	0	direct	1	1	1	1	1	5.58	5.75	945d577f9cc6cca7	set,pmgRed	set,pmgRed		128	128	1024	0	32768	0.004
+parent	part2	46	pmgGuess	pmgGuess	0	0	0	indirect@533	1596	1	1	1596	1	147.21	150.29	d561d8b80d736421	set,dir,pres,pmgF,pmgC,pmgTop	set,pres,pmgF	pmgC,pmgTop	512	817152	1024	332	32768	24.938
+parent	part2	47	pmgWallsG	pmgWallsG	0	0	0	indirect@533	1596	1	1	1596	1	44.00	44.67	f5beba7df36ac266	set,dir,pres,pmgF,pmgTop,pmgRed,phi,vel	set,pres,pmgF,phi	pmgTop,pmgRed	512	817152	1024	12	32768	24.938
+parent	part2	48	pmgSetupF	pmgSetupF	0	0	0	indirect@533	1596	1	1	1596	1	447.54	451.33	e930b847d404254a	set,dir,pres,pmgF,pmgC,pmgTop	set,pres,pmgF,pmgC,pmgTop		512	817152	1024	25068	32768	24.938
+parent	part2	49	pmgCoarsenC	pmgCoarsenC	0	0	0	indirect@132	333	1	1	333	1	114.17	114.96	c3e19368de1ce582	set,dir,pres,pmgC	set,pres,pmgC		512	170496	1024	18204	32768	5.203
+parent	part2	50	pmgCoarsenTop	pmgCoarsenTop	0	1028443341	0	direct	1	1	1	1	1	104.25	105.46	32de4b1538ca0d4a	set,dir,pmgC,pmgTop,args	set,pmgTop,args	pmgC	1024	1024	896	26664	28672	0.036
+parent	part2	51	pmgPreS	pmgPreS	0	0	0	indirect@527	2026	1	1	2026	1	165.66	166.50	fc72679b087e68e3	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	1037312	1024	4328	32768	31.656
+parent	part2	52	pmgPreU	pmgPreU	0	0	0	indirect@512	1167	1	1	1167	1	93.17	93.96	888346ec30e280f6	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	4328	32768	18.234
+parent	part2	53	pmgNativePre0	pmgNativePre0	0	0	0	indirect@515	333	1	1	333	1	46.00	51.04	b870128d9636db81	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	54	pmgDown0	pmgDown0	0	0	0	indirect@512	1167	1	1	1167	1	151.91	152.58	26c077bea548ce0f	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	2632	32768	18.234
+parent	part2	55	pmgNativePre1	pmgNativePre1	0	0	0	indirect@515	333	1	1	333	1	53.12	54.21	e6c9a9e5640b2330	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	6520	32768	5.203
+parent	part2	56	pmgDown1	pmgDown1	0	0	0	indirect@512	1167	1	1	1167	1	31.33	31.92	f83977b4c96982de	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	74688	1024	584	32768	2.279
+parent	part2	57	pmgDown1C	pmgDown1C	0	0	0	indirect@515	333	1	1	333	1	50.87	52.63	e76d680fbe9c6253	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	58	pmgDown2	pmgDown2	0	0	0	indirect@515	333	1	1	333	1	30.88	31.96	ee5268481e82086d	set,dir,pmgC	set,pmgC		512	170496	1024	2420	32768	5.203
+parent	part2	59	pmgDown3	pmgDown3	0	0	0	indirect@515	333	1	1	333	1	22.83	23.13	1e678d27e2d9078e	set,dir,pmgC	set,pmgC		64	21312	1024	404	32768	0.650
+parent	part2	60	pmgTopCycle	pmgTopCycle	0	0	0	indirect@518	1	1	1	1	1	79.96	82.87	d103d9cdba4e424f	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	1024	1024	12	32768	0.031
+parent	part2	61	pmgUp3	pmgUp3	0	0	0	indirect@515	333	1	1	333	1	17.79	17.96	80ca6550fddc0113	set,dir,pmgC	set,pmgC		64	21312	1024	372	32768	0.650
+parent	part2	62	pmgUp2	pmgUp2	0	0	0	indirect@515	333	1	1	333	1	45.08	45.75	c2e6d2ae7d128ca7	set,dir,pmgC	set,pmgC		512	170496	1024	2164	32768	5.203
+parent	part2	63	pmgNativePost1	pmgNativePost1	0	0	0	indirect@515	333	1	1	333	1	46.67	49.71	2324633e28f2cebd	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	64	pmgUp1	pmgUp1	0	0	0	indirect@512	1167	1	1	1167	1	41.29	41.67	66db0696b99eff32	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	74688	1024	584	32768	2.279
+parent	part2	65	pmgNativePost0	pmgNativePost0	0	0	0	indirect@515	333	1	1	333	1	52.75	56.33	a4d62e76059802ec	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	170496	1024	6680	32768	5.203
+parent	part2	66	pmgPostU	pmgPostU	0	0	0	indirect@512	1167	1	1	1167	1	109.79	111.96	05e45a58d92ad504	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	4328	32768	18.234
+parent	part2	67	pmgPostS	pmgPostS	0	0	0	indirect@527	2026	1	1	2026	1	164.00	164.12	9e3537868100e259	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	1037312	1024	4328	32768	31.656
+parent	part2	68	pmgPostZ	pmgPostZ	0	0	0	indirect@512	1167	1	1	1167	1	119.42	121.58	a0bbecb3ae59fa59	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	597504	1024	6664	32768	18.234
+parent	part2	69	pmgDirection	pmgDirection	0	0	0	indirect@530	1500	1	1	1500	1	250.87	253.08	c88dd2e1f4b17dfd	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	768000	1024	4972	32768	23.438
+parent	part2	70	pmgUpdate	pmgUpdate	0	0	0	indirect@530	1500	1	1	1500	1	276.41	277.37	85c914c1c5482864	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	768000	1024	6792	32768	23.438
+parent	part2	71	pmgWallGate	pmgWallGate	0	1028443341	0	direct	1	1	1	1	1	6.08	6.25	f9813d5fb533b054	set,args,pmgTop	set,args	pmgTop	1	1	1024	0	32768	0.000
+parent	part2	72	pmgWallsF	pmgWallsF	0	0	0	indirect@521	1167	1	1	1167	1	80.33	80.62	67deea275e217e4c	set,dir,pres,pmgF,pmgTop,pmgRed,phi,vel	set,pres,pmgF,phi	pmgTop,pmgRed	512	597504	1024	4344	32768	18.234
+parent	part2	73	pmgWallsC	pmgWallsC	0	0	0	indirect@524	333	1	1	333	1	18.08	19.88	5ba2b45f486cc651	set,dir,pres,pmgC,pmgRed,phi,vel	set,pres,pmgC,phi	pmgRed	512	170496	1024	132	32768	5.203
+parent	part2	74	pmgCheck	pmgCheck	0	1028443341	0	direct	1	1	1	1	1	10.96	11.08	657e47892de54fe1	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+parent	part2	75	pmgPreS	pmgPreS	1	0	0	indirect@527	2026	1	1	2026	1	160.33	161.08	fc72679b087e68e3	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	1037312	1024	4328	32768	31.656
+parent	part2	76	pmgPreU	pmgPreU	1	0	0	indirect@512	1167	1	1	1167	1	93.83	94.29	888346ec30e280f6	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	4328	32768	18.234
+parent	part2	77	pmgNativePre0	pmgNativePre0	1	0	0	indirect@515	333	1	1	333	1	49.16	52.46	b870128d9636db81	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	78	pmgDown0	pmgDown0	1	0	0	indirect@512	1167	1	1	1167	1	152.33	154.79	26c077bea548ce0f	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	2632	32768	18.234
+parent	part2	79	pmgNativePre1	pmgNativePre1	1	0	0	indirect@515	333	1	1	333	1	51.29	57.04	e6c9a9e5640b2330	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	6520	32768	5.203
+parent	part2	80	pmgDown1	pmgDown1	1	0	0	indirect@512	1167	1	1	1167	1	31.42	31.58	f83977b4c96982de	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	74688	1024	584	32768	2.279
+parent	part2	81	pmgDown1C	pmgDown1C	1	0	0	indirect@515	333	1	1	333	1	51.87	54.50	e76d680fbe9c6253	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	82	pmgDown2	pmgDown2	1	0	0	indirect@515	333	1	1	333	1	30.38	31.58	ee5268481e82086d	set,dir,pmgC	set,pmgC		512	170496	1024	2420	32768	5.203
+parent	part2	83	pmgDown3	pmgDown3	1	0	0	indirect@515	333	1	1	333	1	22.08	22.46	1e678d27e2d9078e	set,dir,pmgC	set,pmgC		64	21312	1024	404	32768	0.650
+parent	part2	84	pmgTopCycle	pmgTopCycle	1	0	0	indirect@518	1	1	1	1	1	81.21	82.46	d103d9cdba4e424f	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	1024	1024	12	32768	0.031
+parent	part2	85	pmgUp3	pmgUp3	1	0	0	indirect@515	333	1	1	333	1	17.88	18.13	80ca6550fddc0113	set,dir,pmgC	set,pmgC		64	21312	1024	372	32768	0.650
+parent	part2	86	pmgUp2	pmgUp2	1	0	0	indirect@515	333	1	1	333	1	44.96	45.33	c2e6d2ae7d128ca7	set,dir,pmgC	set,pmgC		512	170496	1024	2164	32768	5.203
+parent	part2	87	pmgNativePost1	pmgNativePost1	1	0	0	indirect@515	333	1	1	333	1	46.83	53.25	2324633e28f2cebd	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	88	pmgUp1	pmgUp1	1	0	0	indirect@512	1167	1	1	1167	1	41.79	42.54	66db0696b99eff32	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	74688	1024	584	32768	2.279
+parent	part2	89	pmgNativePost0	pmgNativePost0	1	0	0	indirect@515	333	1	1	333	1	52.71	56.33	a4d62e76059802ec	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	170496	1024	6680	32768	5.203
+parent	part2	90	pmgPostU	pmgPostU	1	0	0	indirect@512	1167	1	1	1167	1	107.75	114.21	05e45a58d92ad504	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	4328	32768	18.234
+parent	part2	91	pmgPostS	pmgPostS	1	0	0	indirect@527	2026	1	1	2026	1	163.66	166.54	9e3537868100e259	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	1037312	1024	4328	32768	31.656
+parent	part2	92	pmgPostZ	pmgPostZ	1	0	0	indirect@512	1167	1	1	1167	1	121.83	122.00	a0bbecb3ae59fa59	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	597504	1024	6664	32768	18.234
+parent	part2	93	pmgDirection	pmgDirection	1	0	0	indirect@530	1500	1	1	1500	1	252.75	254.87	c88dd2e1f4b17dfd	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	768000	1024	4972	32768	23.438
+parent	part2	94	pmgUpdate	pmgUpdate	1	0	0	indirect@530	1500	1	1	1500	1	275.25	278.54	85c914c1c5482864	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	768000	1024	6792	32768	23.438
+parent	part2	95	pmgCheck	pmgCheck	1	1028443341	0	direct	1	1	1	1	1	11.96	12.54	657e47892de54fe1	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+parent	part2	96	pmgPreS	pmgPreS	2	0	0	indirect@527	2026	1	1	2026	1	159.37	162.79	fc72679b087e68e3	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	1037312	1024	4328	32768	31.656
+parent	part2	97	pmgPreU	pmgPreU	2	0	0	indirect@512	1167	1	1	1167	1	93.83	94.46	888346ec30e280f6	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	4328	32768	18.234
+parent	part2	98	pmgNativePre0	pmgNativePre0	2	0	0	indirect@515	333	1	1	333	1	44.91	47.04	b870128d9636db81	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	99	pmgDown0	pmgDown0	2	0	0	indirect@512	1167	1	1	1167	1	149.75	153.83	26c077bea548ce0f	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	2632	32768	18.234
+parent	part2	100	pmgNativePre1	pmgNativePre1	2	0	0	indirect@515	333	1	1	333	1	51.87	54.46	e6c9a9e5640b2330	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	6520	32768	5.203
+parent	part2	101	pmgDown1	pmgDown1	2	0	0	indirect@512	1167	1	1	1167	1	31.21	31.63	f83977b4c96982de	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	74688	1024	584	32768	2.279
+parent	part2	102	pmgDown1C	pmgDown1C	2	0	0	indirect@515	333	1	1	333	1	52.87	55.46	e76d680fbe9c6253	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	103	pmgDown2	pmgDown2	2	0	0	indirect@515	333	1	1	333	1	30.08	31.29	ee5268481e82086d	set,dir,pmgC	set,pmgC		512	170496	1024	2420	32768	5.203
+parent	part2	104	pmgDown3	pmgDown3	2	0	0	indirect@515	333	1	1	333	1	21.92	22.21	1e678d27e2d9078e	set,dir,pmgC	set,pmgC		64	21312	1024	404	32768	0.650
+parent	part2	105	pmgTopCycle	pmgTopCycle	2	0	0	indirect@518	1	1	1	1	1	80.87	82.37	d103d9cdba4e424f	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	1024	1024	12	32768	0.031
+parent	part2	106	pmgUp3	pmgUp3	2	0	0	indirect@515	333	1	1	333	1	17.83	18.17	80ca6550fddc0113	set,dir,pmgC	set,pmgC		64	21312	1024	372	32768	0.650
+parent	part2	107	pmgUp2	pmgUp2	2	0	0	indirect@515	333	1	1	333	1	44.42	44.62	c2e6d2ae7d128ca7	set,dir,pmgC	set,pmgC		512	170496	1024	2164	32768	5.203
+parent	part2	108	pmgNativePost1	pmgNativePost1	2	0	0	indirect@515	333	1	1	333	1	46.92	47.08	2324633e28f2cebd	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	109	pmgUp1	pmgUp1	2	0	0	indirect@512	1167	1	1	1167	1	41.50	41.62	66db0696b99eff32	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	74688	1024	584	32768	2.279
+parent	part2	110	pmgNativePost0	pmgNativePost0	2	0	0	indirect@515	333	1	1	333	1	52.21	54.17	a4d62e76059802ec	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	170496	1024	6680	32768	5.203
+parent	part2	111	pmgPostU	pmgPostU	2	0	0	indirect@512	1167	1	1	1167	1	105.79	111.71	05e45a58d92ad504	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	4328	32768	18.234
+parent	part2	112	pmgPostS	pmgPostS	2	0	0	indirect@527	2026	1	1	2026	1	163.54	165.04	9e3537868100e259	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	1037312	1024	4328	32768	31.656
+parent	part2	113	pmgPostZ	pmgPostZ	2	0	0	indirect@512	1167	1	1	1167	1	119.83	120.67	a0bbecb3ae59fa59	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	597504	1024	6664	32768	18.234
+parent	part2	114	pmgDirection	pmgDirection	2	0	0	indirect@530	1500	1	1	1500	1	249.12	251.75	c88dd2e1f4b17dfd	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	768000	1024	4972	32768	23.438
+parent	part2	115	pmgUpdate	pmgUpdate	2	0	0	indirect@530	1500	1	1	1500	1	274.41	278.41	85c914c1c5482864	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	768000	1024	6792	32768	23.438
+parent	part2	116	pmgCheck	pmgCheck	2	1028443341	0	direct	1	1	1	1	1	11.88	12.08	657e47892de54fe1	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+parent	part2	117	pmgPreS	pmgPreS	3	0	0	indirect@527	2026	1	1	2026	1	159.71	160.91	fc72679b087e68e3	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	1037312	1024	4328	32768	31.656
+parent	part2	118	pmgPreU	pmgPreU	3	0	0	indirect@512	1167	1	1	1167	1	92.75	93.46	888346ec30e280f6	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	4328	32768	18.234
+parent	part2	119	pmgNativePre0	pmgNativePre0	3	0	0	indirect@515	333	1	1	333	1	49.16	51.91	b870128d9636db81	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	120	pmgDown0	pmgDown0	3	0	0	indirect@512	1167	1	1	1167	1	150.91	152.33	26c077bea548ce0f	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	2632	32768	18.234
+parent	part2	121	pmgNativePre1	pmgNativePre1	3	0	0	indirect@515	333	1	1	333	1	51.08	53.96	e6c9a9e5640b2330	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	6520	32768	5.203
+parent	part2	122	pmgDown1	pmgDown1	3	0	0	indirect@512	1167	1	1	1167	1	31.04	31.79	f83977b4c96982de	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	74688	1024	584	32768	2.279
+parent	part2	123	pmgDown1C	pmgDown1C	3	0	0	indirect@515	333	1	1	333	1	49.25	55.04	e76d680fbe9c6253	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	124	pmgDown2	pmgDown2	3	0	0	indirect@515	333	1	1	333	1	30.17	32.58	ee5268481e82086d	set,dir,pmgC	set,pmgC		512	170496	1024	2420	32768	5.203
+parent	part2	125	pmgDown3	pmgDown3	3	0	0	indirect@515	333	1	1	333	1	21.87	23.42	1e678d27e2d9078e	set,dir,pmgC	set,pmgC		64	21312	1024	404	32768	0.650
+parent	part2	126	pmgTopCycle	pmgTopCycle	3	0	0	indirect@518	1	1	1	1	1	79.37	82.04	d103d9cdba4e424f	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	1024	1024	12	32768	0.031
+parent	part2	127	pmgUp3	pmgUp3	3	0	0	indirect@515	333	1	1	333	1	17.63	17.66	80ca6550fddc0113	set,dir,pmgC	set,pmgC		64	21312	1024	372	32768	0.650
+parent	part2	128	pmgUp2	pmgUp2	3	0	0	indirect@515	333	1	1	333	1	44.67	45.21	c2e6d2ae7d128ca7	set,dir,pmgC	set,pmgC		512	170496	1024	2164	32768	5.203
+parent	part2	129	pmgNativePost1	pmgNativePost1	3	0	0	indirect@515	333	1	1	333	1	48.38	49.79	2324633e28f2cebd	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	130	pmgUp1	pmgUp1	3	0	0	indirect@512	1167	1	1	1167	1	41.75	44.71	66db0696b99eff32	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	74688	1024	584	32768	2.279
+parent	part2	131	pmgNativePost0	pmgNativePost0	3	0	0	indirect@515	333	1	1	333	1	51.91	58.50	a4d62e76059802ec	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	170496	1024	6680	32768	5.203
+parent	part2	132	pmgPostU	pmgPostU	3	0	0	indirect@512	1167	1	1	1167	1	107.50	122.54	05e45a58d92ad504	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	4328	32768	18.234
+parent	part2	133	pmgPostS	pmgPostS	3	0	0	indirect@527	2026	1	1	2026	1	164.04	171.16	9e3537868100e259	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	1037312	1024	4328	32768	31.656
+parent	part2	134	pmgPostZ	pmgPostZ	3	0	0	indirect@512	1167	1	1	1167	1	120.67	121.25	a0bbecb3ae59fa59	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	597504	1024	6664	32768	18.234
+parent	part2	135	pmgDirection	pmgDirection	3	0	0	indirect@530	1500	1	1	1500	1	249.87	255.29	c88dd2e1f4b17dfd	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	768000	1024	4972	32768	23.438
+parent	part2	136	pmgUpdate	pmgUpdate	3	0	0	indirect@530	1500	1	1	1500	1	278.79	279.00	85c914c1c5482864	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	768000	1024	6792	32768	23.438
+parent	part2	137	pmgCheck	pmgCheck	3	1028443341	0	direct	1	1	1	1	1	11.67	11.83	657e47892de54fe1	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+parent	part2	138	pmgPreS	pmgPreS	4	0	0	indirect@527	2026	1	1	2026	1	160.87	162.46	fc72679b087e68e3	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	1037312	1024	4328	32768	31.656
+parent	part2	139	pmgPreU	pmgPreU	4	0	0	indirect@512	1167	1	1	1167	1	93.17	93.92	888346ec30e280f6	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	4328	32768	18.234
+parent	part2	140	pmgNativePre0	pmgNativePre0	4	0	0	indirect@515	333	1	1	333	1	45.25	49.42	b870128d9636db81	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	141	pmgDown0	pmgDown0	4	0	0	indirect@512	1167	1	1	1167	1	150.62	153.08	26c077bea548ce0f	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	2632	32768	18.234
+parent	part2	142	pmgNativePre1	pmgNativePre1	4	0	0	indirect@515	333	1	1	333	1	50.67	51.83	e6c9a9e5640b2330	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	6520	32768	5.203
+parent	part2	143	pmgDown1	pmgDown1	4	0	0	indirect@512	1167	1	1	1167	1	31.12	31.21	f83977b4c96982de	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	74688	1024	584	32768	2.279
+parent	part2	144	pmgDown1C	pmgDown1C	4	0	0	indirect@515	333	1	1	333	1	49.00	53.75	e76d680fbe9c6253	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	145	pmgDown2	pmgDown2	4	0	0	indirect@515	333	1	1	333	1	30.21	31.29	ee5268481e82086d	set,dir,pmgC	set,pmgC		512	170496	1024	2420	32768	5.203
+parent	part2	146	pmgDown3	pmgDown3	4	0	0	indirect@515	333	1	1	333	1	21.67	22.87	1e678d27e2d9078e	set,dir,pmgC	set,pmgC		64	21312	1024	404	32768	0.650
+parent	part2	147	pmgTopCycle	pmgTopCycle	4	0	0	indirect@518	1	1	1	1	1	79.75	82.46	d103d9cdba4e424f	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	1024	1024	12	32768	0.031
+parent	part2	148	pmgUp3	pmgUp3	4	0	0	indirect@515	333	1	1	333	1	17.63	17.71	80ca6550fddc0113	set,dir,pmgC	set,pmgC		64	21312	1024	372	32768	0.650
+parent	part2	149	pmgUp2	pmgUp2	4	0	0	indirect@515	333	1	1	333	1	44.21	45.17	c2e6d2ae7d128ca7	set,dir,pmgC	set,pmgC		512	170496	1024	2164	32768	5.203
+parent	part2	150	pmgNativePost1	pmgNativePost1	4	0	0	indirect@515	333	1	1	333	1	49.00	50.04	2324633e28f2cebd	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	170496	1024	4344	32768	5.203
+parent	part2	151	pmgUp1	pmgUp1	4	0	0	indirect@512	1167	1	1	1167	1	42.17	43.46	66db0696b99eff32	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	74688	1024	584	32768	2.279
+parent	part2	152	pmgNativePost0	pmgNativePost0	4	0	0	indirect@515	333	1	1	333	1	52.75	53.79	a4d62e76059802ec	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	170496	1024	6680	32768	5.203
+parent	part2	153	pmgPostU	pmgPostU	4	0	0	indirect@512	1167	1	1	1167	1	108.71	110.67	05e45a58d92ad504	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	597504	1024	4328	32768	18.234
+parent	part2	154	pmgPostS	pmgPostS	4	0	0	indirect@527	2026	1	1	2026	1	163.46	163.79	9e3537868100e259	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	1037312	1024	4328	32768	31.656
+parent	part2	155	pmgPostZ	pmgPostZ	4	0	0	indirect@512	1167	1	1	1167	1	120.29	121.04	a0bbecb3ae59fa59	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	597504	1024	6664	32768	18.234
+parent	part2	156	pmgDirection	pmgDirection	4	0	0	indirect@530	1500	1	1	1500	1	251.87	257.33	c88dd2e1f4b17dfd	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	768000	1024	4972	32768	23.438
+parent	part2	157	pmgUpdate	pmgUpdate	4	0	0	indirect@530	1500	1	1	1500	1	275.25	280.33	85c914c1c5482864	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	768000	1024	6792	32768	23.438
+parent	part2	158	pmgCheck	pmgCheck	4	1028443341	0	direct	1	1	1	1	1	11.04	11.33	657e47892de54fe1	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+parent	part2	159	pmgPreS	pmgPreS	5	0	0	indirect@527	0	1	1	0	1	5.58	5.88	fc72679b087e68e3	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	160	pmgPreU	pmgPreU	5	0	0	indirect@512	0	1	1	0	1	5.63	5.83	888346ec30e280f6	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	161	pmgNativePre0	pmgNativePre0	5	0	0	indirect@515	0	1	1	0	1	5.63	6.13	b870128d9636db81	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+parent	part2	162	pmgDown0	pmgDown0	5	0	0	indirect@512	0	1	1	0	1	5.67	5.71	26c077bea548ce0f	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	2632	32768	0.000
+parent	part2	163	pmgNativePre1	pmgNativePre1	5	0	0	indirect@515	0	1	1	0	1	5.88	6.17	e6c9a9e5640b2330	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	6520	32768	0.000
+parent	part2	164	pmgDown1	pmgDown1	5	0	0	indirect@512	0	1	1	0	1	5.71	5.88	f83977b4c96982de	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	0	1024	584	32768	0.000
+parent	part2	165	pmgDown1C	pmgDown1C	5	0	0	indirect@515	0	1	1	0	1	5.79	5.83	e76d680fbe9c6253	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+parent	part2	166	pmgDown2	pmgDown2	5	0	0	indirect@515	0	1	1	0	1	5.75	5.83	ee5268481e82086d	set,dir,pmgC	set,pmgC		512	0	1024	2420	32768	0.000
+parent	part2	167	pmgDown3	pmgDown3	5	0	0	indirect@515	0	1	1	0	1	5.75	5.88	1e678d27e2d9078e	set,dir,pmgC	set,pmgC		64	0	1024	404	32768	0.000
+parent	part2	168	pmgTopCycle	pmgTopCycle	5	0	0	indirect@518	0	1	1	0	1	5.67	5.88	d103d9cdba4e424f	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	0	1024	12	32768	0.000
+parent	part2	169	pmgUp3	pmgUp3	5	0	0	indirect@515	0	1	1	0	1	5.75	5.83	80ca6550fddc0113	set,dir,pmgC	set,pmgC		64	0	1024	372	32768	0.000
+parent	part2	170	pmgUp2	pmgUp2	5	0	0	indirect@515	0	1	1	0	1	5.79	5.88	c2e6d2ae7d128ca7	set,dir,pmgC	set,pmgC		512	0	1024	2164	32768	0.000
+parent	part2	171	pmgNativePost1	pmgNativePost1	5	0	0	indirect@515	0	1	1	0	1	5.67	5.96	2324633e28f2cebd	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+parent	part2	172	pmgUp1	pmgUp1	5	0	0	indirect@512	0	1	1	0	1	6.00	6.21	66db0696b99eff32	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	0	1024	584	32768	0.000
+parent	part2	173	pmgNativePost0	pmgNativePost0	5	0	0	indirect@515	0	1	1	0	1	5.88	5.96	a4d62e76059802ec	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	0	1024	6680	32768	0.000
+parent	part2	174	pmgPostU	pmgPostU	5	0	0	indirect@512	0	1	1	0	1	6.00	6.17	05e45a58d92ad504	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	175	pmgPostS	pmgPostS	5	0	0	indirect@527	0	1	1	0	1	5.96	6.00	9e3537868100e259	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	176	pmgPostZ	pmgPostZ	5	0	0	indirect@512	0	1	1	0	1	5.88	6.17	a0bbecb3ae59fa59	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	0	1024	6664	32768	0.000
+parent	part2	177	pmgDirection	pmgDirection	5	0	0	indirect@530	0	1	1	0	1	5.83	5.88	c88dd2e1f4b17dfd	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	4972	32768	0.000
+parent	part2	178	pmgUpdate	pmgUpdate	5	0	0	indirect@530	0	1	1	0	1	5.96	5.96	85c914c1c5482864	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	6792	32768	0.000
+parent	part2	179	pmgCheck	pmgCheck	5	1028443341	0	direct	1	1	1	1	1	6.58	6.63	657e47892de54fe1	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+parent	part2	180	pmgPreS	pmgPreS	6	0	0	indirect@527	0	1	1	0	1	5.71	5.75	fc72679b087e68e3	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	181	pmgPreU	pmgPreU	6	0	0	indirect@512	0	1	1	0	1	5.83	6.00	888346ec30e280f6	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	182	pmgNativePre0	pmgNativePre0	6	0	0	indirect@515	0	1	1	0	1	5.71	5.79	b870128d9636db81	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+parent	part2	183	pmgDown0	pmgDown0	6	0	0	indirect@512	0	1	1	0	1	5.79	5.83	26c077bea548ce0f	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	2632	32768	0.000
+parent	part2	184	pmgNativePre1	pmgNativePre1	6	0	0	indirect@515	0	1	1	0	1	5.79	6.08	e6c9a9e5640b2330	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	6520	32768	0.000
+parent	part2	185	pmgDown1	pmgDown1	6	0	0	indirect@512	0	1	1	0	1	5.71	5.88	f83977b4c96982de	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	0	1024	584	32768	0.000
+parent	part2	186	pmgDown1C	pmgDown1C	6	0	0	indirect@515	0	1	1	0	1	5.88	6.21	e76d680fbe9c6253	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+parent	part2	187	pmgDown2	pmgDown2	6	0	0	indirect@515	0	1	1	0	1	5.54	6.21	ee5268481e82086d	set,dir,pmgC	set,pmgC		512	0	1024	2420	32768	0.000
+parent	part2	188	pmgDown3	pmgDown3	6	0	0	indirect@515	0	1	1	0	1	5.71	6.25	1e678d27e2d9078e	set,dir,pmgC	set,pmgC		64	0	1024	404	32768	0.000
+parent	part2	189	pmgTopCycle	pmgTopCycle	6	0	0	indirect@518	0	1	1	0	1	5.67	6.21	d103d9cdba4e424f	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	0	1024	12	32768	0.000
+parent	part2	190	pmgUp3	pmgUp3	6	0	0	indirect@515	0	1	1	0	1	5.67	6.00	80ca6550fddc0113	set,dir,pmgC	set,pmgC		64	0	1024	372	32768	0.000
+parent	part2	191	pmgUp2	pmgUp2	6	0	0	indirect@515	0	1	1	0	1	5.79	5.83	c2e6d2ae7d128ca7	set,dir,pmgC	set,pmgC		512	0	1024	2164	32768	0.000
+parent	part2	192	pmgNativePost1	pmgNativePost1	6	0	0	indirect@515	0	1	1	0	1	5.88	5.96	2324633e28f2cebd	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+parent	part2	193	pmgUp1	pmgUp1	6	0	0	indirect@512	0	1	1	0	1	5.92	5.92	66db0696b99eff32	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	0	1024	584	32768	0.000
+parent	part2	194	pmgNativePost0	pmgNativePost0	6	0	0	indirect@515	0	1	1	0	1	5.88	6.17	a4d62e76059802ec	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	0	1024	6680	32768	0.000
+parent	part2	195	pmgPostU	pmgPostU	6	0	0	indirect@512	0	1	1	0	1	5.83	6.21	05e45a58d92ad504	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	196	pmgPostS	pmgPostS	6	0	0	indirect@527	0	1	1	0	1	6.13	6.29	9e3537868100e259	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	197	pmgPostZ	pmgPostZ	6	0	0	indirect@512	0	1	1	0	1	6.00	6.25	a0bbecb3ae59fa59	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	0	1024	6664	32768	0.000
+parent	part2	198	pmgDirection	pmgDirection	6	0	0	indirect@530	0	1	1	0	1	6.17	6.46	c88dd2e1f4b17dfd	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	4972	32768	0.000
+parent	part2	199	pmgUpdate	pmgUpdate	6	0	0	indirect@530	0	1	1	0	1	6.08	6.29	85c914c1c5482864	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	6792	32768	0.000
+parent	part2	200	pmgCheck	pmgCheck	6	1028443341	0	direct	1	1	1	1	1	6.58	7.50	657e47892de54fe1	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+parent	part2	201	pmgPreS	pmgPreS	7	0	0	indirect@527	0	1	1	0	1	5.83	6.08	fc72679b087e68e3	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	202	pmgPreU	pmgPreU	7	0	0	indirect@512	0	1	1	0	1	6.00	6.17	888346ec30e280f6	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	203	pmgNativePre0	pmgNativePre0	7	0	0	indirect@515	0	1	1	0	1	6.13	6.21	b870128d9636db81	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+parent	part2	204	pmgDown0	pmgDown0	7	0	0	indirect@512	0	1	1	0	1	6.08	6.25	26c077bea548ce0f	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	2632	32768	0.000
+parent	part2	205	pmgNativePre1	pmgNativePre1	7	0	0	indirect@515	0	1	1	0	1	6.17	6.29	e6c9a9e5640b2330	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	6520	32768	0.000
+parent	part2	206	pmgDown1	pmgDown1	7	0	0	indirect@512	0	1	1	0	1	6.13	6.17	f83977b4c96982de	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	0	1024	584	32768	0.000
+parent	part2	207	pmgDown1C	pmgDown1C	7	0	0	indirect@515	0	1	1	0	1	6.08	6.50	e76d680fbe9c6253	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+parent	part2	208	pmgDown2	pmgDown2	7	0	0	indirect@515	0	1	1	0	1	6.21	6.33	ee5268481e82086d	set,dir,pmgC	set,pmgC		512	0	1024	2420	32768	0.000
+parent	part2	209	pmgDown3	pmgDown3	7	0	0	indirect@515	0	1	1	0	1	6.13	6.17	1e678d27e2d9078e	set,dir,pmgC	set,pmgC		64	0	1024	404	32768	0.000
+parent	part2	210	pmgTopCycle	pmgTopCycle	7	0	0	indirect@518	0	1	1	0	1	6.17	6.50	d103d9cdba4e424f	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	0	1024	12	32768	0.000
+parent	part2	211	pmgUp3	pmgUp3	7	0	0	indirect@515	0	1	1	0	1	6.08	6.12	80ca6550fddc0113	set,dir,pmgC	set,pmgC		64	0	1024	372	32768	0.000
+parent	part2	212	pmgUp2	pmgUp2	7	0	0	indirect@515	0	1	1	0	1	6.17	6.25	c2e6d2ae7d128ca7	set,dir,pmgC	set,pmgC		512	0	1024	2164	32768	0.000
+parent	part2	213	pmgNativePost1	pmgNativePost1	7	0	0	indirect@515	0	1	1	0	1	6.04	6.08	2324633e28f2cebd	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+parent	part2	214	pmgUp1	pmgUp1	7	0	0	indirect@512	0	1	1	0	1	6.17	6.21	66db0696b99eff32	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	0	1024	584	32768	0.000
+parent	part2	215	pmgNativePost0	pmgNativePost0	7	0	0	indirect@515	0	1	1	0	1	6.00	6.13	a4d62e76059802ec	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	0	1024	6680	32768	0.000
+parent	part2	216	pmgPostU	pmgPostU	7	0	0	indirect@512	0	1	1	0	1	6.25	6.42	05e45a58d92ad504	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	217	pmgPostS	pmgPostS	7	0	0	indirect@527	0	1	1	0	1	6.00	6.21	9e3537868100e259	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+parent	part2	218	pmgPostZ	pmgPostZ	7	0	0	indirect@512	0	1	1	0	1	6.17	6.54	a0bbecb3ae59fa59	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	0	1024	6664	32768	0.000
+parent	part2	219	pmgDirection	pmgDirection	7	0	0	indirect@530	0	1	1	0	1	5.96	6.13	c88dd2e1f4b17dfd	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	4972	32768	0.000
+parent	part2	220	pmgUpdate	pmgUpdate	7	0	0	indirect@530	0	1	1	0	1	6.00	6.29	85c914c1c5482864	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	6792	32768	0.000
+parent	part2	221	pmgCheck	pmgCheck	7	1028443341	0	direct	1	1	1	1	1	7.13	7.21	657e47892de54fe1	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+parent	part2	222	pmgFinish	pmgFinish	0	0	0	indirect@533	1596	1	1	1596	1	24.08	32.04	319099db4d9ba17f	set,dir,pres,pmgF	set,pres,pmgF		512	817152	1024	4	32768	24.938
+parent	part2	223	pmgFinishC	pmgFinishC	0	0	0	indirect@132	333	1	1	333	1	15.13	16.96	69f7ed69798a268e	set,dir,pres,pmgC	set,pres,pmgC		512	170496	1024	120	32768	5.203
+parent	part2	224	pressureProjectC	pressureProjectC	0	0	0	indirect@132	333	1	1	333	1	299.75	301.25	6c56de4091d1e56e	set,dir,vel,phi,pres,cut,census	set,vel,phi,pres,census		256	85248	576	36	18432	4.625
+parent	part2	225	pmgPressureDelta	pmgPressureDelta	0	0	0	indirect@132	333	1	1	333	1	41.46	43.00	91ef762f37204f51	set,dir,pres,pmgC,pmgTop	set,pmgC,pmgTop	pres	512	170496	1024	176	32768	5.203
+parent	part2	226	project	project	0	0	0	indirect@536	2873	1	1	2873	1	1462.02	1463.93	e7a832c9f84f3d66	set,dir,vel,phi,pres,cut,pmgF	set,vel,phi,pres,pmgF		256	735488	640	6320	20480	35.913
+parent	part2	227	projectDry	projectDry	0	0	0	indirect@536	2873	1	1	2873	1	505.74	551.12	2601bffe71000b87	set,dir,vel,phi,pres,cut,pmgF	set,vel,phi	pres,pmgF	64	183872	512	10292	16384	11.223
+parent	part2	228	pressureProjectRest	pressureProjectRest	0	0	0	indirect@0	5763	1	1	5763	1	15.33	15.50	214c29c4db70a575	set,dir,vel,phi,pres,cut,pmgF	set,phi	vel,pres,pmgF	64	368832	1024	0	32768	11.256
+parent	part2	229	uExt4Seed	uExt4Seed	0	0	0	indirect@216	333	1	1	333	1	714.53	721.49	3e28f4351a660a24	set,dir,vel,phi,fcell,fext4	set,fext4	vel	256	85248	576	9228	18432	4.625
+parent	part2	230	uExt4	uExt4	0	0	0	indirect@216	333	1	1	333	1	722.03	722.28	fc43f6641b8fb6dc	set,dir,vel,phi,fcell,fext4	set,vel,fext4		512	170496	576	20856	18432	9.250
+parent	part2	231	uExtend	uExtend	0	0	0	indirect@0	5763	1	1	5763	1	3846.32	4001.94	3510319cab026fcf	set,dir,vel,phi,fcell,fext4	set,vel,fext4		512	2950656	768	23204	24576	120.063
+parent	part2	232	pArgs	pArgs	0	1	0	direct	1	1	1	1	1	5.58	5.75	c7c70f3cfe5785ee	set,dir,args	set,args		1	1	1024	0	32768	0.000
+parent	part2	233	pJoin	pJoin	0	0	0	indirect@2048	5818	1	1	5818	1	413.87	420.62	1fd0c5fcfee17860	set,dir,parts,fcell	set		128	744704	1024	0	32768	22.727
+parent	part2	234	pDelta	pDelta	0	0	0	indirect@2048	5818	1	1	5818	1	906.86	909.82	6c30710821713c0f	set,dir,vel,parts,fcell,pEnergy	set,parts,pEnergy		128	744704	1024	0	32768	22.727
+parent	part2	235	stepEnd	stepEnd	0	0	0	direct	1	1	1	1	1	5.00	5.25	5334b5ae3015eeda	set	set		1	1	1024	0	32768	0.000
+fine	alloc	0	detailAlloc.dtlClear	dtlClear	0	0	0	direct	16	1	1	16	1	56.92	57.62					64	1024	-1	-1	-1	-1.000
+fine	alloc	1	detailAlloc.dtlHeat	dtlHeat	0	0	0	direct	8213	1	1	8213	1	407.74	414.33					64	525632	-1	-1	-1	-1.000
+fine	alloc	2	detailAlloc.dtlThreshold	dtlThreshold	0	0	0	direct	1	1	1	1	1	10.75	10.79					64	64	-1	-1	-1	-1.000
+fine	alloc	3	detailAlloc.dtlMark	dtlMark	0	0	0	direct	1027	1	1	1027	1	31.88	32.75					64	65728	-1	-1	-1	-1.000
+fine	alloc	4	detailAlloc.dtlRing	dtlRing	0	0	0	direct	2	1	1	2	1	39.25	39.33					64	128	-1	-1	-1	-1.000
+fine	alloc	5	detailAlloc.dtlNodes	dtlNodes	0	0	0	direct	384	1	1	384	1	82.17	82.37					64	24576	-1	-1	-1	-1.000
+fine	part1	0	detailRefresh	detailRefresh	0	0	0	direct	64	1	1	64	1	15.33	15.54	76de4a595ba8bf41	set,dir,phi,src	set,phi		64	4096	1024	0	32768	0.125
+fine	part1	1	censusBegin	censusBegin	0	0	0	direct	1	1	1	1	1	6.96	7.17	070dcb77e72eded3	set	set		1	1	1024	0	32768	0.000
+fine	part1	2	censusFine	censusFine	0	0	0	indirect@9	2168	1	1	2168	1	353.33	358.83	eaad3ab83254fc11	set,dir,vel,phi,census	set,census		64	138752	640	2712	20480	6.775
+fine	part1	3	censusCoarse	censusCoarse	0	0	0	indirect@141	160	1	1	160	1	29.25	29.41	93a06ca9d7a895eb	set,dir,vel,phi,census	set,census		64	10240	704	7148	22528	0.455
+fine	part1	4	censusCubes	censusCubes	0	0	0	indirect@132	20	1	1	20	1	15.50	15.54	1fc5596b22ccec11	set,dir,census	census		64	1280	1024	1732	32768	0.039
+fine	part1	5	censusImportance	censusImportance	0	0	0	indirect@141	160	1	1	160	1	88.71	88.96	bfd16bd8c61ed414	set,dir,vel,phi,census,src	set,census		64	10240	896	24	28672	0.357
+fine	part1	6	censusDecide	censusDecide	0	1	0	indirect@141	160	1	1	160	1	154.58	156.21	2675ef18fa7aa00e	set,dir,vel,phi,census,src	set,census		64	10240	576	52	18432	0.556
+fine	part1	7	resMark	resMark	0	0	0	indirect@0	271	1	1	271	1	54.12	55.54	70d63175242a4aac	set,dir	set,dir		64	17344	1024	328	32768	0.529
+fine	part1	8	resDetail	resDetail	0	0	0	direct	128	1	1	128	1	20.71	20.79	d259e7267a803401	set,dir,src	set,dir		64	8192	1024	28	32768	0.250
+fine	part1	9	setClaimPages	setClaimPages	0	0	0	direct	20	1	1	20	1	5.58	5.58	8fb3258e2d242154	set,dir	set,dir		64	1280	576	0	18432	0.069
+fine	part1	10	resMark	resMark	1	0	0	indirect@0	271	1	1	271	1	14.46	14.63	70d63175242a4aac	set,dir	set,dir		64	17344	1024	328	32768	0.529
+fine	part1	11	resDetail	resDetail	1	0	0	direct	128	1	1	128	1	13.42	13.42	d259e7267a803401	set,dir,src	set,dir		64	8192	1024	28	32768	0.250
+fine	part1	12	setClaimBricks	setClaimBricks	0	0	0	direct	20	1	1	20	1	12.37	12.67	b5eeb72326062d0d	set,dir	set,dir		64	1280	704	0	22528	0.057
+fine	part1	13	setLeave	setLeave	0	0	0	indirect@6	5	1	1	5	1	12.29	12.29	71e1ea2f5bac4cb9	set,dir	set,dir		64	320	1024	0	32768	0.010
+fine	part1	14	setLeavePages	setLeavePages	0	0	0	indirect@138	1	1	1	1	1	10.46	10.71	3ef45a61c90bfbde	set,dir	set,dir		64	64	1024	0	32768	0.002
+fine	part1	15	setRecords	setRecords	0	0	0	direct	256	1	1	256	1	8.04	8.04	af0b9d60871f3103	set,dir	set,dir		32	8192	1024	0	32768	0.250
+fine	part1	16	setInit	setInit	0	0	0	direct	256	1	1	256	1	16.83	18.67	fb53eb324ab63839	set,dir,vel,phi,pres	vel,phi,pres		128	32768	1024	0	32768	1.000
+fine	part1	17	setLists	setLists	1	0	0	direct	20	1	1	20	1	12.71	13.33	47e454099d6c1fd5	set,dir	set,dir		64	1280	1024	0	32768	0.039
+fine	part1	18	setArgs	setArgs	0	0	0	direct	1	1	1	1	1	12.13	12.37	32dc36e2d2a81b53	set,args	set,args		64	64	1024	0	32768	0.002
+fine	part1	19	certFine	certFine	0	0	0	indirect@9	1928	1	1	1928	1	102.29	102.79	bb84f17d7aacdafa	set,dir,vel,phi,census	set,census		64	123392	1024	1816	32768	3.766
+fine	part1	20	certError	certError	0	1	0	indirect@141	128	1	1	128	1	35.16	36.04	68cde71ae6a1e2d2	set,dir,vel,phi,census	set,census		64	8192	1024	6292	32768	0.250
+fine	part1	21	solidStamp	solidStamp	0	0	0	indirect@96	46	1	1	46	1	69.83	70.71	1ca3ef0dfe7607fc	set,dir,phi,cut,solid	set,dir,phi,cut		64	2944	1024	28	32768	0.090
+fine	part1	22	setKRelease	setKRelease	0	0	0	indirect@6	4	1	1	4	1	9.42	9.46	33ba1a561ab66de6	set,dir	set,dir		64	256	1024	0	32768	0.008
+fine	part1	23	setKRelease	setKRelease	1	0	0	indirect@114	2	1	1	2	1	9.13	9.38	33ba1a561ab66de6	set,dir	set,dir		64	128	1024	0	32768	0.004
+fine	part1	24	stepEnd	stepEnd	1	0	0	direct	1	1	1	1	1	4.29	4.37	cf9e01521e6c7ea7	set	set		1	1	1024	0	32768	0.000
+fine	part1	25	nrReach	nrReach	0	0	0	indirect@384	257	1	1	257	1	114.50	115.04	46a9a358fad623ee	set,dir,vel,phi	set		256	65792	1024	200	32768	2.008
+fine	part1	26	nrSpread	nrSpread	0	0	0	indirect@132	16	1	1	16	1	22.21	22.50	5b72716f9e01e332	set,dir,vel,phi	set		256	4096	1024	0	32768	0.125
+fine	part1	27	nrSpread	nrSpread	1	0	0	indirect@132	16	1	1	16	1	20.42	20.42	5b72716f9e01e332	set,dir,vel,phi	set		256	4096	1024	0	32768	0.125
+fine	part1	28	nrSpread	nrSpread	2	0	0	indirect@132	16	1	1	16	1	20.67	20.92	5b72716f9e01e332	set,dir,vel,phi	set		256	4096	1024	0	32768	0.125
+fine	part1	29	pLiquid	pLiquid	0	0	0	indirect@0	241	1	1	241	1	23.50	23.75	490c0284c61519fb	set,dir,phi	set		128	30848	1024	3984	32768	0.941
+fine	part1	30	pArgs	pArgs	0	0	0	direct	1	1	1	1	1	4.96	5.08	4d486c98e6f2cc29	set,dir,args	set,args		1	1	1024	0	32768	0.000
+fine	part1	31	pSeparate	pSeparate	0	0	0	indirect@2048	517	1	1	517	1	178.00	178.50	2ec2d665490e6e51	set,dir,vel,phi,parts,fcell,fpart,fmoved	set,fcell,fpart,fmoved		128	66176	1024	0	32768	2.020
+fine	part1	32	pMove	pMove	0	0	0	indirect@2048	517	1	1	517	1	290.04	300.70	bd79fc8902a1673f	set,dir,vel,phi,parts,fcell,fpart,fmoved,src	set,fcell,fpart,fmoved		128	66176	576	0	18432	3.590
+fine	part1	33	pSolid	pSolid	0	0	0	indirect@2048	517	1	1	517	1	41.79	42.25	d285b1892d5c0b61	set,dir,vel,phi,parts,fcell,fpart,fmoved,src	set,fcell,fpart,fmoved		128	66176	576	0	18432	3.590
+fine	part1	34	pScan	pScan	0	0	0	indirect@0	241	1	1	241	1	24.83	25.00	83a401b32173d285	set,dir,fcell	set,fcell		256	61696	1024	1032	32768	1.883
+fine	part1	35	pScatter	pScatter	0	0	0	indirect@2048	517	1	1	517	1	23.46	23.46	e16f2d6e4079244e	set,dir,parts,fcell,fpart,fmoved	set,parts	fpart,fmoved	128	66176	1024	0	32768	2.020
+fine	part1	36	pTiles	pTiles	0	0	0	indirect@0	241	1	1	241	1	19.92	20.71	66b36bd6a13f7db5	set,dir,parts,fcell	set,fcell		256	61696	1024	288	32768	1.883
+fine	part2	0	setMark	setMark	0	0	0	indirect@0	241	1	1	241	1	65.37	67.33	264f251222a329bd	set,dir,phi	set,dir		64	15424	1024	128	32768	0.471
+fine	part2	1	setRecords	setRecords	0	0	1	direct	256	1	1	256	1	5.46	5.63	af0b9d60871f3103	set,dir	set,dir		32	8192	1024	0	32768	0.250
+fine	part2	2	setLists	setLists	0	0	0	direct	20	1	1	20	1	12.00	12.21	47e454099d6c1fd5	set,dir	set,dir		64	1280	1024	0	32768	0.039
+fine	part2	3	setArgs	setArgs	1	0	0	direct	1	1	1	1	1	9.46	9.71	32dc36e2d2a81b53	set,args	set,args		64	64	1024	0	32768	0.002
+fine	part2	4	nrWallReach	nrWallReach	0	0	0	indirect@132	16	1	1	16	1	23.50	23.71	d2e3acb4a90686f6	set,dir,vel,phi	set		256	4096	1024	0	32768	0.125
+fine	part2	5	vGauge	vGauge	0	0	0	indirect@0	241	1	1	241	1	67.33	68.42	db666a15831236d6	set,dir,phi,cut	set		64	15424	1024	2924	32768	0.471
+fine	part2	6	lInit	lInit	0	0	0	indirect@0	241	1	1	241	1	20.17	20.29	a55c9ea223178a5a	set,dir,phi,fcell	set,fcell		256	61696	1024	4	32768	1.883
+fine	part2	7	lAdvect	lAdvect	0	0	0	indirect@0	241	1	1	241	1	649.12	686.32	4be420fa13b98dbb	set,dir,vel,phi,fcell,src	set,phi		256	61696	512	0	16384	3.766
+fine	part2	8	phiSolid	phiSolid	0	0	0	indirect@0	241	1	1	241	1	18.58	18.87	85e2f932ce2a433b	set,dir,vel,phi,fcell,src	set,phi		256	61696	512	0	16384	3.766
+fine	part2	9	lSplat	lSplat	0	0	0	indirect@0	241	1	1	241	1	121.62	121.87	81f2f9daf00aeb5b	set,dir,parts,fcell	set,fcell		256	61696	1024	10652	32768	1.883
+fine	part2	10	lUnion	lUnion	0	0	0	indirect@0	241	1	1	241	1	156.87	186.91	104d0977981f7737	set,dir,phi,fcell,src	set,phi		256	61696	832	0	26624	2.317
+fine	part2	11	lTiles	lTiles	0	0	0	indirect@0	241	1	1	241	1	21.83	22.08	bdffa7b19a84e236	set,dir,phi,fcell	set,fcell		256	61696	1024	3932	32768	1.883
+fine	part2	12	lDilate	lDilate	0	1	0	indirect@3	31	1	1	31	1	18.91	19.21	32d4da4ce76c9ef6	set,dir,fcell	set,fcell		64	1984	1024	0	32768	0.061
+fine	part2	13	lDilate	lDilate	1	1	0	indirect@3	31	1	1	31	1	18.63	19.21	32d4da4ce76c9ef6	set,dir,fcell	set,fcell		64	1984	1024	0	32768	0.061
+fine	part2	14	lDilate	lDilate	2	1	0	indirect@3	31	1	1	31	1	18.08	18.63	32d4da4ce76c9ef6	set,dir,fcell	set,fcell		64	1984	1024	0	32768	0.061
+fine	part2	15	lClear	lClear	0	0	0	indirect@0	241	1	1	241	1	183.04	191.41	081037bb01f669b7	set,dir,phi,fcell	set,phi,fcell		256	61696	1024	6904	32768	1.883
+fine	part2	16	lDilate	lDilate	0	2	0	indirect@3	31	1	1	31	1	21.62	23.50	32d4da4ce76c9ef6	set,dir,fcell	set,fcell		64	1984	1024	0	32768	0.061
+fine	part2	17	lDilate	lDilate	1	2	0	indirect@3	31	1	1	31	1	19.29	19.42	32d4da4ce76c9ef6	set,dir,fcell	set,fcell		64	1984	1024	0	32768	0.061
+fine	part2	18	lDilate	lDilate	2	2	0	indirect@3	31	1	1	31	1	19.46	19.79	32d4da4ce76c9ef6	set,dir,fcell	set,fcell		64	1984	1024	0	32768	0.061
+fine	part2	19	lNear	lNear	0	0	0	indirect@0	241	1	1	241	1	25.00	27.04	4f5a87b1c7497d56	set,dir,fcell	set,fcell		256	61696	1024	16	32768	1.883
+fine	part2	20	lNear	lNear	1	0	0	indirect@0	241	1	1	241	1	30.21	31.00	4f5a87b1c7497d56	set,dir,fcell	set,fcell		256	61696	1024	16	32768	1.883
+fine	part2	21	lNear	lNear	2	0	0	indirect@0	241	1	1	241	1	33.29	36.88	4f5a87b1c7497d56	set,dir,fcell	set,fcell		256	61696	1024	16	32768	1.883
+fine	part2	22	lDistance	lDistance	0	0	0	indirect@0	241	1	1	241	1	138.33	149.50	e4bcddf4b4682384	set,dir,phi,fcell	set,fcell		256	61696	1024	10228	32768	1.883
+fine	part2	23	lPublish	lPublish	0	0	0	indirect@0	241	1	1	241	1	31.75	32.29	8e80434822ef7db8	set,dir,phi,fcell	set,phi		256	61696	1024	0	32768	1.883
+fine	part2	24	pSeed	pSeed	0	0	0	indirect@0	241	1	1	241	1	391.74	567.57	c28c44921f5a7282	set,dir,vel,phi,parts,fcell,src	set,parts		256	61696	640	3312	20480	3.013
+fine	part2	25	uAdvect	uAdvect	0	0	0	indirect@0	241	1	1	241	1	676.78	713.57	8763a02788e443b5	set,dir,vel,phi,fcell,src	set,vel		256	61696	704	11272	22528	2.739
+fine	part2	26	pDeposit	pDeposit	0	0	0	indirect@0	241	1	1	241	1	166.37	184.58	af6d82607229b39d	set,dir,phi,parts,fdep	set,parts,fdep		256	61696	832	27532	26624	2.317
+fine	part2	27	uTransfer	uTransfer	0	0	0	indirect@0	241	1	1	241	1	380.08	385.16	d8abe04417846611	set,dir,vel,phi,fcell,fdep,src	set,vel,fcell,fdep	phi	256	61696	640	12844	20480	3.013
+fine	part2	28	pressureRowsList	pressureRowsList	0	0	0	indirect@0	241	1	1	241	1	21.54	22.17	4a8e98c3babd2d62	set,dir,pmgF,pmgTop	set,pmgF,pmgTop		64	15424	1024	36	32768	0.471
+fine	part2	29	pmgListArgs	pmgListArgs	0	0	0	direct	1	1	1	1	1	6.58	6.67	8e59e0d00f2cff98	set,pmgF,args,pmgTop	set,pmgF,args,pmgTop		1	1	1024	0	32768	0.000
+fine	part2	30	pressureRowsZero	pressureRowsZero	0	0	0	indirect@539	0	1	1	0	1	5.67	5.96	fcc85da3912382ba	set,dir,pres,pmgF,pmgC	set,pres,pmgF,pmgC		64	0	1024	0	32768	0.000
+fine	part2	31	pressureTileRoots	pressureTileRoots	0	0	0	indirect@533	241	1	1	241	1	51.71	51.71	dcb225253242d671	set,dir,vel,phi,pres,cut,pmgF	set,phi,pres	pmgF	256	61696	1024	3720	32768	1.883
+fine	part2	32	operator	nbOperator	0	0	0	indirect@533	241	1	1	241	1	1306.56	1399.81	04a0e5071ab76b60	set,dir,vel,phi,pres,cut,pmgF	set,phi,pres,pmgF		512	123392	512	16076	16384	7.531
+fine	part2	33	pressureRowsC	pressureRowsC	0	0	0	indirect@132	16	1	1	16	1	35.54	35.92	9dd3384b8ef82ca3	set,dir,vel,phi,pres,cut	set,phi,pres		512	8192	576	20488	18432	0.444
+fine	part2	34	pmgSetupClear	pmgSetupClear	0	0	0	direct	1	1	1	1	1	5.38	5.38	c6729f6119b56847	set,pmgRed	set,pmgRed		128	128	1024	0	32768	0.004
+fine	part2	35	pmgGuess	pmgGuess	0	0	0	indirect@533	241	1	1	241	1	37.17	37.38	f978261ffa33c170	set,dir,pres,pmgF,pmgC,pmgTop	set,pres,pmgF	pmgC,pmgTop	512	123392	1024	332	32768	3.766
+fine	part2	36	pmgWallsG	pmgWallsG	0	0	0	indirect@533	241	1	1	241	1	13.92	13.96	ad5d0d6ef4bf0c83	set,dir,pres,pmgF,pmgTop,pmgRed,phi,vel	set,pres,pmgF,phi	pmgTop,pmgRed	512	123392	1024	12	32768	3.766
+fine	part2	37	pmgFloatInit	pmgFloatInit	0	0	0	indirect@533	241	1	1	241	1	12.33	13.17	63e79be7a2fa7bfc	set,dir,pres,pmgF,src	set,pres		128	30848	1024	0	32768	0.941
+fine	part2	38	pmgFloatHook	pmgFloatHook	0	0	0	indirect@533	241	1	1	241	1	62.58	63.08	cf5d12adc19c6cfd	set,dir,pres,pmgF,src	set,pres		128	30848	1024	108	32768	0.941
+fine	part2	39	pmgFloatSum	pmgFloatSum	0	0	0	indirect@533	241	1	1	241	1	36.42	36.67	8051ab4e837e9233	set,dir,pres,pmgF,src	set,pres		128	30848	1024	636	32768	0.941
+fine	part2	40	pmgFloatFix	pmgFloatFix	0	0	0	indirect@533	241	1	1	241	1	12.63	13.29	c046a59bb03031b7	set,dir,pres,pmgF,src	set,pres		128	30848	1024	0	32768	0.941
+fine	part2	41	pmgSetupF	pmgSetupF	0	0	0	indirect@533	241	1	1	241	1	62.83	75.29	f5dceb903353fb78	set,dir,pres,pmgF,pmgC,pmgTop	set,pres,pmgF,pmgC,pmgTop		512	123392	1024	25068	32768	3.766
+fine	part2	42	pmgCoarsenC	pmgCoarsenC	0	0	0	indirect@132	16	1	1	16	1	27.33	27.42	e09302760fbda0aa	set,dir,pres,pmgC	set,pres,pmgC		512	8192	1024	18204	32768	0.250
+fine	part2	43	pmgCoarsenTop	pmgCoarsenTop	0	1028443341	0	direct	1	1	1	1	1	70.58	70.58	379ebae0a070a3e5	set,dir,pmgC,pmgTop,args	set,pmgTop,args	pmgC	1024	1024	896	26664	28672	0.036
+fine	part2	44	pmgPreS	pmgPreS	0	0	0	indirect@527	143	1	1	143	1	25.25	25.41	854601bf93e27c42	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	73216	1024	4328	32768	2.234
+fine	part2	45	pmgPreU	pmgPreU	0	0	0	indirect@512	72	1	1	72	1	19.63	19.63	fddffdc4ef62ec8d	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	4328	32768	1.125
+fine	part2	46	pmgNativePre0	pmgNativePre0	0	0	0	indirect@515	16	1	1	16	1	8.92	10.00	55f5d9c814af85c3	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	47	pmgDown0	pmgDown0	0	0	0	indirect@512	72	1	1	72	1	21.29	21.29	29dd42b30e4701bd	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	2632	32768	1.125
+fine	part2	48	pmgNativePre1	pmgNativePre1	0	0	0	indirect@515	16	1	1	16	1	8.58	9.83	8432c19cc07ff209	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	6520	32768	0.250
+fine	part2	49	pmgDown1	pmgDown1	0	0	0	indirect@512	72	1	1	72	1	15.67	16.25	6f879c2e0ac81d5b	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	4608	1024	584	32768	0.141
+fine	part2	50	pmgDown1C	pmgDown1C	0	0	0	indirect@515	16	1	1	16	1	16.00	17.42	fad17bb6f375f375	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	51	pmgDown2	pmgDown2	0	0	0	indirect@515	16	1	1	16	1	19.08	19.83	071f1369b226d14e	set,dir,pmgC	set,pmgC		512	8192	1024	2420	32768	0.250
+fine	part2	52	pmgDown3	pmgDown3	0	0	0	indirect@515	16	1	1	16	1	20.58	22.63	f39403cd070f84da	set,dir,pmgC	set,pmgC		64	1024	1024	404	32768	0.031
+fine	part2	53	pmgTopCycle	pmgTopCycle	0	0	0	indirect@518	1	1	1	1	1	55.54	59.16	bab57e5771a0adad	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	1024	1024	15884	32768	0.031
+fine	part2	54	pmgUp3	pmgUp3	0	0	0	indirect@515	16	1	1	16	1	16.71	18.46	56fe7ba60be19a88	set,dir,pmgC	set,pmgC		64	1024	1024	372	32768	0.031
+fine	part2	55	pmgUp2	pmgUp2	0	0	0	indirect@515	16	1	1	16	1	17.33	19.17	f65aedb7b0384734	set,dir,pmgC	set,pmgC		512	8192	1024	2164	32768	0.250
+fine	part2	56	pmgNativePost1	pmgNativePost1	0	0	0	indirect@515	16	1	1	16	1	8.21	9.88	81a6f083df878b2d	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	57	pmgUp1	pmgUp1	0	0	0	indirect@512	72	1	1	72	1	19.75	21.25	04e09c15bb8a82e8	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	4608	1024	584	32768	0.141
+fine	part2	58	pmgNativePost0	pmgNativePost0	0	0	0	indirect@515	16	1	1	16	1	8.75	10.87	d9b4f2f17a7b1130	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	8192	1024	6680	32768	0.250
+fine	part2	59	pmgPostU	pmgPostU	0	0	0	indirect@512	72	1	1	72	1	18.75	19.71	f7b141e0584bdccf	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	4328	32768	1.125
+fine	part2	60	pmgPostS	pmgPostS	0	0	0	indirect@527	143	1	1	143	1	23.37	25.13	2d32450c76533e3a	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	73216	1024	4328	32768	2.234
+fine	part2	61	pmgPostZ	pmgPostZ	0	0	0	indirect@512	72	1	1	72	1	20.25	21.54	0d7e704c10aa83bf	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	36864	1024	6664	32768	1.125
+fine	part2	62	pmgDirection	pmgDirection	0	0	0	indirect@530	88	1	1	88	1	32.00	34.21	dde49246a8b64d1d	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	45056	1024	4972	32768	1.375
+fine	part2	63	pmgUpdate	pmgUpdate	0	0	0	indirect@530	88	1	1	88	1	37.08	38.21	3cb88b88778c54da	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	45056	1024	6792	32768	1.375
+fine	part2	64	pmgWallGate	pmgWallGate	0	1028443341	0	direct	1	1	1	1	1	5.67	5.88	91a02860e6bb0289	set,args,pmgTop	set,args	pmgTop	1	1	1024	0	32768	0.000
+fine	part2	65	pmgWallsF	pmgWallsF	0	0	0	indirect@521	72	1	1	72	1	20.08	20.79	d54701ba289bb8a2	set,dir,pres,pmgF,pmgTop,pmgRed,phi,vel	set,pres,pmgF,phi	pmgTop,pmgRed	512	36864	1024	4344	32768	1.125
+fine	part2	66	pmgWallsC	pmgWallsC	0	0	0	indirect@524	16	1	1	16	1	10.37	10.46	096e324bf31ae152	set,dir,pres,pmgC,pmgRed,phi,vel	set,pres,pmgC,phi	pmgRed	512	8192	1024	132	32768	0.250
+fine	part2	67	pmgCheck	pmgCheck	0	1028443341	0	direct	1	1	1	1	1	10.71	10.83	bae4414c969cb4aa	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+fine	part2	68	pmgPreS	pmgPreS	1	0	0	indirect@527	143	1	1	143	1	23.67	24.12	854601bf93e27c42	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	73216	1024	4328	32768	2.234
+fine	part2	69	pmgPreU	pmgPreU	1	0	0	indirect@512	72	1	1	72	1	18.71	18.96	fddffdc4ef62ec8d	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	4328	32768	1.125
+fine	part2	70	pmgNativePre0	pmgNativePre0	1	0	0	indirect@515	16	1	1	16	1	9.58	9.63	55f5d9c814af85c3	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	71	pmgDown0	pmgDown0	1	0	0	indirect@512	72	1	1	72	1	21.08	21.12	29dd42b30e4701bd	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	2632	32768	1.125
+fine	part2	72	pmgNativePre1	pmgNativePre1	1	0	0	indirect@515	16	1	1	16	1	9.58	9.63	8432c19cc07ff209	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	6520	32768	0.250
+fine	part2	73	pmgDown1	pmgDown1	1	0	0	indirect@512	72	1	1	72	1	15.37	15.96	6f879c2e0ac81d5b	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	4608	1024	584	32768	0.141
+fine	part2	74	pmgDown1C	pmgDown1C	1	0	0	indirect@515	16	1	1	16	1	15.83	16.21	fad17bb6f375f375	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	75	pmgDown2	pmgDown2	1	0	0	indirect@515	16	1	1	16	1	18.75	18.79	071f1369b226d14e	set,dir,pmgC	set,pmgC		512	8192	1024	2420	32768	0.250
+fine	part2	76	pmgDown3	pmgDown3	1	0	0	indirect@515	16	1	1	16	1	21.29	21.42	f39403cd070f84da	set,dir,pmgC	set,pmgC		64	1024	1024	404	32768	0.031
+fine	part2	77	pmgTopCycle	pmgTopCycle	1	0	0	indirect@518	1	1	1	1	1	54.67	55.04	bab57e5771a0adad	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	1024	1024	15884	32768	0.031
+fine	part2	78	pmgUp3	pmgUp3	1	0	0	indirect@515	16	1	1	16	1	16.96	18.04	56fe7ba60be19a88	set,dir,pmgC	set,pmgC		64	1024	1024	372	32768	0.031
+fine	part2	79	pmgUp2	pmgUp2	1	0	0	indirect@515	16	1	1	16	1	18.21	18.25	f65aedb7b0384734	set,dir,pmgC	set,pmgC		512	8192	1024	2164	32768	0.250
+fine	part2	80	pmgNativePost1	pmgNativePost1	1	0	0	indirect@515	16	1	1	16	1	9.54	9.75	81a6f083df878b2d	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	81	pmgUp1	pmgUp1	1	0	0	indirect@512	72	1	1	72	1	19.67	19.83	04e09c15bb8a82e8	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	4608	1024	584	32768	0.141
+fine	part2	82	pmgNativePost0	pmgNativePost0	1	0	0	indirect@515	16	1	1	16	1	9.63	10.00	d9b4f2f17a7b1130	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	8192	1024	6680	32768	0.250
+fine	part2	83	pmgPostU	pmgPostU	1	0	0	indirect@512	72	1	1	72	1	19.04	19.21	f7b141e0584bdccf	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	4328	32768	1.125
+fine	part2	84	pmgPostS	pmgPostS	1	0	0	indirect@527	143	1	1	143	1	24.13	24.29	2d32450c76533e3a	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	73216	1024	4328	32768	2.234
+fine	part2	85	pmgPostZ	pmgPostZ	1	0	0	indirect@512	72	1	1	72	1	18.75	20.12	0d7e704c10aa83bf	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	36864	1024	6664	32768	1.125
+fine	part2	86	pmgDirection	pmgDirection	1	0	0	indirect@530	88	1	1	88	1	32.46	32.58	dde49246a8b64d1d	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	45056	1024	4972	32768	1.375
+fine	part2	87	pmgUpdate	pmgUpdate	1	0	0	indirect@530	88	1	1	88	1	35.46	36.88	3cb88b88778c54da	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	45056	1024	6792	32768	1.375
+fine	part2	88	pmgCheck	pmgCheck	1	1028443341	0	direct	1	1	1	1	1	8.87	10.42	bae4414c969cb4aa	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+fine	part2	89	pmgPreS	pmgPreS	2	0	0	indirect@527	143	1	1	143	1	22.92	23.58	854601bf93e27c42	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	73216	1024	4328	32768	2.234
+fine	part2	90	pmgPreU	pmgPreU	2	0	0	indirect@512	72	1	1	72	1	18.00	18.50	fddffdc4ef62ec8d	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	4328	32768	1.125
+fine	part2	91	pmgNativePre0	pmgNativePre0	2	0	0	indirect@515	16	1	1	16	1	8.38	9.46	55f5d9c814af85c3	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	92	pmgDown0	pmgDown0	2	0	0	indirect@512	72	1	1	72	1	19.67	21.00	29dd42b30e4701bd	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	2632	32768	1.125
+fine	part2	93	pmgNativePre1	pmgNativePre1	2	0	0	indirect@515	16	1	1	16	1	8.58	9.46	8432c19cc07ff209	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	6520	32768	0.250
+fine	part2	94	pmgDown1	pmgDown1	2	0	0	indirect@512	72	1	1	72	1	14.54	15.38	6f879c2e0ac81d5b	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	4608	1024	584	32768	0.141
+fine	part2	95	pmgDown1C	pmgDown1C	2	0	0	indirect@515	16	1	1	16	1	14.71	16.04	fad17bb6f375f375	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	96	pmgDown2	pmgDown2	2	0	0	indirect@515	16	1	1	16	1	17.71	19.08	071f1369b226d14e	set,dir,pmgC	set,pmgC		512	8192	1024	2420	32768	0.250
+fine	part2	97	pmgDown3	pmgDown3	2	0	0	indirect@515	16	1	1	16	1	19.88	21.96	f39403cd070f84da	set,dir,pmgC	set,pmgC		64	1024	1024	404	32768	0.031
+fine	part2	98	pmgTopCycle	pmgTopCycle	2	0	0	indirect@518	1	1	1	1	1	50.46	54.54	bab57e5771a0adad	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	1024	1024	15884	32768	0.031
+fine	part2	99	pmgUp3	pmgUp3	2	0	0	indirect@515	16	1	1	16	1	15.75	17.58	56fe7ba60be19a88	set,dir,pmgC	set,pmgC		64	1024	1024	372	32768	0.031
+fine	part2	100	pmgUp2	pmgUp2	2	0	0	indirect@515	16	1	1	16	1	16.38	18.21	f65aedb7b0384734	set,dir,pmgC	set,pmgC		512	8192	1024	2164	32768	0.250
+fine	part2	101	pmgNativePost1	pmgNativePost1	2	0	0	indirect@515	16	1	1	16	1	8.21	9.50	81a6f083df878b2d	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	102	pmgUp1	pmgUp1	2	0	0	indirect@512	72	1	1	72	1	18.58	20.13	04e09c15bb8a82e8	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	4608	1024	584	32768	0.141
+fine	part2	103	pmgNativePost0	pmgNativePost0	2	0	0	indirect@515	16	1	1	16	1	8.63	10.21	d9b4f2f17a7b1130	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	8192	1024	6680	32768	0.250
+fine	part2	104	pmgPostU	pmgPostU	2	0	0	indirect@512	72	1	1	72	1	17.79	19.42	f7b141e0584bdccf	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	4328	32768	1.125
+fine	part2	105	pmgPostS	pmgPostS	2	0	0	indirect@527	143	1	1	143	1	22.71	24.25	2d32450c76533e3a	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	73216	1024	4328	32768	2.234
+fine	part2	106	pmgPostZ	pmgPostZ	2	0	0	indirect@512	72	1	1	72	1	18.54	19.92	0d7e704c10aa83bf	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	36864	1024	6664	32768	1.125
+fine	part2	107	pmgDirection	pmgDirection	2	0	0	indirect@530	88	1	1	88	1	30.79	32.54	dde49246a8b64d1d	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	45056	1024	4972	32768	1.375
+fine	part2	108	pmgUpdate	pmgUpdate	2	0	0	indirect@530	88	1	1	88	1	34.96	36.46	3cb88b88778c54da	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	45056	1024	6792	32768	1.375
+fine	part2	109	pmgCheck	pmgCheck	2	1028443341	0	direct	1	1	1	1	1	8.17	10.08	bae4414c969cb4aa	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+fine	part2	110	pmgPreS	pmgPreS	3	0	0	indirect@527	143	1	1	143	1	22.33	24.21	854601bf93e27c42	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	73216	1024	4328	32768	2.234
+fine	part2	111	pmgPreU	pmgPreU	3	0	0	indirect@512	72	1	1	72	1	17.29	18.58	fddffdc4ef62ec8d	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	4328	32768	1.125
+fine	part2	112	pmgNativePre0	pmgNativePre0	3	0	0	indirect@515	16	1	1	16	1	7.88	9.58	55f5d9c814af85c3	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	113	pmgDown0	pmgDown0	3	0	0	indirect@512	72	1	1	72	1	19.75	21.29	29dd42b30e4701bd	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	2632	32768	1.125
+fine	part2	114	pmgNativePre1	pmgNativePre1	3	0	0	indirect@515	16	1	1	16	1	7.92	9.58	8432c19cc07ff209	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	6520	32768	0.250
+fine	part2	115	pmgDown1	pmgDown1	3	0	0	indirect@512	72	1	1	72	1	14.17	15.46	6f879c2e0ac81d5b	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	4608	1024	584	32768	0.141
+fine	part2	116	pmgDown1C	pmgDown1C	3	0	0	indirect@515	16	1	1	16	1	14.71	16.04	fad17bb6f375f375	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	117	pmgDown2	pmgDown2	3	0	0	indirect@515	16	1	1	16	1	16.92	18.75	071f1369b226d14e	set,dir,pmgC	set,pmgC		512	8192	1024	2420	32768	0.250
+fine	part2	118	pmgDown3	pmgDown3	3	0	0	indirect@515	16	1	1	16	1	19.54	21.58	f39403cd070f84da	set,dir,pmgC	set,pmgC		64	1024	1024	404	32768	0.031
+fine	part2	119	pmgTopCycle	pmgTopCycle	3	0	0	indirect@518	1	1	1	1	1	49.25	54.92	bab57e5771a0adad	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	1024	1024	15884	32768	0.031
+fine	part2	120	pmgUp3	pmgUp3	3	0	0	indirect@515	16	1	1	16	1	15.29	17.38	56fe7ba60be19a88	set,dir,pmgC	set,pmgC		64	1024	1024	372	32768	0.031
+fine	part2	121	pmgUp2	pmgUp2	3	0	0	indirect@515	16	1	1	16	1	16.46	17.71	f65aedb7b0384734	set,dir,pmgC	set,pmgC		512	8192	1024	2164	32768	0.250
+fine	part2	122	pmgNativePost1	pmgNativePost1	3	0	0	indirect@515	16	1	1	16	1	8.13	9.71	81a6f083df878b2d	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	8192	1024	4344	32768	0.250
+fine	part2	123	pmgUp1	pmgUp1	3	0	0	indirect@512	72	1	1	72	1	18.66	19.96	04e09c15bb8a82e8	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	4608	1024	584	32768	0.141
+fine	part2	124	pmgNativePost0	pmgNativePost0	3	0	0	indirect@515	16	1	1	16	1	10.21	11.17	d9b4f2f17a7b1130	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	8192	1024	6680	32768	0.250
+fine	part2	125	pmgPostU	pmgPostU	3	0	0	indirect@512	72	1	1	72	1	18.96	19.29	f7b141e0584bdccf	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	36864	1024	4328	32768	1.125
+fine	part2	126	pmgPostS	pmgPostS	3	0	0	indirect@527	143	1	1	143	1	23.79	25.54	2d32450c76533e3a	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	73216	1024	4328	32768	2.234
+fine	part2	127	pmgPostZ	pmgPostZ	3	0	0	indirect@512	72	1	1	72	1	19.79	19.92	0d7e704c10aa83bf	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	36864	1024	6664	32768	1.125
+fine	part2	128	pmgDirection	pmgDirection	3	0	0	indirect@530	88	1	1	88	1	32.96	33.00	dde49246a8b64d1d	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	45056	1024	4972	32768	1.375
+fine	part2	129	pmgUpdate	pmgUpdate	3	0	0	indirect@530	88	1	1	88	1	36.33	36.79	3cb88b88778c54da	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	45056	1024	6792	32768	1.375
+fine	part2	130	pmgCheck	pmgCheck	3	1028443341	0	direct	1	1	1	1	1	9.75	10.25	bae4414c969cb4aa	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+fine	part2	131	pmgPreS	pmgPreS	4	0	0	indirect@527	0	1	1	0	1	6.17	6.46	854601bf93e27c42	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	132	pmgPreU	pmgPreU	4	0	0	indirect@512	0	1	1	0	1	5.83	6.04	fddffdc4ef62ec8d	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	133	pmgNativePre0	pmgNativePre0	4	0	0	indirect@515	0	1	1	0	1	5.96	6.13	55f5d9c814af85c3	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	134	pmgDown0	pmgDown0	4	0	0	indirect@512	0	1	1	0	1	6.04	6.46	29dd42b30e4701bd	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	2632	32768	0.000
+fine	part2	135	pmgNativePre1	pmgNativePre1	4	0	0	indirect@515	0	1	1	0	1	5.75	6.00	8432c19cc07ff209	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	6520	32768	0.000
+fine	part2	136	pmgDown1	pmgDown1	4	0	0	indirect@512	0	1	1	0	1	5.88	5.96	6f879c2e0ac81d5b	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	0	1024	584	32768	0.000
+fine	part2	137	pmgDown1C	pmgDown1C	4	0	0	indirect@515	0	1	1	0	1	6.04	6.08	fad17bb6f375f375	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	138	pmgDown2	pmgDown2	4	0	0	indirect@515	0	1	1	0	1	6.00	6.04	071f1369b226d14e	set,dir,pmgC	set,pmgC		512	0	1024	2420	32768	0.000
+fine	part2	139	pmgDown3	pmgDown3	4	0	0	indirect@515	0	1	1	0	1	6.04	6.17	f39403cd070f84da	set,dir,pmgC	set,pmgC		64	0	1024	404	32768	0.000
+fine	part2	140	pmgTopCycle	pmgTopCycle	4	0	0	indirect@518	0	1	1	0	1	6.08	8.21	bab57e5771a0adad	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	0	1024	15884	32768	0.000
+fine	part2	141	pmgUp3	pmgUp3	4	0	0	indirect@515	0	1	1	0	1	6.00	8.88	56fe7ba60be19a88	set,dir,pmgC	set,pmgC		64	0	1024	372	32768	0.000
+fine	part2	142	pmgUp2	pmgUp2	4	0	0	indirect@515	0	1	1	0	1	5.83	6.25	f65aedb7b0384734	set,dir,pmgC	set,pmgC		512	0	1024	2164	32768	0.000
+fine	part2	143	pmgNativePost1	pmgNativePost1	4	0	0	indirect@515	0	1	1	0	1	5.67	6.00	81a6f083df878b2d	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	144	pmgUp1	pmgUp1	4	0	0	indirect@512	0	1	1	0	1	6.13	8.29	04e09c15bb8a82e8	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	0	1024	584	32768	0.000
+fine	part2	145	pmgNativePost0	pmgNativePost0	4	0	0	indirect@515	0	1	1	0	1	5.92	6.13	d9b4f2f17a7b1130	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	0	1024	6680	32768	0.000
+fine	part2	146	pmgPostU	pmgPostU	4	0	0	indirect@512	0	1	1	0	1	5.71	7.63	f7b141e0584bdccf	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	147	pmgPostS	pmgPostS	4	0	0	indirect@527	0	1	1	0	1	5.50	6.13	2d32450c76533e3a	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	148	pmgPostZ	pmgPostZ	4	0	0	indirect@512	0	1	1	0	1	5.79	6.00	0d7e704c10aa83bf	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	0	1024	6664	32768	0.000
+fine	part2	149	pmgDirection	pmgDirection	4	0	0	indirect@530	0	1	1	0	1	6.17	8.21	dde49246a8b64d1d	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	4972	32768	0.000
+fine	part2	150	pmgUpdate	pmgUpdate	4	0	0	indirect@530	0	1	1	0	1	6.08	6.25	3cb88b88778c54da	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	6792	32768	0.000
+fine	part2	151	pmgCheck	pmgCheck	4	1028443341	0	direct	1	1	1	1	1	6.88	9.87	bae4414c969cb4aa	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+fine	part2	152	pmgPreS	pmgPreS	5	0	0	indirect@527	0	1	1	0	1	6.13	6.25	854601bf93e27c42	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	153	pmgPreU	pmgPreU	5	0	0	indirect@512	0	1	1	0	1	5.67	6.13	fddffdc4ef62ec8d	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	154	pmgNativePre0	pmgNativePre0	5	0	0	indirect@515	0	1	1	0	1	6.29	6.29	55f5d9c814af85c3	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	155	pmgDown0	pmgDown0	5	0	0	indirect@512	0	1	1	0	1	6.08	6.17	29dd42b30e4701bd	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	2632	32768	0.000
+fine	part2	156	pmgNativePre1	pmgNativePre1	5	0	0	indirect@515	0	1	1	0	1	5.79	5.79	8432c19cc07ff209	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	6520	32768	0.000
+fine	part2	157	pmgDown1	pmgDown1	5	0	0	indirect@512	0	1	1	0	1	5.92	6.00	6f879c2e0ac81d5b	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	0	1024	584	32768	0.000
+fine	part2	158	pmgDown1C	pmgDown1C	5	0	0	indirect@515	0	1	1	0	1	6.04	6.08	fad17bb6f375f375	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	159	pmgDown2	pmgDown2	5	0	0	indirect@515	0	1	1	0	1	5.96	6.17	071f1369b226d14e	set,dir,pmgC	set,pmgC		512	0	1024	2420	32768	0.000
+fine	part2	160	pmgDown3	pmgDown3	5	0	0	indirect@515	0	1	1	0	1	6.08	6.21	f39403cd070f84da	set,dir,pmgC	set,pmgC		64	0	1024	404	32768	0.000
+fine	part2	161	pmgTopCycle	pmgTopCycle	5	0	0	indirect@518	0	1	1	0	1	6.00	6.42	bab57e5771a0adad	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	0	1024	15884	32768	0.000
+fine	part2	162	pmgUp3	pmgUp3	5	0	0	indirect@515	0	1	1	0	1	5.92	6.33	56fe7ba60be19a88	set,dir,pmgC	set,pmgC		64	0	1024	372	32768	0.000
+fine	part2	163	pmgUp2	pmgUp2	5	0	0	indirect@515	0	1	1	0	1	5.92	6.25	f65aedb7b0384734	set,dir,pmgC	set,pmgC		512	0	1024	2164	32768	0.000
+fine	part2	164	pmgNativePost1	pmgNativePost1	5	0	0	indirect@515	0	1	1	0	1	5.92	6.17	81a6f083df878b2d	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	165	pmgUp1	pmgUp1	5	0	0	indirect@512	0	1	1	0	1	5.92	6.75	04e09c15bb8a82e8	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	0	1024	584	32768	0.000
+fine	part2	166	pmgNativePost0	pmgNativePost0	5	0	0	indirect@515	0	1	1	0	1	5.92	5.92	d9b4f2f17a7b1130	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	0	1024	6680	32768	0.000
+fine	part2	167	pmgPostU	pmgPostU	5	0	0	indirect@512	0	1	1	0	1	5.71	6.00	f7b141e0584bdccf	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	168	pmgPostS	pmgPostS	5	0	0	indirect@527	0	1	1	0	1	5.58	6.21	2d32450c76533e3a	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	169	pmgPostZ	pmgPostZ	5	0	0	indirect@512	0	1	1	0	1	6.21	6.21	0d7e704c10aa83bf	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	0	1024	6664	32768	0.000
+fine	part2	170	pmgDirection	pmgDirection	5	0	0	indirect@530	0	1	1	0	1	6.29	6.38	dde49246a8b64d1d	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	4972	32768	0.000
+fine	part2	171	pmgUpdate	pmgUpdate	5	0	0	indirect@530	0	1	1	0	1	5.71	6.46	3cb88b88778c54da	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	6792	32768	0.000
+fine	part2	172	pmgCheck	pmgCheck	5	1028443341	0	direct	1	1	1	1	1	6.67	6.88	bae4414c969cb4aa	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+fine	part2	173	pmgPreS	pmgPreS	6	0	0	indirect@527	0	1	1	0	1	6.00	6.33	854601bf93e27c42	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	174	pmgPreU	pmgPreU	6	0	0	indirect@512	0	1	1	0	1	5.88	6.25	fddffdc4ef62ec8d	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	175	pmgNativePre0	pmgNativePre0	6	0	0	indirect@515	0	1	1	0	1	5.96	6.46	55f5d9c814af85c3	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	176	pmgDown0	pmgDown0	6	0	0	indirect@512	0	1	1	0	1	6.00	6.63	29dd42b30e4701bd	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	2632	32768	0.000
+fine	part2	177	pmgNativePre1	pmgNativePre1	6	0	0	indirect@515	0	1	1	0	1	5.83	6.79	8432c19cc07ff209	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	6520	32768	0.000
+fine	part2	178	pmgDown1	pmgDown1	6	0	0	indirect@512	0	1	1	0	1	5.79	6.17	6f879c2e0ac81d5b	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	0	1024	584	32768	0.000
+fine	part2	179	pmgDown1C	pmgDown1C	6	0	0	indirect@515	0	1	1	0	1	5.87	5.88	fad17bb6f375f375	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	180	pmgDown2	pmgDown2	6	0	0	indirect@515	0	1	1	0	1	6.08	6.17	071f1369b226d14e	set,dir,pmgC	set,pmgC		512	0	1024	2420	32768	0.000
+fine	part2	181	pmgDown3	pmgDown3	6	0	0	indirect@515	0	1	1	0	1	5.92	6.13	f39403cd070f84da	set,dir,pmgC	set,pmgC		64	0	1024	404	32768	0.000
+fine	part2	182	pmgTopCycle	pmgTopCycle	6	0	0	indirect@518	0	1	1	0	1	5.58	6.00	bab57e5771a0adad	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	0	1024	15884	32768	0.000
+fine	part2	183	pmgUp3	pmgUp3	6	0	0	indirect@515	0	1	1	0	1	5.79	6.08	56fe7ba60be19a88	set,dir,pmgC	set,pmgC		64	0	1024	372	32768	0.000
+fine	part2	184	pmgUp2	pmgUp2	6	0	0	indirect@515	0	1	1	0	1	5.75	6.04	f65aedb7b0384734	set,dir,pmgC	set,pmgC		512	0	1024	2164	32768	0.000
+fine	part2	185	pmgNativePost1	pmgNativePost1	6	0	0	indirect@515	0	1	1	0	1	5.88	6.21	81a6f083df878b2d	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	186	pmgUp1	pmgUp1	6	0	0	indirect@512	0	1	1	0	1	5.96	6.17	04e09c15bb8a82e8	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	0	1024	584	32768	0.000
+fine	part2	187	pmgNativePost0	pmgNativePost0	6	0	0	indirect@515	0	1	1	0	1	5.50	6.00	d9b4f2f17a7b1130	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	0	1024	6680	32768	0.000
+fine	part2	188	pmgPostU	pmgPostU	6	0	0	indirect@512	0	1	1	0	1	5.88	6.37	f7b141e0584bdccf	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	189	pmgPostS	pmgPostS	6	0	0	indirect@527	0	1	1	0	1	5.83	6.13	2d32450c76533e3a	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	190	pmgPostZ	pmgPostZ	6	0	0	indirect@512	0	1	1	0	1	5.75	6.25	0d7e704c10aa83bf	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	0	1024	6664	32768	0.000
+fine	part2	191	pmgDirection	pmgDirection	6	0	0	indirect@530	0	1	1	0	1	6.00	6.29	dde49246a8b64d1d	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	4972	32768	0.000
+fine	part2	192	pmgUpdate	pmgUpdate	6	0	0	indirect@530	0	1	1	0	1	5.83	6.17	3cb88b88778c54da	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	6792	32768	0.000
+fine	part2	193	pmgCheck	pmgCheck	6	1028443341	0	direct	1	1	1	1	1	6.75	6.92	bae4414c969cb4aa	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+fine	part2	194	pmgPreS	pmgPreS	7	0	0	indirect@527	0	1	1	0	1	5.96	8.21	854601bf93e27c42	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	195	pmgPreU	pmgPreU	7	0	0	indirect@512	0	1	1	0	1	5.88	6.17	fddffdc4ef62ec8d	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	196	pmgNativePre0	pmgNativePre0	7	0	0	indirect@515	0	1	1	0	1	5.67	6.08	55f5d9c814af85c3	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	197	pmgDown0	pmgDown0	7	0	0	indirect@512	0	1	1	0	1	6.08	6.67	29dd42b30e4701bd	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	2632	32768	0.000
+fine	part2	198	pmgNativePre1	pmgNativePre1	7	0	0	indirect@515	0	1	1	0	1	6.58	8.25	8432c19cc07ff209	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	6520	32768	0.000
+fine	part2	199	pmgDown1	pmgDown1	7	0	0	indirect@512	0	1	1	0	1	5.58	6.04	6f879c2e0ac81d5b	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF,pmgC	pres,pmgTop	64	0	1024	584	32768	0.000
+fine	part2	200	pmgDown1C	pmgDown1C	7	0	0	indirect@515	0	1	1	0	1	5.79	6.33	fad17bb6f375f375	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	201	pmgDown2	pmgDown2	7	0	0	indirect@515	0	1	1	0	1	5.75	6.00	071f1369b226d14e	set,dir,pmgC	set,pmgC		512	0	1024	2420	32768	0.000
+fine	part2	202	pmgDown3	pmgDown3	7	0	0	indirect@515	0	1	1	0	1	5.75	6.83	f39403cd070f84da	set,dir,pmgC	set,pmgC		64	0	1024	404	32768	0.000
+fine	part2	203	pmgTopCycle	pmgTopCycle	7	0	0	indirect@518	0	1	1	0	1	5.96	5.96	bab57e5771a0adad	set,dir,pmgC,pmgTop	set,pmgC,pmgTop		1024	0	1024	15884	32768	0.000
+fine	part2	204	pmgUp3	pmgUp3	7	0	0	indirect@515	0	1	1	0	1	5.88	5.92	56fe7ba60be19a88	set,dir,pmgC	set,pmgC		64	0	1024	372	32768	0.000
+fine	part2	205	pmgUp2	pmgUp2	7	0	0	indirect@515	0	1	1	0	1	5.58	6.13	f65aedb7b0384734	set,dir,pmgC	set,pmgC		512	0	1024	2164	32768	0.000
+fine	part2	206	pmgNativePost1	pmgNativePost1	7	0	0	indirect@515	0	1	1	0	1	6.00	6.13	81a6f083df878b2d	set,dir,pres,pmgF,pmgC	set,pmgC	pres,pmgF	512	0	1024	4344	32768	0.000
+fine	part2	207	pmgUp1	pmgUp1	7	0	0	indirect@512	0	1	1	0	1	6.21	6.25	04e09c15bb8a82e8	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	64	0	1024	584	32768	0.000
+fine	part2	208	pmgNativePost0	pmgNativePost0	7	0	0	indirect@515	0	1	1	0	1	6.00	8.58	d9b4f2f17a7b1130	set,dir,pres,pmgF,pmgC,pmgRed	set,pres,pmgC,pmgRed	pmgF	512	0	1024	6680	32768	0.000
+fine	part2	209	pmgPostU	pmgPostU	7	0	0	indirect@512	0	1	1	0	1	6.04	6.08	f7b141e0584bdccf	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	210	pmgPostS	pmgPostS	7	0	0	indirect@527	0	1	1	0	1	6.00	6.04	2d32450c76533e3a	set,dir,pres,pmgF,pmgC,pmgTop	set,pmgF	pres,pmgC,pmgTop	512	0	1024	4328	32768	0.000
+fine	part2	211	pmgPostZ	pmgPostZ	7	0	0	indirect@512	0	1	1	0	1	6.29	6.46	0d7e704c10aa83bf	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgRed	pmgC,pmgTop	512	0	1024	6664	32768	0.000
+fine	part2	212	pmgDirection	pmgDirection	7	0	0	indirect@530	0	1	1	0	1	6.13	6.58	dde49246a8b64d1d	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	4972	32768	0.000
+fine	part2	213	pmgUpdate	pmgUpdate	7	0	0	indirect@530	0	1	1	0	1	6.00	6.25	3cb88b88778c54da	set,dir,pres,pmgF,pmgC,pmgTop,pmgRed	set,pres,pmgF,pmgC,pmgRed	pmgTop	512	0	1024	6792	32768	0.000
+fine	part2	214	pmgCheck	pmgCheck	7	1028443341	0	direct	1	1	1	1	1	7.13	7.38	bae4414c969cb4aa	set,pmgRed,args,pmgTop	set,args	pmgRed,pmgTop	64	64	1024	4	32768	0.002
+fine	part2	215	pmgFinish	pmgFinish	0	0	0	indirect@533	241	1	1	241	1	12.08	12.42	55a8569ec025f901	set,dir,pres,pmgF	set,pres,pmgF		512	123392	1024	4	32768	3.766
+fine	part2	216	pmgFinishC	pmgFinishC	0	0	0	indirect@132	16	1	1	16	1	10.00	10.50	791a0d8117563b1d	set,dir,pres,pmgC	set,pres,pmgC		512	8192	1024	120	32768	0.250
+fine	part2	217	pressureProjectC	pressureProjectC	0	0	0	indirect@132	16	1	1	16	1	69.62	70.08	2953a61826d13f88	set,dir,vel,phi,pres,cut,census	set,vel,phi,pres,census		256	4096	576	36	18432	0.222
+fine	part2	218	pmgPressureDelta	pmgPressureDelta	0	0	0	indirect@132	16	1	1	16	1	17.17	17.58	e278842580c6cfd2	set,dir,pres,pmgC,pmgTop	set,pmgC,pmgTop	pres	512	8192	1024	176	32768	0.250
+fine	part2	219	project	project	0	0	0	indirect@536	241	1	1	241	1	177.79	185.12	2da6ce7b37e12212	set,dir,vel,phi,pres,cut,pmgF	set,vel,phi,pres,pmgF		256	61696	640	6320	20480	3.013
+fine	part2	220	projectDry	projectDry	0	0	0	indirect@536	241	1	1	241	1	28.29	31.54	44f794b06e60a112	set,dir,vel,phi,pres,cut,pmgF	set,vel,phi	pres,pmgF	64	15424	512	10292	16384	0.941
+fine	part2	221	pressureProjectRest	pressureProjectRest	0	0	0	indirect@0	241	1	1	241	1	8.25	8.67	1ad5986c7f015967	set,dir,vel,phi,pres,cut,pmgF	set,phi	vel,pres,pmgF	64	15424	1024	0	32768	0.471
+fine	part2	222	uExtend	uExtend	0	0	0	indirect@0	241	1	1	241	1	267.58	281.29	39f7ee005bdb555a	set,dir,vel,phi,fcell	set,vel		512	123392	896	17220	28672	4.304
+fine	part2	223	pArgs	pArgs	0	1	0	direct	1	1	1	1	1	4.71	4.88	4d486c98e6f2cc29	set,dir,args	set,args		1	1	1024	0	32768	0.000
+fine	part2	224	pJoin	pJoin	0	0	0	indirect@2048	364	1	1	364	1	101.92	104.42	4106cf3b5a710d3c	set,dir,parts,fcell	set		128	46592	1024	0	32768	1.422
+fine	part2	225	pDelta	pDelta	0	0	0	indirect@2048	364	1	1	364	1	56.79	57.00	e2fceb871681c061	set,dir,vel,parts,fcell,pEnergy	set,parts,pEnergy		128	46592	1024	0	32768	1.422
+fine	part2	226	stepEnd	stepEnd	0	0	0	direct	1	1	1	1	1	4.25	4.63	cf9e01521e6c7ea7	set	set		1	1	1024	0	32768	0.000

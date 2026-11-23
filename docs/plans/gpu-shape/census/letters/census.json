@@ -1,0 +1,44 @@
+{
+ "scene": "nbflip-figure-8-letters",
+ "key": "letters",
+ "warmup": 100,
+ "R": 3,
+ "detail": null,
+ "date": "2026-11-23T08:09:43.754Z",
+ "git": {
+  "head": "e8287a76",
+  "status": " M lib/core/webgpu-water-pipeline.ts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n?? tools/experiments/gpu-shape/\n"
+ },
+ "floor": {
+  "min": 3.208,
+  "median": 3.542
+ },
+ "engines": [
+  {
+   "name": "parent",
+   "wall_us": {
+    "part1": 12082.274,
+    "part2": 31868.889,
+    "step": 43951.163
+   },
+   "replaySpan_us": 54065.051,
+   "sumPlacements_us": 44338.95600000004,
+   "alloc_us": 0,
+   "placements": 283,
+   "unstableArgs": 0,
+   "lattice": [
+    256,
+    192,
+    128
+   ],
+   "cap": {
+    "f": 9088,
+    "c": 320,
+    "b": 16,
+    "k": 64,
+    "particles": 1500000,
+    "t": 18176
+   }
+  }
+ ]
+}

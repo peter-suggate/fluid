@@ -1,0 +1,44 @@
+{
+ "scene": "reservoir-seep",
+ "key": "seep",
+ "warmup": 100,
+ "R": 3,
+ "detail": null,
+ "date": "2026-11-23T08:08:03.948Z",
+ "git": {
+  "head": "7d2424f4",
+  "status": " M lib/cloth/stage-timing.ts\n M lib/core/webgpu-water-pipeline.ts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n?? tools/experiments/gpu-shape/\n"
+ },
+ "floor": {
+  "min": 3.207,
+  "median": 3.375
+ },
+ "engines": [
+  {
+   "name": "parent",
+   "wall_us": {
+    "part1": 4295.434,
+    "part2": 15037.062,
+    "step": 19332.496
+   },
+   "replaySpan_us": 28906.976,
+   "sumPlacements_us": 20047.687999999995,
+   "alloc_us": 0,
+   "placements": 290,
+   "unstableArgs": 0,
+   "lattice": [
+    512,
+    288,
+    64
+   ],
+   "cap": {
+    "f": 6400,
+    "c": 400,
+    "b": 16,
+    "k": 912,
+    "particles": 580000,
+    "t": 12800
+   }
+  }
+ ]
+}
