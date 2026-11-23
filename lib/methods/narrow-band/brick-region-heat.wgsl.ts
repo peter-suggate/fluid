@@ -397,10 +397,15 @@ ${uniformTileFineDefectWGSL}
   const certError = k("certError", STILL_PAGE + /* wgsl */`
 var<workgroup> wgGo:u32;
 // The region's 10^3 tile neighbourhood (from 4R - 3): bits 0..1 the seed flags, bit 2 stored (a resident page's tile
-// in the lattice: umKeyStored); then the x pass on 4 x 10 x 10, the y pass on 4 x 4 x 10.
-var<workgroup> sSeed:array<u32,1000>;
-var<workgroup> sX:array<u32,400>;
-var<workgroup> sY:array<u32,160>;
+// in the lattice: umKeyStored); then the x pass on 4 x 10 x 10, the y pass on 4 x 4 x 10. Four entries a word (entry
+// k in bits 8 (k & 3)), a lane a word: 1.6 KB of workgroup memory, not 6.2 (GPU-shape M5, m4-clist.md §6: ~8 groups a
+// core at 6.2 KB under a 1024-thread cap, ~18 at 1.6; frozen paddleboats 0.24 -> 0.21 ms, dam 0.11 -> 0.10, bit for bit).
+var<workgroup> sSeed:array<u32,250>;
+var<workgroup> sX:array<u32,100>;
+var<workgroup> sY:array<u32,40>;
+fn ceSeed(c:u32)->u32{return (sSeed[c>>2u]>>(8u*(c&3u)))&255u;}
+fn ceX(c:u32)->u32{return (sX[c>>2u]>>(8u*(c&3u)))&255u;}
+fn ceY(c:u32)->u32{return (sY[c>>2u]>>(8u*(c&3u)))&255u;}
 var<workgroup> eErr:atomic<u32>;var<workgroup> eRate:atomic<u32>;var<workgroup> eAcc:atomic<u32>;
 var<workgroup> eRel:atomic<u32>;var<workgroup> eClass:atomic<u32>;var<workgroup> eFine:atomic<u32>;
 var<workgroup> eVel:array<atomic<u32>,6>;
@@ -430,31 +435,34 @@ fn ceMean(T:vec3i)->vec3f{
   }
   if(workgroupUniformLoad(&wgGo)==2u){if(lane==0u){rgDeep(cs,r,false);}return;}
   let origin=4*rgCoord(cs,r)-vec3i(3);
-  for(var k=lane;k<1000u;k+=64u){
+  for(var m=lane;m<250u;m+=64u){var word=0u;for(var b=0u;b<4u;b++){let k=4u*m+b;
     let T=origin+vec3i(i32(k%10u),i32((k/10u)%10u),i32(k/100u));var w=0u;
     if(nbTileInLattice(T)){
       let ps=nbCSlotOfPage(T>>vec3u(3u));
       if(ps!=NB_NONE){w=4u|select(0u,3u,(census[NC_S*ps+RG_TC+16u*ncTileLocal(T)+8u]&1u)!=0u);}
     }
-    sSeed[k]=w;
+    word|=w<<(8u*b);}
+    sSeed[m]=word;
   }
   workgroupBarrier();
-  for(var k=lane;k<400u;k+=64u){
+  for(var m=lane;m<100u;m+=64u){var word=0u;for(var b=0u;b<4u;b++){let k=4u*m+b;
     let c=3u+(k%4u)+10u*(k/4u);var f=0u;
-    if((sSeed[c]&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(sSeed[u32(i32(c)+d)],d);}}
-    sX[k]=f;
+    if((ceSeed(c)&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(ceSeed(u32(i32(c)+d)),d);}}
+    word|=f<<(8u*b);}
+    sX[m]=word;
   }
   workgroupBarrier();
-  for(var k=lane;k<160u;k+=64u){
+  for(var m=lane;m<40u;m+=64u){var word=0u;for(var b=0u;b<4u;b++){let k=4u*m+b;
     let c=(k%4u)+4u*(3u+((k/4u)%4u)+10u*(k/16u));var f=0u;
-    if((sX[c]&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(sX[u32(i32(c)+4*d)],d);}}
-    sY[k]=f;
+    if((ceX(c)&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(ceX(u32(i32(c)+4*d)),d);}}
+    word|=f<<(8u*b);}
+    sY[m]=word;
   }
   workgroupBarrier();
   let i=rgTile(r,lane);let t=xTileOf(cs,i);
   if(nbTileInLattice(t)){
     let c=(lane&15u)+16u*(3u+(lane>>4u));var support=0u;
-    for(var d=-3;d<=3;d++){support|=ceDilate(sY[u32(i32(c)+16*d)],d);}
+    for(var d=-3;d<=3;d++){support|=ceDilate(ceY(u32(i32(c)+16*d)),d);}
     let o=NC_S*cs+RG_TC+16u*i;let h=ncH();
     let bits=census[o+8u];let width=census[o+5u];
     // tuReaderClass: 0 unused, 1 submerged, 2 surface (open: every cell at M2).
