@@ -54,15 +54,17 @@ export class ClothStagePasses {
   private current?: GPUComputePassEncoder;
   private stage?: ClothStageId;
   /** Bind groups set so far, replayed into each new pass so a group set before its pipeline survives the split. */
-  private readonly groups = new Map<number, [GPUBindGroup | null, Uint32Array | undefined]>();
+  private readonly groups = new Map<number, [GPUBindGroup | null, number[] | undefined]>();
   readonly pass: GPUComputePassEncoder;
 
   constructor(private readonly encoder: GPUCommandEncoder, private readonly prefix = 'cloth') {
     const setPipeline = (pipeline: GPUComputePipeline) => this.open(clothStageOf(pipeline.label)).setPipeline(pipeline);
     const setBindGroup = (index: number, group: GPUBindGroup | null, offsets?: Iterable<number>) => {
-      const dynamic = offsets ? Uint32Array.from(offsets) : undefined;
+      // A plain array: Dawn's node binding reads a Uint32Array as the (data, start, length) overload.
+      const dynamic = offsets ? Array.from(offsets) : undefined;
       this.groups.set(index, [group, dynamic]);
-      this.open(this.stage ?? 'other').setBindGroup(index, group, dynamic ?? []);
+      const pass = this.open(this.stage ?? 'other');
+      if (dynamic?.length) pass.setBindGroup(index, group, dynamic); else pass.setBindGroup(index, group);
     };
     const end = () => this.end();
     const live = () => this.open(this.stage ?? 'other');
@@ -83,7 +85,7 @@ export class ClothStagePasses {
     this.current?.end();
     this.stage = stage;
     this.current = this.encoder.beginComputePass({ label: `${this.prefix}:${stage}` });
-    for (const [index, [group, offsets]] of this.groups) this.current.setBindGroup(index, group, offsets ?? []);
+    for (const [index, [group, offsets]] of this.groups) { if (offsets?.length) this.current.setBindGroup(index, group, offsets); else this.current.setBindGroup(index, group); }
     return this.current;
   }
 
