@@ -44,12 +44,13 @@ async function solverFor(device: GPUDevice, s: ReturnType<typeof openTopScene>) 
 
 // The volume fractions over the whole lattice: the total, the liquid above the container's top, and in the lattice's
 // last brick layer. The solver's own presentation spans the container (the renderer's extent), so the headroom is read
-// through a presentation of the lattice, made once a solver.
+// through a presentation of the lattice, made once a solver: the plain copy (smooth off), the physics' own surface,
+// as the drawn copy's tricubic rounds the column's corners (presentVertex).
 const lattices = new WeakMap<object, BrickPresentation>();
 async function volumes(device: GPUDevice, solver: Awaited<ReturnType<typeof createBrickSolver>>, top: number) {
   const e = solver.brickEngine;
   let full = lattices.get(solver);
-  if (!full) { full = await BrickPresentation.create(e, (solver as unknown as { options: { farPhi_m: number } }).options.farPhi_m); lattices.set(solver, full); }
+  if (!full) { full = await BrickPresentation.create(e, (solver as unknown as { options: { farPhi_m: number } }).options.farPhi_m, e.layout.lattice, true, false); lattices.set(solver, full); }
   await e.fence();
   const encoder = device.createCommandEncoder(); full.encode(encoder); device.queue.submit([encoder.finish()]);
   const tex = full.volume, [w, hgt, dep] = [tex.width, tex.height, tex.depthOrArrayLayers], bpr = Math.ceil(4 * w / 256) * 256;

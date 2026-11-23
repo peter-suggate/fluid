@@ -18,6 +18,7 @@ import { SimulationFailureError } from "../../core/simulation-failure";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import type { BrickNBFlipSolver } from "./brick-solver";
 import { createBrickSolver } from "./brick-method";
+import { BrickPresentation } from "./brick-present";
 import "../index";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
@@ -76,6 +77,12 @@ test("brick solver (GPU): the app's ledger advances the dam one step a frame, bo
  * dam at t = 70 dt, where 4h-owned regions hold no F brick. The old copy read F bricks only: the probe counts the
  * vertices where that reading's sign differs (grey holes along the floor, stair banding on the side faces in the app).
  */
+/**
+ * The presentation's plain copy (smooth off) is the tier authority's φ at every vertex. The drawn copy (the solver's)
+ * is presentVertex's: the CPU oracle below rebuilds it from the authority, the C corner words and the tiles' coarse
+ * bits, and at every tile corner it is the authority's word (the cubic takes the corners, and C mirrors F's word at a
+ * fine-owned corner, lcMirror).
+ */
 test("brick solver (GPU): the presentation is the tier authority's phi at every vertex", GPU, async () => {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   await withUniformDevice("brick presentation", async device => {
@@ -91,6 +98,7 @@ test("brick solver (GPU): the presentation is the tier authority's phi at every 
 @group(0) @binding(2) var<storage,read> phi:array<u32>;
 @group(0) @binding(3) var<storage,read> vel:array<f32>;
 @group(0) @binding(4) var<storage,read_write> out:array<f32>;
+@group(0) @binding(5) var<storage,read_write> corners:array<f32>;
 ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
 @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) n:vec3u){
   let i=g.x+64u*n.x*g.y;if(i>=${count}u){return;}
@@ -99,27 +107,45 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
   out[2u*i]=nbVertexPhi(v);
   let s=nbFSlotOfBrick(v>>vec3u(3u));
   out[2u*i+1u]=select(NB_PHI_AIR,bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]),s<NB_SEAM);
+  // Tile corner T (0..N/4 an axis): its C word, and whether tile T is resident and 4h-owned.
+  let C=vec3u(${N.map(n => n / 4 + 1).join(",")});
+  if(i<C.x*C.y*C.z){
+    let T=vec3i(vec3u(i%C.x,(i/C.x)%C.y,i/(C.x*C.y)));
+    corners[2u*i]=nbCVertex(T);
+    corners[2u*i+1u]=select(0.0,1.0,nbTileInLattice(T)&&nbCSlotOfPage(T>>vec3u(3u))!=NB_NONE&&!nbTileOwnerH(T));
+  }
 }`;
       const module = device.createShaderModule({ code });
       const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
       assert.equal(errors.length, 0, errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join("; "));
       const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "probe" } });
       const out = device.createBuffer({ size: 8 * count, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-      const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ["set", "dir", "phi", "vel"].map((name, binding) => ({ binding, resource: { buffer: e.buffer(name) } })).concat([{ binding: 4, resource: { buffer: out } }]) });
+      const C = N.map(n => n / 4 + 1), cornerCount = C[0]! * C[1]! * C[2]!;
+      const cornerBuf = device.createBuffer({ size: 8 * cornerCount, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const cornerRead = device.createBuffer({ size: 8 * cornerCount, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const farM0 = (solver as unknown as { options: { farPhi_m: number } }).options.farPhi_m;
+      const plain = await BrickPresentation.create(e, farM0, N, true, false);
+      const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ["set", "dir", "phi", "vel"].map((name, binding) => ({ binding, resource: { buffer: e.buffer(name) } })).concat([{ binding: 4, resource: { buffer: out } }, { binding: 5, resource: { buffer: cornerBuf } }]) });
       const rowBytes = Math.ceil((4 * V[0]!) / 256) * 256;
       const tex = device.createBuffer({ size: rowBytes * V[1]! * V[2]!, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const smoothTex = device.createBuffer({ size: rowBytes * V[1]! * V[2]!, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
       const probe = device.createBuffer({ size: 8 * count, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
       const groups = Math.ceil(count / 64), gx = Math.min(groups, 32768), gy = Math.ceil(groups / gx);
       device.pushErrorScope("validation");
-      const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+      const enc = device.createCommandEncoder();
+      plain.encode(enc);
+      const pass = enc.beginComputePass();
       pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(gx, gy); pass.end();
       enc.copyBufferToBuffer(out, 0, probe, 0, 8 * count);
-      enc.copyTextureToBuffer({ texture: solver.brickPresentation.vertexPhi }, { buffer: tex, bytesPerRow: rowBytes, rowsPerImage: V[1]! }, V);
+      enc.copyBufferToBuffer(cornerBuf, 0, cornerRead, 0, 8 * cornerCount);
+      enc.copyTextureToBuffer({ texture: plain.vertexPhi }, { buffer: tex, bytesPerRow: rowBytes, rowsPerImage: V[1]! }, V);
+      enc.copyTextureToBuffer({ texture: solver.brickPresentation.vertexPhi }, { buffer: smoothTex, bytesPerRow: rowBytes, rowsPerImage: V[1]! }, V);
       device.queue.submit([enc.finish()]);
       const invalid = await device.popErrorScope();
       assert.equal(invalid, null, `probe: ${invalid?.message}`);
-      await Promise.all([tex.mapAsync(GPUMapMode.READ), probe.mapAsync(GPUMapMode.READ)]);
+      await Promise.all([tex.mapAsync(GPUMapMode.READ), probe.mapAsync(GPUMapMode.READ), smoothTex.mapAsync(GPUMapMode.READ), cornerRead.mapAsync(GPUMapMode.READ)]);
       const shown = new Float32Array(tex.getMappedRange()), want = new Float32Array(probe.getMappedRange());
+      const drawn = new Float32Array(smoothTex.getMappedRange()), cw = new Float32Array(cornerRead.getMappedRange());
       const h = Math.fround(e.options.h_m), farM = (solver as unknown as { options: { farPhi_m: number } }).options.farPhi_m;
       const FAR_H = farM / h;
       let mismatch = 0, first = "", liquid = 0, oldWrong = 0, minQ = Infinity, minOld = Infinity, finite = 0, minShown = Infinity;
@@ -134,6 +160,58 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
         minQ = Math.min(minQ, q); minOld = Math.min(minOld, old); minShown = Math.min(minShown, got); if (q < FAR_H - 1e-3) finite++;
         if ((q < 0) !== (old < 0)) oldWrong++;
       }
+      // The drawn copy: presentVertex rebuilt (brick-present.ts), from the authority q, the C corner words and coarse bits.
+      const vi = (x: number, y: number, z: number) => x + V[0]! * (y + V[1]! * z);
+      const at = (x: number, y: number, z: number) => shown[x + rowFloats * (y + V[1]! * z)]!;
+      const cl = (v: number, n: number) => Math.min(Math.max(v, 0), n);
+      const corner = (T: number[]) => cw[2 * (cl(T[0]!, C[0]! - 1) + C[0]! * (cl(T[1]!, C[1]! - 1) + C[1]! * cl(T[2]!, C[2]! - 1)))]!;
+      const coarse = (t: number[]) => t.every((c, a) => c >= 0 && 4 * c < N[a]!) && cw[2 * (t[0]! + C[0]! * (t[1]! + C[1]! * t[2]!)) + 1] === 1;
+      const cr = (t: number) => [0.5 * (-t * t * t + 2 * t * t - t), 0.5 * (3 * t * t * t - 5 * t * t + 2), 0.5 * (-3 * t * t * t + 4 * t * t + t), 0.5 * (t * t * t - t * t)];
+      const nb = V.map(n => Math.ceil(n / 8));
+      const surface = new Uint8Array(nb[0]! * nb[1]! * nb[2]!);
+      for (let bz = 0; bz < nb[2]!; bz++) for (let by = 0; by < nb[1]!; by++) for (let bx = 0; bx < nb[0]!; bx++) {
+        let near = false, any = false;
+        for (let z = 8 * bz; z < Math.min(8 * bz + 8, V[2]!); z++) for (let y = 8 * by; y < Math.min(8 * by + 8, V[1]!); y++) for (let x = 8 * bx; x < Math.min(8 * bx + 8, V[0]!); x++) {
+          if (at(x, y, z) !== Math.fround(farM) && Math.abs(want[2 * vi(x, y, z)]!) < 4) near = true;
+        }
+        for (let k = 0; k < 64; k++) if (coarse([2 * bx - 1 + (k & 3), 2 * by - 1 + ((k >> 2) & 3), 2 * bz - 1 + (k >> 4)])) any = true;
+        surface[bx + nb[0]! * (by + nb[1]! * bz)] = near && any ? 1 : 0;
+      }
+      let drawnBad = 0, drawnFirst = "", moved = 0, cornerBad = 0, worst = 0;
+      for (let z = 0; z < V[2]!; z++) for (let y = 0; y < V[1]!; y++) for (let x = 0; x < V[0]!; x++) {
+        const plainV = at(x, y, z), got = drawn[x + rowFloats * (y + V[1]! * z)]!, q = want[2 * vi(x, y, z)]!, v = [x, y, z];
+        let expect = plainV;
+        const b = v.map(c => c >> 3);
+        if (plainV !== Math.fround(farM) && Math.abs(q) < 4 && surface[b[0]! + nb[0]! * (b[1]! + nb[1]! * b[2]!)]) {
+          const own = v.map(c => c >> 2);
+          let d = 4;
+          for (let k = 0; k < 27 && d > 0; k++) {
+            const n = [own[0]! + (k % 3) - 1, own[1]! + (Math.floor(k / 3) % 3) - 1, own[2]! + Math.floor(k / 9) - 1];
+            if (n.some((c, a) => c < 2 * b[a]! - 1 || c > 2 * b[a]! + 2) || !coarse(n)) continue;
+            d = Math.min(d, Math.hypot(...n.map((c, a) => Math.max(4 * c - v[a]!, v[a]! - 4 * c - 4, 0))));
+          }
+          if (d < 4) {
+            const w = own.map((c, a) => cr((v[a]! - 4 * c) / 4));
+            let sum = 0, lo = Infinity, hi = -Infinity;
+            for (let k = 0; k < 64; k++) {
+              const c = [k & 3, (k >> 2) & 3, k >> 4], x0 = corner(own.map((o, a) => o + c[a]! - 1));
+              sum += w[0]![c[0]!]! * w[1]![c[1]!]! * w[2]![c[2]!]! * x0;
+            }
+            for (let k = 0; k < 8; k++) { const x0 = corner(own.map((o, a) => o + ((k >> a) & 1))); lo = Math.min(lo, x0); hi = Math.max(hi, x0); }
+            const cubic = Math.min(Math.max(sum, lo), hi), s = Math.min(Math.max(d / 4, 0), 1), ws = s * s * (3 - 2 * s);
+            expect = (cubic * (1 - ws) + q * ws) * h;
+          }
+        }
+        const err = Math.abs(got - expect) / h; worst = Math.max(worst, plainV === Math.fround(farM) ? 0 : err);
+        if (err > 2e-4) { if (!drawnBad) drawnFirst = `(${x},${y},${z}) drawn ${got} want ${expect} (q ${q})`; drawnBad++; }
+        if (Math.abs(got - plainV) > 0.01 * h) moved++;
+        if (x % 4 === 0 && y % 4 === 0 && z % 4 === 0 && plainV !== Math.fround(farM) && Math.abs(got - plainV) > 2e-4 * h) cornerBad++;
+      }
+      smoothTex.unmap(); cornerRead.unmap(); smoothTex.destroy(); cornerRead.destroy(); cornerBuf.destroy(); plain.destroy();
+      console.log(`drawn copy: ${moved} vertices moved past 0.01 h by presentVertex, worst oracle error ${worst.toExponential(2)} h, ${drawnBad} past 2e-4 h, ${cornerBad} tile corners off the authority`);
+      assert.equal(drawnBad, 0, `the drawn copy differs from presentVertex's oracle at ${drawnBad} vertices, first ${drawnFirst}`);
+      assert.equal(cornerBad, 0, `the drawn copy leaves the authority at ${cornerBad} tile corners`);
+      assert.ok(moved > 0, "presentVertex smooths some 4h vertex near the surface");
       tex.unmap(); probe.unmap(); tex.destroy(); probe.destroy(); out.destroy();
       console.log(`brick presentation at step ${steps}: min q ${minQ} old ${minOld} shown ${minShown}, ${finite} finite of ${count}, FAR_H ${FAR_H}; ${liquid} liquid vertices; the old F-only copy's sign differs at ${oldWrong}; mismatches ${mismatch}`);
       assert.equal(mismatch, 0, `presentation differs from the tier authority at ${mismatch} vertices, first ${first}`);

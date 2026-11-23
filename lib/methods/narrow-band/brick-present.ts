@@ -6,7 +6,9 @@
  * - `vertexPhi` (r32float, lattice + 1 an axis, metres): phi at vertices,
  *   read through the tier authority (brick-owner.wgsl.ts nbVertexPhi): F where
  *   no incident tile is 4h-owned, else the 4h tile's interpolant of its C
- *   corners. Where no page holds a vertex, or the vertex holds air at or past PHI_AIR_C (an absent slot's value,
+ *   corners. Near the surface the drawn φ is presentVertex's: the limited tricubic
+ *   of the tile corners at 4h-owned vertices, F's blended into it over the tile
+ *   before a 4h tile at h-owned ones, so neither tier's surface creases. Where no page holds a vertex, or the vertex holds air at or past PHI_AIR_C (an absent slot's value,
  *   brick-owner.wgsl.ts, and an entering slot's), it is the scene's far value.
  * - `volume` (r32float, lattice): each cell's liquid fraction, the
  *   six-tetrahedron fill of its eight corner phi (level-set-fill.wgsl.ts); 0 in a
@@ -78,25 +80,120 @@ fn presentNear(b:vec3i)->bool{
 }
 `;
 
-const WGSL_VERTICES = (L: BrickLayout, cells: readonly number[], directF: boolean) => COMMON(L, cells) + brickOwnerWGSL({ phi: "phi", vel: "vel", box: boxWGSL(L) }) + /* wgsl */`
+const WGSL_VERTICES = (L: BrickLayout, cells: readonly number[], directF: boolean, smooth: boolean) => COMMON(L, cells) + brickOwnerWGSL({ phi: "phi", vel: "vel", box: boxWGSL(L) }) + /* wgsl */`
 @group(0) @binding(6) var vertexPhi:texture_storage_3d<r32float,write>;
 var<workgroup> presentState:u32;
 var<workgroup> presentSlot:u32;
+// Catmull-Rom weights of the four taps about a cell at fraction t.
+fn presentCR(t:f32)->vec4f{let t2=t*t;let t3=t2*t;return 0.5*vec4f(-t3+2.0*t2-t,3.0*t3-5.0*t2+2.0,-3.0*t3+4.0*t2+t,t3-t2);}
+// The brick's tile-corner values (C's words, h units: at a fine-owned corner lcMirror keeps F's word, so each is the
+// authority's nbVertexPhi(4T)) for T in 2b - 1 .. 2b + 3 (the cubic's taps about the brick's tiles 2b .. 2b + 1),
+// clamped to the lattice's corners, and its tiles' coarse bits (resident and 4h-owned, bit
+// x + 4 (y + 4 z) of t - (2b - 1)) for t in 2b - 1 .. 2b + 2 (the tiles about each vertex's own).
+var<workgroup> presentCorner:array<f32,125>;
+var<workgroup> presentSurfaceAny:atomic<u32>;
+var<workgroup> presentSurface:u32;
+var<workgroup> presentCoarseAny:array<atomic<u32>,2>;
+var<workgroup> presentCoarse:vec2u;
+fn presentCornerAt(T:vec3i,b:vec3i)->f32{let i=T-(2*b-vec3i(1));return presentCorner[i.x+5*(i.y+5*i.z)];}
+// The coarse surface at the brick's vertices (presentCubicStage): the tricubic Catmull-Rom of
+// the tile corners about each vertex's tile (v >> 2, at fraction (v & 3) / 4: on a tile face the next tile's cubic
+// at 0 is this one's at 1), evaluated an axis at a time: presentAxisX (8 vertex columns by 5 x 5 corner rows),
+// presentAxisY (8 x 8 by 5), then presentAxisX again (the brick's 8^3 vertices). It takes the corner values, reproduces a plane and has a continuous slope
+// across tile faces. presentVertex limits it to the tile's eight corners, so a far-air tap (an absent page's 16)
+// cannot ripple the surface.
+var<workgroup> presentAxisX:array<f32,512>;
+var<workgroup> presentAxisY:array<f32,320>;
+fn presentCubicStage(lid:u32){
+  for(var i=lid;i<200u;i+=64u){
+    let x=i%8u;let r=i/8u;let w=presentCR(f32(x&3u)/4.0);let c=(x>>2u)+5u*r;
+    presentAxisX[i]=w.x*presentCorner[c]+w.y*presentCorner[c+1u]+w.z*presentCorner[c+2u]+w.w*presentCorner[c+3u];
+  }
+  workgroupBarrier();
+  for(var i=lid;i<320u;i+=64u){
+    let x=i%8u;let y=(i/8u)%8u;let z=i/64u;let w=presentCR(f32(y&3u)/4.0);let c=x+8u*((y>>2u)+5u*z);
+    presentAxisY[i]=w.x*presentAxisX[c]+w.y*presentAxisX[c+8u]+w.z*presentAxisX[c+16u]+w.w*presentAxisX[c+24u];
+  }
+  workgroupBarrier();
+  for(var i=lid;i<512u;i+=64u){
+    let z=i/64u;let w=presentCR(f32(z&3u)/4.0);let c=(i%64u)+64u*(z>>2u);
+    presentAxisX[i]=w.x*presentAxisY[c]+w.y*presentAxisY[c+64u]+w.z*presentAxisY[c+128u]+w.w*presentAxisY[c+192u];
+  }
+  workgroupBarrier();
+}
+fn presentCubic(v:vec3i,b:vec3i)->f32{
+  let l=vec3u(v-8*b);let sum=presentAxisX[l.x+8u*(l.y+8u*l.z)];
+  let t=v>>vec3u(2u);var lo=3e38;var hi=-3e38;
+  for(var k=0u;k<8u;k++){let x=presentCornerAt(t+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),b);lo=min(lo,x);hi=max(hi,x);}
+  return clamp(sum,lo,hi);
+}
+// The presented φ at v (q: the tier authority's, nbVertexPhi; h units). The physics' 4h interpolant is trilinear, so
+// a 4h surface is faceted (its slope jumps on every tile face: the long dam's calm 4h water drew a grid of creases,
+// |second difference| to 0.16 cells on the faces and 0 inside, 2026-11-23), and an h patch in 4h water steps by its
+// detail one cell inside its boundary, where F's own surface meets the 4h interpolant its faces hold (0.1-0.3 cells).
+// Near the surface (|φ| under a tile) v shows the coarse surface (presentCubic) blended into q by the distance d from
+// v to the nearest 4h-owned tile (presentCoarse; smoothstep over a tile): at a 4h-owned vertex (an incident tile is
+// 4h-owned, d = 0) the coarse surface, at an h vertex a tile or more from one F's φ, and between the two tiers meet
+// with matching value and slope. A tile corner shows q either way (the cubic takes the corner values, and q is the
+// corner's authority word, F's where F owns it), so nbVertexCoarse's fine-corner rule needs no test here. The physics
+// is untouched: this is the drawn surface alone.
+fn presentVertex(v:vec3i,q:f32,b:vec3i,mask:vec2u)->f32{
+  if(abs(q)>=4.0){return q;}
+  var d=4.0;let own=v>>vec3u(2u);
+  // v in a 4h-owned tile (its own, or every tile about the brick 4h-owned): the coarse surface, no scan.
+  let o=vec3u(own-(2*b-vec3i(1)));let ob=o.x+4u*(o.y+4u*o.z);
+  if(all(mask==vec2u(0xffffffffu))||((mask[ob>>5u]>>(ob&31u))&1u)!=0u){return presentCubic(v,b);}
+  for(var k=0u;k<27u;k++){
+    let n=own+vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1);let i=n-(2*b-vec3i(1));
+    if(any(i<vec3i(0))||any(i>vec3i(3))){continue;}
+    let bit=u32(i.x+4*(i.y+4*i.z));if(((mask[bit>>5u]>>(bit&31u))&1u)==0u){continue;}
+    let gap=max(max(4*n-v,v-4*n-vec3i(4)),vec3i(0));d=min(d,length(vec3f(gap)));if(d==0.0){break;}
+  }
+  if(d>=4.0){return q;}
+  return mix(presentCubic(v,b),q,smoothstep(0.0,4.0,d));
+}
 @compute @workgroup_size(64) fn presentVertices(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let b=vec3i(wid);let edge=any(b>=NB_PRESENT_BRICKS);
   // The extra layer past the upper faces holds only the vertex row N: always written (a 2D shell of workgroups).
   if(lid==0u){
     presentState=select(select(0u,1u,presentNear(b))|select(0u,2u,shown[presentIndex(b)]!=0u),1u,edge);
     // ${directF ? "A brick an F slot holds reads its PHI words: each is nbVertexPhi's value, the owned vertices F's own and the others lResolve's (the step's last PHI writer before it is lcPublish, and lResolve follows; brick-fluid-stages.ts)." : "Every vertex through nbVertexPhi."}
-    presentSlot=NB_NONE;${directF ? "if(!edge){let s=nbFSlotOfBrick(b);if(s<NB_SEAM){presentSlot=s;}}" : ""}
+    presentSlot=NB_NONE;${smooth ? "atomicStore(&presentSurfaceAny,0u);atomicStore(&presentCoarseAny[0],0u);atomicStore(&presentCoarseAny[1],0u);" : ""}${directF ? "if(!edge){let s=nbFSlotOfBrick(b);if(s<NB_SEAM){presentSlot=s;}}" : ""}
   }
   let state=workgroupUniformLoad(&presentState);let held=(state&1u)!=0u;let fs=workgroupUniformLoad(&presentSlot);
   if(state==0u){return;}
+  // Each lane's eight vertices' authority φ (h units; PHI_AIR_C where nothing holds one). The coarse surface's taps are
+  // staged only in a brick with a vertex near the surface, so a buried or dry brick costs the plain copy.
+  var qs:array<f32,8>;var near=false;
   for(var j=0u;j<8u;j++){
+    let v=8*b+nbLocalCoord(lid+64u*j);var q=NB_PHI_AIR_C;
+    if(held&&all(v<=NB_PRESENT_CELLS)){if(fs!=NB_NONE){q=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*fs+nbLocal(v)]);}else{q=nbVertexPhi(v);}}
+    qs[j]=q;near=near||abs(q)<4.0;
+  }
+${smooth ? `  // The brick's tiles' coarse bits first; the corners and the cubic only where a 4h tile lies about it (an h region's
+  // inner bricks present F's φ as it is).
+  if(near){atomicOr(&presentSurfaceAny,1u);}
+  workgroupBarrier();
+  if(lid==0u){presentSurface=atomicLoad(&presentSurfaceAny);}
+  if(workgroupUniformLoad(&presentSurface)!=0u){
+    let t=2*b-vec3i(1)+vec3i(i32(lid&3u),i32((lid>>2u)&3u),i32(lid>>4u));
+    let coarse=select(0u,1u,nbTileInLattice(t)&&nbCSlotOfPage(t>>vec3u(3u))!=NB_NONE&&!nbTileOwnerH(t));
+    if(coarse!=0u){atomicOr(&presentSurfaceAny,2u);atomicOr(&presentCoarseAny[lid>>5u],1u<<(lid&31u));}
+  }
+  workgroupBarrier();
+  if(lid==0u){presentSurface=atomicLoad(&presentSurfaceAny);presentCoarse=vec2u(atomicLoad(&presentCoarseAny[0]),atomicLoad(&presentCoarseAny[1]));}
+  let mask=workgroupUniformLoad(&presentCoarse);
+  let surface=workgroupUniformLoad(&presentSurface)==3u;
+  if(surface){
+    for(var i=lid;i<125u;i+=64u){let T=2*b-vec3i(1)+vec3i(i32(i%5u),i32((i/5u)%5u),i32(i/25u));presentCorner[i]=nbCVertex(clamp(T,vec3i(0),NB_LATTICE>>vec3u(2u)));}
+    workgroupBarrier();
+    presentCubicStage(lid);
+  }
+` : ""}  for(var j=0u;j<8u;j++){
     let v=8*b+nbLocalCoord(lid+64u*j);
     if(any(v>NB_PRESENT_CELLS)){continue;}
-    var p=params.far_m;
-    if(held){var q=0.0;if(fs!=NB_NONE){q=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*fs+nbLocal(v)]);}else{q=nbVertexPhi(v);}if(q<NB_PHI_AIR_C){p=q*params.h_m;}}
+    let q=qs[j];var p=params.far_m;
+    if(q<NB_PHI_AIR_C){p=${smooth ? "select(q,presentVertex(v,q,b,mask),surface)" : "q"}*params.h_m;}
     textureStore(vertexPhi,v,vec4f(p,0.0,0.0,0.0));
   }
 }`;
@@ -176,7 +273,8 @@ export class BrickPresentation {
 
   /** `cells`: the presented cells from the lattice's corner (default the lattice), at most the lattice an axis. */
   /** `directF` false reads every vertex through nbVertexPhi (the reference the direct read is checked against). */
-  static async create(engine: BrickEngine, far_m: number, cells: readonly number[] = engine.layout.lattice, directF = true): Promise<BrickPresentation> {
+  /** `smooth` false presents the tier authority's φ itself (presentVertex off): a volume read of the physics' surface. */
+  static async create(engine: BrickEngine, far_m: number, cells: readonly number[] = engine.layout.lattice, directF = true, smooth = true): Promise<BrickPresentation> {
     if (!(far_m >= PHI_AIR * engine.options.h_m)) throw new Error(`Brick presentation: far phi ${far_m} m must be at least the band's air value`);
     if (engine.layout.lattice.some(v => v % 8 !== 0)) throw new Error(`Brick presentation: the lattice ${engine.layout.lattice.join("x")} is not whole bricks`);
     if (cells.length !== 3 || cells.some((n, a) => !Number.isInteger(n) || n < 1 || n > engine.layout.lattice[a]!)) throw new Error(`Brick presentation: the presented cells ${cells.join("x")} are not within the lattice ${engine.layout.lattice.join("x")}`);
@@ -196,7 +294,7 @@ export class BrickPresentation {
     const layouts = [
       d.createBindGroupLayout({ label: "nb-brick.presentVertices", entries: [...shared, storage(6)] }),
       d.createBindGroupLayout({ label: "nb-brick.presentVolume", entries: [...shared, { binding: 6, visibility: B, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }, storage(7)] })] as const;
-    const [vertices, volume] = await Promise.all([compile("nb-brick.presentVertices", WGSL_VERTICES(engine.layout, cells, directF)), compile("nb-brick.presentVolume", WGSL_VOLUME(engine.layout, cells))]);
+    const [vertices, volume] = await Promise.all([compile("nb-brick.presentVertices", WGSL_VERTICES(engine.layout, cells, directF, smooth)), compile("nb-brick.presentVolume", WGSL_VOLUME(engine.layout, cells))]);
     const pipelines = await Promise.all([
       d.createComputePipelineAsync({ label: "nb-brick.presentVertices", layout: d.createPipelineLayout({ bindGroupLayouts: [layouts[0]] }), compute: { module: vertices, entryPoint: "presentVertices" } }),
       d.createComputePipelineAsync({ label: "nb-brick.presentVolume", layout: d.createPipelineLayout({ bindGroupLayouts: [layouts[1]] }), compute: { module: volume, entryPoint: "presentVolume" } })]);
