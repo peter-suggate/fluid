@@ -1,0 +1,314 @@
+{
+ "scene": "high-resolution-dam-break",
+ "key": "dam",
+ "warmup": 100,
+ "R": 7,
+ "date": "2026-11-23T18:31:39.222Z",
+ "steps": 100,
+ "git": {
+  "head": "734dd9e2",
+  "status": " M lib/cloth/contact/ogc-detector-wgsl.ts\n M lib/cloth/contact/ogc-wgsl.ts\n M lib/core/webgpu-water-pipeline.ts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n?? tools/experiments/gpu-shape/m1/\n?? tools/experiments/gpu-shape/staged.mts\n?? tools/experiments/gpu-shape/wintable.mts\n"
+ },
+ "kernels": {
+  "uTransfer": {
+   "entry": "uTransfer",
+   "placements": [
+    {
+     "index": 85,
+     "part": 2,
+     "dispatch": {
+      "indirect": 412
+     }
+    }
+   ],
+   "variants": {
+    "0-cpages": {
+     "probe": false,
+     "minUs": 694.906,
+     "medUs": 702.489,
+     "samples": [
+      [
+       694.906,
+       753.447,
+       703.947,
+       698.656,
+       702.489,
+       697.532,
+       704.073
+      ]
+     ]
+    },
+    "1-window": {
+     "probe": false,
+     "minUs": 711.781,
+     "medUs": 728.405,
+     "samples": [
+      [
+       722.405,
+       722.656,
+       731.489,
+       711.781,
+       737.739,
+       728.405,
+       734.03
+      ]
+     ]
+    },
+    "2-ring": {
+     "probe": false,
+     "minUs": 973.695,
+     "medUs": 990.151,
+     "samples": [
+      [
+       973.695,
+       990.151,
+       986.985,
+       1014.651,
+       1003.443,
+       1035.901,
+       974.82
+      ]
+     ]
+    },
+    "3-ringmark": {
+     "probe": false,
+     "minUs": 1211.274,
+     "medUs": 1242.898,
+     "samples": [
+      [
+       1227.898,
+       1255.814,
+       1231.606,
+       1258.522,
+       1211.274,
+       1251.23,
+       1242.898
+      ]
+     ]
+    },
+    "4-stage": {
+     "probe": false,
+     "minUs": 1453.852,
+     "medUs": 1465.978,
+     "samples": [
+      [
+       1470.728,
+       1453.852,
+       1468.643,
+       1465.978,
+       1458.103,
+       1485.394,
+       1460.977
+      ]
+     ]
+    },
+    "5-liqstore": {
+     "probe": false,
+     "minUs": 1545.852,
+     "medUs": 1563.768,
+     "samples": [
+      [
+       1561.31,
+       1567.352,
+       1545.852,
+       1563.643,
+       1565.518,
+       1563.768,
+       1566.184
+      ]
+     ]
+    },
+    "6-half": {
+     "probe": false,
+     "minUs": 1750.265,
+     "medUs": 1774.098,
+     "samples": [
+      [
+       1774.098,
+       1790.764,
+       1784.638,
+       1763.348,
+       1750.265,
+       1781.723,
+       1759.64
+      ]
+     ]
+    },
+    "full": {
+     "probe": false,
+     "minUs": 1917.763,
+     "medUs": 1954.845,
+     "samples": [
+      [
+       1964.47,
+       1954.845,
+       1978.053,
+       1939.636,
+       1932.429,
+       1963.428,
+       1917.763
+      ]
+     ]
+    },
+    "copy": {
+     "probe": false,
+     "minUs": 1921.18,
+     "medUs": 1951.179,
+     "samples": [
+      [
+       1957.053,
+       1939.679,
+       1921.18,
+       1942.096,
+       1951.179,
+       2079.76,
+       1951.304
+      ]
+     ]
+    }
+   }
+  },
+  "uAdvect": {
+   "entry": "uAdvect",
+   "placements": [
+    {
+     "index": 83,
+     "part": 2,
+     "dispatch": {
+      "indirect": 412
+     }
+    }
+   ],
+   "variants": {
+    "0-cpages": {
+     "probe": false,
+     "minUs": 412.618,
+     "medUs": 439.993,
+     "samples": [
+      [
+       432.702,
+       479.993,
+       412.618,
+       423.118,
+       448.119,
+       529.908,
+       439.993
+      ]
+     ]
+    },
+    "1-window": {
+     "probe": false,
+     "minUs": 423.535,
+     "medUs": 462.035,
+     "samples": [
+      [
+       423.535,
+       473.576,
+       436.493,
+       509.701,
+       480.992,
+       458.909,
+       462.035
+      ]
+     ]
+    },
+    "2-ringmark": {
+     "probe": false,
+     "minUs": 430.327,
+     "medUs": 470.452,
+     "samples": [
+      [
+       470.452,
+       487.868,
+       508.076,
+       471.41,
+       455.826,
+       455.076,
+       430.327
+      ]
+     ]
+    },
+    "3-ring": {
+     "probe": false,
+     "minUs": 538.909,
+     "medUs": 585.283,
+     "samples": [
+      [
+       585.283,
+       538.909,
+       593.532,
+       540.742,
+       699.947,
+       578.491,
+       613.615
+      ]
+     ]
+    },
+    "4-live4": {
+     "probe": false,
+     "minUs": 548.283,
+     "medUs": 622.365,
+     "samples": [
+      [
+       639.157,
+       662.406,
+       622.365,
+       554.742,
+       548.949,
+       548.283,
+       891.195
+      ]
+     ]
+    },
+    "5-classify": {
+     "probe": false,
+     "minUs": 715.822,
+     "medUs": 736.78,
+     "samples": [
+      [
+       738.239,
+       811.571,
+       858.946,
+       715.822,
+       736.78,
+       725.53,
+       725.822
+      ]
+     ]
+    },
+    "full": {
+     "probe": false,
+     "minUs": 1080.858,
+     "medUs": 1275.148,
+     "samples": [
+      [
+       1082.441,
+       1080.858,
+       1123.858,
+       1580.018,
+       1401.769,
+       1275.148,
+       1292.605
+      ]
+     ]
+    },
+    "copy": {
+     "probe": false,
+     "minUs": 1227.106,
+     "medUs": 1287.105,
+     "samples": [
+      [
+       1299.313,
+       1495.727,
+       1448.561,
+       1248.522,
+       1227.106,
+       1287.105,
+       1236.231
+      ]
+     ]
+    }
+   }
+  }
+ }
+}

@@ -1,0 +1,700 @@
+{
+ "pDeposit.5-scatter": {
+  "wg": 256,
+  "cap": 896,
+  "simd": 32,
+  "tgBytes": 27532,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "wMom": 13200,
+   "wWeight": 13200,
+   "wLiquid": 128,
+   "sCount": 4
+  }
+ },
+ "pDeposit.1-window": {
+  "wg": 256,
+  "cap": 1024,
+  "simd": 32,
+  "tgBytes": 27532,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "wMom": 13200,
+   "wWeight": 13200,
+   "wLiquid": 128,
+   "sCount": 4
+  }
+ },
+ "pDeposit.2-ring": {
+  "wg": 256,
+  "cap": 1024,
+  "simd": 32,
+  "tgBytes": 27532,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "wMom": 13200,
+   "wWeight": 13200,
+   "wLiquid": 128,
+   "sCount": 4
+  }
+ },
+ "pDeposit.3-liquid": {
+  "wg": 256,
+  "cap": 1024,
+  "simd": 32,
+  "tgBytes": 27532,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "wMom": 13200,
+   "wWeight": 13200,
+   "wLiquid": 128,
+   "sCount": 4
+  }
+ },
+ "pDeposit.4-zero": {
+  "wg": 256,
+  "cap": 1024,
+  "simd": 32,
+  "tgBytes": 27532,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "wMom": 13200,
+   "wWeight": 13200,
+   "wLiquid": 128,
+   "sCount": 4
+  }
+ },
+ "pDeposit.copy": {
+  "wg": 256,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 27532,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "wMom": 13200,
+   "wWeight": 13200,
+   "wLiquid": 128,
+   "sCount": 4
+  }
+ },
+ "pDeposit.full": {
+  "wg": 256,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 27532,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "wMom": 13200,
+   "wWeight": 13200,
+   "wLiquid": 128,
+   "sCount": 4
+  }
+ },
+ "uAdvect.0-cpages": {
+  "wg": 256,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 11272,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wTrace": 6144,
+   "wTraced": 4,
+   "sTraced": 4,
+   "sSplit": 4,
+   "wLive4": 108,
+   "sRingOwned": 4,
+   "sRing": 4
+  }
+ },
+ "uAdvect.1-window": {
+  "wg": 256,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 11272,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wTrace": 6144,
+   "wTraced": 4,
+   "sTraced": 4,
+   "sSplit": 4,
+   "wLive4": 108,
+   "sRingOwned": 4,
+   "sRing": 4
+  }
+ },
+ "uAdvect.2-ringmark": {
+  "wg": 256,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 11272,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wTrace": 6144,
+   "wTraced": 4,
+   "sTraced": 4,
+   "sSplit": 4,
+   "wLive4": 108,
+   "sRingOwned": 4,
+   "sRing": 4
+  }
+ },
+ "uAdvect.3-ring": {
+  "wg": 256,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 11272,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wTrace": 6144,
+   "wTraced": 4,
+   "sTraced": 4,
+   "sSplit": 4,
+   "wLive4": 108,
+   "sRingOwned": 4,
+   "sRing": 4
+  }
+ },
+ "uAdvect.4-live4": {
+  "wg": 256,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 11272,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wTrace": 6144,
+   "wTraced": 4,
+   "sTraced": 4,
+   "sSplit": 4,
+   "wLive4": 108,
+   "sRingOwned": 4,
+   "sRing": 4
+  }
+ },
+ "uAdvect.5-classify": {
+  "wg": 256,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 11272,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wTrace": 6144,
+   "wTraced": 4,
+   "sTraced": 4,
+   "sSplit": 4,
+   "wLive4": 108,
+   "sRingOwned": 4,
+   "sRing": 4
+  }
+ },
+ "uAdvect.copy": {
+  "wg": 256,
+  "cap": 768,
+  "simd": 32,
+  "tgBytes": 11272,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wTrace": 6144,
+   "wTraced": 4,
+   "sTraced": 4,
+   "sSplit": 4,
+   "wLive4": 108,
+   "sRingOwned": 4,
+   "sRing": 4
+  }
+ },
+ "uAdvect.full": {
+  "wg": 256,
+  "cap": 768,
+  "simd": 32,
+  "tgBytes": 11272,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wTrace": 6144,
+   "wTraced": 4,
+   "sTraced": 4,
+   "sSplit": 4,
+   "wLive4": 108,
+   "sRingOwned": 4,
+   "sRing": 4
+  }
+ },
+ "uExtend.1-ring": {
+  "wg": 512,
+  "cap": 1024,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.2-window": {
+  "wg": 512,
+  "cap": 1024,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.3-stage": {
+  "wg": 512,
+  "cap": 1024,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.4-reach": {
+  "wg": 512,
+  "cap": 896,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.5-a0seed": {
+  "wg": 512,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.6-a0sweep": {
+  "wg": 512,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.7-a0back": {
+  "wg": 512,
+  "cap": 832,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.8-a0finish": {
+  "wg": 512,
+  "cap": 768,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.9-a1finish": {
+  "wg": 512,
+  "cap": 768,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.copy": {
+  "wg": 512,
+  "cap": 768,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.full": {
+  "wg": 512,
+  "cap": 768,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uExtend.nobar": {
+  "wg": 512,
+  "cap": 768,
+  "simd": 32,
+  "tgBytes": 23204,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wV": 6912,
+   "wD": 6912,
+   "wLiq": 276,
+   "wS4": 6000,
+   "wSwept": 108,
+   "wReach": 4,
+   "wTile4": 256,
+   "wLiqW": 1728
+  }
+ },
+ "uTransfer.0-cpages": {
+  "wg": 256,
+  "cap": 576,
+  "simd": 32,
+  "tgBytes": 12844,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wCentre": 2916,
+   "wHeat": 500,
+   "wHot": 500,
+   "wDepth": 2916,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wSeam": 500,
+   "wOcc4": 500,
+   "sSplit": 4
+  }
+ },
+ "uTransfer.1-window": {
+  "wg": 256,
+  "cap": 576,
+  "simd": 32,
+  "tgBytes": 12844,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wCentre": 2916,
+   "wHeat": 500,
+   "wHot": 500,
+   "wDepth": 2916,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wSeam": 500,
+   "wOcc4": 500,
+   "sSplit": 4
+  }
+ },
+ "uTransfer.2-ring": {
+  "wg": 256,
+  "cap": 576,
+  "simd": 32,
+  "tgBytes": 12844,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wCentre": 2916,
+   "wHeat": 500,
+   "wHot": 500,
+   "wDepth": 2916,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wSeam": 500,
+   "wOcc4": 500,
+   "sSplit": 4
+  }
+ },
+ "uTransfer.3-ringmark": {
+  "wg": 256,
+  "cap": 576,
+  "simd": 32,
+  "tgBytes": 12844,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wCentre": 2916,
+   "wHeat": 500,
+   "wHot": 500,
+   "wDepth": 2916,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wSeam": 500,
+   "wOcc4": 500,
+   "sSplit": 4
+  }
+ },
+ "uTransfer.4-stage": {
+  "wg": 256,
+  "cap": 512,
+  "simd": 32,
+  "tgBytes": 12844,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wCentre": 2916,
+   "wHeat": 500,
+   "wHot": 500,
+   "wDepth": 2916,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wSeam": 500,
+   "wOcc4": 500,
+   "sSplit": 4
+  }
+ },
+ "uTransfer.5-liqstore": {
+  "wg": 256,
+  "cap": 512,
+  "simd": 32,
+  "tgBytes": 12844,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wCentre": 2916,
+   "wHeat": 500,
+   "wHot": 500,
+   "wDepth": 2916,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wSeam": 500,
+   "wOcc4": 500,
+   "sSplit": 4
+  }
+ },
+ "uTransfer.6-half": {
+  "wg": 256,
+  "cap": 512,
+  "simd": 32,
+  "tgBytes": 12844,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wCentre": 2916,
+   "wHeat": 500,
+   "wHot": 500,
+   "wDepth": 2916,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wSeam": 500,
+   "wOcc4": 500,
+   "sSplit": 4
+  }
+ },
+ "uTransfer.copy": {
+  "wg": 256,
+  "cap": 512,
+  "simd": 32,
+  "tgBytes": 12844,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wCentre": 2916,
+   "wHeat": 500,
+   "wHot": 500,
+   "wDepth": 2916,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wSeam": 500,
+   "wOcc4": 500,
+   "sSplit": 4
+  }
+ },
+ "uTransfer.full": {
+  "wg": 256,
+  "cap": 512,
+  "simd": 32,
+  "tgBytes": 12844,
+  "vars": {
+   "fgWinSlot": 108,
+   "fgWinTile": 864,
+   "fgWinCoarse": 28,
+   "fgRing": 4000,
+   "wCentre": 2916,
+   "wHeat": 500,
+   "wHot": 500,
+   "wDepth": 2916,
+   "sRingOwned": 4,
+   "sRing": 4,
+   "wSeam": 500,
+   "wOcc4": 500,
+   "sSplit": 4
+  }
+ }
+}
