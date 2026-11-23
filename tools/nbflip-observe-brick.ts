@@ -34,9 +34,12 @@ import type { BoxObserver } from "./nbflip-observe";
 
 export async function createBrickBoxObserver(device: GPUDevice, solver: BrickNBFlipSolver, g: BoxGeometry): Promise<BoxObserver> {
   // The measure is over the box (layout.box: the container's cells). A padded lattice's cells past it hold no liquid and
-  // are not read; its walls are at the box (brick-abi.ts resolveBox).
+  // are not read; its walls are at the box (brick-abi.ts resolveBox). Under an open top the box's y is the lattice's:
+  // the container and the headroom above it (brick-scene.ts, fluid.brickTiers.openTopHeadroom), so a splash over the
+  // rim is still counted; the bins are on x and z only.
   const e = solver.brickEngine, L = e.layout, n = L.box;
-  if (g.nx !== n[0] || g.ny !== n[1] || g.nz !== n[2]) throw new Error(`Brick box observer: the box ${g.nx}x${g.ny}x${g.nz} is not the engine's box ${n.join("x")}`);
+  const yHolds = L.openTop ? g.ny <= n[1] : g.ny === n[1];
+  if (g.nx !== n[0] || !yHolds || g.nz !== n[2]) throw new Error(`Brick box observer: the box ${g.nx}x${g.ny}x${g.nz} is not the engine's box ${n.join("x")}${L.openTop ? " (open top: the container under the headroom)" : ""}`);
   const WORDS = boxWords(g);
   const code = resolveBox(L, /* wgsl */`
 ${brickAbiWGSL(L, { set: { name: "nbSet", atomic: false }, dir: { name: "dir", atomic: false } })}

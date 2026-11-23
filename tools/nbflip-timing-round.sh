@@ -7,8 +7,8 @@
 # BASE_TREE and CANDIDATE_TREE are read-only exports made by tools/nbflip-export.sh (each holds a
 # PROVENANCE file), or the main checkout when it is clean under lib/ and tools/. SCENES defaults
 # to "seep dam letters paddleboats". For each scene, back to back on the timing slot
-# (tools/gpu/fluid-gpu-run.sh timing: exclusive GPU): baseline fenced, candidate fenced, baseline
-# pipelined, candidate pipelined. Each run starts only after the GPU has been under 15% device
+# (tools/gpu/fluid-gpu-run.sh timing: exclusive GPU): fenced, then pipelined, each a baseline and candidate pair
+# in balanced order (below). Each run starts only after the GPU has been under 15% device
 # utilisation for 5 consecutive seconds (600 s at most). A 1 s sampler logs utilisation and any
 # other harness or node GPU job (OUT/gpu-util.log, OUT/contention.log). After the round the
 # system log is searched for Metal command-buffer aborts and GPU restarts in the round's window
@@ -55,12 +55,25 @@ run() { # tree role scene mode
   case $rc in 76|77|78) echo "$role $s $m rc=$rc INVALID (runner guard): reset and rerun" ;; *) echo "$role $s $m rc=$rc end $(date +%H:%M:%S)" ;; esac
   grep "^fluid-gpu-run" $out/$name.log | sed "s/^/  /"
 }
+# The order is balanced (a run's step time drifts with the GPU's state, and the second of a pair ran +2.4 to +3.4% on
+# seep pipelined in every round of 2026-11-24, an exact candidate's included): each scene runs its two modes in
+# opposite orders, and the scenes alternate which order comes first. OUT/order.log records each pair's order for the
+# table's paired rows (nbflip-gates.ts --order).
+pair() { # scene mode first
+  if [ -z "$CAND" ]; then run $BASE base $1 $2
+  elif [ $3 = base ]; then run $BASE base $1 $2; run $CAND candidate $1 $2
+  else run $CAND candidate $1 $2; run $BASE base $1 $2; fi
+  [ -n "$CAND" ] && echo "$1 $2 $3" >> $O/order.log
+}
+: > $O/order.log
+i=0
 for s in $SCENES; do
-  run $BASE base $s fenced; [ -n "$CAND" ] && run $CAND candidate $s fenced
-  run $BASE base $s pipelined; [ -n "$CAND" ] && run $CAND candidate $s pipelined
+  if [ $((i % 2)) -eq 0 ]; then pair $s fenced base; pair $s pipelined candidate
+  else pair $s fenced candidate; pair $s pipelined base; fi
+  i=$((i+1))
 done 2>&1 | tee $O/round.log
 kill $MON 2>/dev/null
 /usr/bin/log show --start "$START" --style compact --predicate 'eventMessage CONTAINS[c] "command buffer was aborted" OR eventMessage CONTAINS[c] "GPU Restart" OR eventMessage CONTAINS[c] "kIOGPUCommandBufferCallbackError"' 2>/dev/null | grep -v -E "^Timestamp|log run noninteractively" > $O/metal.log
 echo "Metal aborts / GPU restarts in the round's window: $(wc -l < $O/metal.log | tr -d ' ') (OUT/metal.log)" | tee -a $O/round.log
 echo "round end $(date '+%Y-%m-%d %H:%M:%S')" | tee -a $O/round.log
-(cd $MAIN && node --import tsx tools/nbflip-gates.ts --timing-only --ref-timing=$O/base ${CAND:+--candidate-timing=$O/candidate} --out=$O --name=timing) | tee -a $O/round.log
+(cd $MAIN && node --import tsx tools/nbflip-gates.ts --timing-only --ref-timing=$O/base ${CAND:+--candidate-timing=$O/candidate --order=$O/order.log} --out=$O --name=timing) | tee -a $O/round.log

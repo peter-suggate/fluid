@@ -47,7 +47,7 @@ interface Run<S = unknown> {
 
 const args = process.argv.slice(2);
 const option = (key: string) => args.filter(a => a.startsWith(`--${key}=`)).flatMap(a => a.slice(key.length + 3).split(",")).filter(Boolean);
-for (const a of args) assert.ok(/^--(ref|candidate|ref-timing|candidate-timing|out|name|scenes)=.+$/.test(a) || a === "--timing-only", `Unknown option: ${a}`);
+for (const a of args) assert.ok(/^--(ref|candidate|ref-timing|candidate-timing|order|out|name|scenes)=.+$/.test(a) || a === "--timing-only", `Unknown option: ${a}`);
 /** --timing-only: the §5-style timing table a scene from --ref-timing (and --candidate-timing) alone. */
 const timingOnly = args.includes("--timing-only");
 const filesOf = (paths: string[]) => paths.flatMap(p => statSync(p).isDirectory() ? readdirSync(p).filter(f => f.endsWith(".jsonl")).map(f => resolve(p, f)) : [resolve(p)]);
@@ -306,6 +306,19 @@ const judges: Record<SceneKey, (refs: Run[], c: Run) => Gate[]> = {
 const timingRuns = (dirs: string[]) => filesOf(dirs).map(load).filter((r): r is Run => !!r && r.slot === "timing" && !r.summary?.failure && (r.summary?.steps === TIMED_STEPS[r.scene] || r.summary?.steps === GATE_STEPS[r.scene]));
 const latest = (runs: Run[], scene: SceneKey, mode: string) => runs.filter(r => r.scene === scene && r.mode === mode).sort((a, b) => String(a.meta.date).localeCompare(String(b.meta.date))).at(-1);
 const baseTiming = timingRuns(option("ref-timing")), candTiming = timingRuns(option("candidate-timing"));
+/** --order=OUT/order.log (nbflip-timing-round.sh): which of each scene and mode's pair ran first ("scene mode base|candidate"). */
+const runOrder = new Map(option("order").flatMap(file => readFileSync(file, "utf8").split("\n").filter(Boolean).map(l => l.split(" "))).map(([s, m, first]) => [`${s} ${m}`, first]));
+/** The paired rows of a balanced round: each mode's pair with its order, and the mean of the two pairs' changes. The
+ * modes ran in opposite orders, so a drift that favours the first (or second) run of a pair cancels in the mean. */
+function paired(scene: SceneKey, bF?: number, cF?: number, bP?: number, cP?: number): string[] {
+  const oF = runOrder.get(`${scene} fenced`), oP = runOrder.get(`${scene} pipelined`);
+  if (!oF || !oP || bF === undefined || cF === undefined || bP === undefined || cP === undefined) return [];
+  const order = (o: string) => o === "base" ? "base first" : "candidate first";
+  const dF = cF / bF - 1, dP = cP / bP - 1;
+  return [`| paired: fenced median (${order(oF)}) | ${f(bF, 2)} | ${f(cF, 2)} | ${f(cF - bF, 2)} | ${pct(dF, 1)} |`,
+    `| paired: pipelined (${order(oP)}) | ${f(bP, 2)} | ${f(cP, 2)} | ${f(cP - bP, 2)} | ${pct(dP, 1)} |`,
+    `| **order-balanced change** (mean of the two pairs${oF === oP ? "; NOT balanced: both pairs ran in one order" : ""}) | | | | **${pct((dF + dP) / 2, 1)}** |`];
+}
 function timingTable(scene: SceneKey) {
   const bF = latest(baseTiming, scene, "fenced"), bP = latest(baseTiming, scene, "pipelined"), cF = latest(candTiming, scene, "fenced"), cP = latest(candTiming, scene, "pipelined");
   const row = (label: string, b: number | undefined, c: number | undefined) => `| ${label} | ${f(b, 2)} | ${f(c, 2)} | ${b !== undefined && c !== undefined ? f(c - b, 2) : "-"} | ${b !== undefined && c !== undefined ? pct(c / b - 1, 1) : "-"} |`;
@@ -314,6 +327,7 @@ function timingTable(scene: SceneKey) {
     row("fenced p95 ms", bF?.summary?.step_ms?.p95, cF?.summary?.step_ms?.p95),
     row("fenced mean ms", bF?.summary?.step_ms?.mean, cF?.summary?.step_ms?.mean),
     row("pipelined ms/step", bP?.summary?.pipelined?.perStep_ms, cP?.summary?.pipelined?.perStep_ms),
+    ...paired(scene, bF?.summary?.step_ms?.median, cF?.summary?.step_ms?.median, bP?.summary?.pipelined?.perStep_ms, cP?.summary?.pipelined?.perStep_ms),
     row("fenced thirds ms (first)", bF?.summary?.step_ms?.thirds?.[0], cF?.summary?.step_ms?.thirds?.[0]),
     row("fenced thirds ms (middle)", bF?.summary?.step_ms?.thirds?.[1], cF?.summary?.step_ms?.thirds?.[1]),
     row("fenced thirds ms (last)", bF?.summary?.step_ms?.thirds?.[2], cF?.summary?.step_ms?.thirds?.[2]),
