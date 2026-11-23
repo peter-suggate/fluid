@@ -737,7 +737,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
       vel.fill(f32(U[a]!), at, at + n);
     }
     e.write("phi", 0, phiWords); e.write("vel", 0, velWords); e.write("fcell", 0, fcell); e.write("set", 0, set); e.write("dir", 0, dir);
-    const kernels = levelSetCoarseKernels(L, F), listC = { indirect: 12 * LIST.C_ALL }, listX8 = { indirect: 12 * LIST.C_ALL + ARGS[LC_ADVECT_GROUPS] };
+    const kernels = levelSetCoarseKernels(L, F), listC = { indirect: 12 * LIST.C_ALL }, listX8 = { indirect: 12 * LIST.C_ALL + ARGS.X8 };
     // Lane F's uCache (488c4ebf): fgSampleVel reads the caches it builds from the opening velocity, as the engine runs
     // it before lcAdvect every step. The fixture's velocity never changes, so one pass serves the whole chain; the
     // caches are fcell words, so "fcell untouched" below is against fcell after it.
@@ -754,7 +754,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
       const before = new Uint32Array(await e.read("phi")), setBefore = new Uint32Array(await e.read("set"));
       W.phi = new Float32Array(before.slice().buffer); W.set = setBefore;
       const tally: Tally = {}, setWant = new Map<number, number>(), want = oracle(W, tally, setWant);
-      await e.run([{ kernel: kernels[name], dispatch: LC_GROUPS[name] === "X8" ? listX8 : listC }]);
+      await e.run([{ kernel: kernels[name], dispatch: name === "lcAdvect" ? LC_ADVECT_GROUPS : LC_GROUPS[name] === "X8" ? listX8 : listC }]);
       const after = await e.read("phi"), af = new Float32Array(after.buffer), setAfter = new Uint32Array(await e.read("set"));
       assert.equal(setAfter[H.FAIL], 0, `${name}: FAIL ${setAfter[H.FAIL]} info ${setAfter[H.FAIL_INFO]}`);
       let setBad = 0, gateBits = 0; const setReport: string[] = [];
@@ -825,7 +825,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     const skirt = L.dir.page + L.pageIndex(2, 0, 0);
     assert.equal(dir[skirt], NONE, "the skirt page is absent");
     e.write("dir", skirt, new Uint32Array([0xa0000000]));
-    await e.run([{ kernel: kernels.lcAdvect, dispatch: listX8 }]);
+    await e.run([{ kernel: kernels.lcAdvect, dispatch: LC_ADVECT_GROUPS }]);
     const header = new Uint32Array(await e.read("set", 0, 256));
     assert.equal(header[H.FAIL]! & FAIL.UNSUPPORTED, FAIL.UNSUPPORTED, `the BULK16 latch: FAIL ${header[H.FAIL]}`);
     assert.equal(header[H.FAIL_INFO], 0x4c430003, "the BULK16 latch's info");

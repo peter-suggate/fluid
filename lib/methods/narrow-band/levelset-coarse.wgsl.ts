@@ -123,7 +123,7 @@
  * FC list (FC_G1: F_ALL then C_ALL; LC_FOLD): the twin's F-side and this C-side read and write disjoint words. The
  * page bodies take the page and a uniform live flag, and every barrier they hold is under uniform control.
  */
-import { BOX_TOKEN, type BrickLayout } from "./brick-abi";
+import { ARGS, BOX_TOKEN, type BrickLayout } from "./brick-abi";
 import { CFG, type BrickKernel } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { FB, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel, fluidLayout } from "./fluid-grid.wgsl";
@@ -205,7 +205,8 @@ fn lcSample(f:u32,p:vec3f)->f32{
 }
 fn lcPhiC(base:u32,slot:u32,l:u32)->f32{return bitcast<f32>(phi[base+NB_STRIDE*slot+l]);}
 fn lcSetC(base:u32,slot:u32,l:u32,value:f32){phi[base+NB_STRIDE*slot+l]=bitcast<u32>(value);}
-// The page's z plane a workgroup of the X8 kernels (lcAdvect, lcCouple, lcRetire: eight workgroups a page) takes.
+// The page's first z plane a workgroup takes: the X8 kernels' one (lcCouple, lcRetire: eight workgroups a page), lcAdvect's
+// four (two workgroups a page).
 var<private> lcPart:u32;
 fn lcCheckLattice(lid:u32){if(lid==0u&&any((NB_LATTICE&vec3i(31))!=vec3i(0))){nbFail(NB_FAIL_UNSUPPORTED,0x4c430001u);}}
 `;
@@ -306,13 +307,15 @@ fn nbxPointFrom(q:vec3f,x:vec3f)->vec3f{return lcHeld(x);}
 fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x4c430002u);}
 var<private> lcBase:vec3i;
 var<private> lcW:i32;
-// The staged C ring (lane E, 2026-11-16): lcAdvect's workgroup (one z plane of a C page, LC_ADVECT_GROUPS) stages
-// the resolved φ (nbVertexPhi) at the C lattice vertices 4T about its plane, T from lcRingLow over 13 x 13 x 5 (two
-// vertices of halo each way), before its traces read them. lcPhiTap reads a C lattice vertex inside the ring from it
+// The staged C ring (lane E, 2026-11-16): lcAdvect's workgroup (four z planes of a C page, LC_ADVECT_GROUPS) stages
+// the resolved φ (nbVertexPhi) at the C lattice vertices 4T about its planes, T from lcRingLow over 13 x 13 x 8 (two
+// vertices of halo each way), before its traces read them. Four planes a workgroup (GPU-shape M5,
+// docs/plans/gpu-shape/m4-clist.md §6): one ring of 13 x 13 x 8 for four planes instead of four of 13 x 13 x 5, and
+// the traces' taps a z plane farther stay in it (frozen paddleboats 1.15 -> 0.74 ms, dam 0.65 -> 0.50, bit for bit). lcPhiTap reads a C lattice vertex inside the ring from it
 // and any other vertex through nbVertexPhi. The kernel writes only PHI1, so the staged values are the reads the taps
 // would make. Half of lcAdvect was the cubic's 64 owner-resolved taps (nbVertexCoarse's 8 tiles each); the ring
 // resolves each vertex once a workgroup. Off (lcRingOn) in a kernel that staged none.
-var<workgroup> lcRing:array<f32,845>;
+var<workgroup> lcRing:array<f32,1352>;
 var<private> lcRingLow:vec3i;
 var<private> lcRingOn:bool=false;
 // nbVertexPhi(v) at lcAdvect's place: after the move's lResolve and before the step's first C PHI writer (lcCouple;
@@ -324,7 +327,7 @@ fn lcFResolved(v:vec3i)->f32{
  return nbVertexPhi(v);
 }
 fn lcPhiTap(v:vec3i)->f32{
- if(lcRingOn&&all((v&vec3i(3))==vec3i(0))){let r=vec3u((v>>vec3u(2u))-lcRingLow);if(all(r<vec3u(13u,13u,5u))){return lcRing[r.x+13u*(r.y+13u*r.z)];}}
+ if(lcRingOn&&all((v&vec3i(3))==vec3i(0))){let r=vec3u((v>>vec3u(2u))-lcRingLow);if(all(r<vec3u(13u,13u,8u))){return lcRing[r.x+13u*(r.y+13u*r.z)];}}
  return lcFResolved(v);
 }
 // umCubicPhi's taps: the departure cell's width-aligned vertices, held to the box (umVertexNearFromPage).
@@ -420,8 +423,8 @@ fn lcCheckBulk(slot:u32,live:bool,lid:u32){
  if(bulk){nbFail(NB_FAIL_UNSUPPORTED,0x4c430003u);}
 }
 // The page body: C slot slot (live: the workgroup's liveness), φ → PHI1 at its C vertices. One C vertex a lane, the
-// plane's 64: exits 1 to 4 store at once; the full path (exit 5) alone reads the ring (lcPhiTap from
-// lcFullAdvected), so the plane stages it only when one of its lanes takes that path, then traces.
+// four planes' 256 from lcPart: exits 1 to 4 store at once; the full path (exit 5) alone reads the ring (lcPhiTap from
+// lcFullAdvected), so the workgroup stages it only when one of its lanes takes that path, then traces.
 var<workgroup> sRingLive:u32;
 var<workgroup> sRingFull:atomic<u32>;
 fn lcAdvectPage(slot:u32,live:bool,lid:u32){
@@ -449,7 +452,7 @@ fn lcAdvectPage(slot:u32,live:bool,lid:u32){
  if(lid==0u){sRingLive=atomicLoad(&sRingFull);}
  if(workgroupUniformLoad(&sRingLive)==0u){return;}
  lcRingLow=(o>>vec3u(2u))+vec3i(-2,-2,i32(lcPart)-2);
- for(var j=lid;j<845u;j+=64u){lcRing[j]=lcFResolved(4*(lcRingLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u))));}
+ for(var j=lid;j<1352u;j+=256u){lcRing[j]=lcFResolved(4*(lcRingLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u))));}
  workgroupBarrier();lcRingOn=true;
  // Exit 5: the full path.
  if(full){lcSetC(NB_PHI_C_PHI1,slot,l,lcFullAdvected(v,c,dt,hm));}
@@ -721,22 +724,22 @@ export const levelSetCoarseWGSL = {
   retire: (L: BrickLayout) => [nbfRedistanceWGSL, LC_NEAR_KNOWN_WGSL, lcRetireWGSL(L.staticTiles)].join("\n"),
 };
 
-/** lcAdvect's dispatch over C_ALL: eight workgroups an entry (the brick set's X8 arguments). */
-export const LC_ADVECT_GROUPS = "X8" as const;
+/** lcAdvect's dispatch over C_ACT: two 256-lane workgroups an entry (ARGS.C_ACT2_G1), each four z planes. */
+export const LC_ADVECT_GROUPS = { indirect: ARGS.C_ACT2_G1 } as const;
 
-/** Each C kernel's dispatch over C_ALL. lcAdvect, lcCouple and lcRetire take eight 64-lane workgroups an entry (X8), a
+/** Each C kernel's dispatch over C_ACT. lcCouple and lcRetire take eight 64-lane workgroups an entry (X8), a
  * vertex a lane: each runs in one wave, so its time is its slowest lane's chain, and one vertex a lane cuts the
  * couple's and retire's (lane E, 2026-11-16, frozen dam at step 100: 0.37 -> 0.27 and 0.63 -> 0.40 ms, bit for bit).
- * lcClear and lcPublish take a 256-lane workgroup an entry (G1). */
-export const LC_GROUPS = { lcAdvect: "X8", lcCouple: "X8", lcRetire: "X8", lcClear: "G1", lcPublish: "G1" } as const;
+ * lcClear and lcPublish take a 256-lane workgroup an entry (G1); lcAdvect takes LC_ADVECT_GROUPS. */
+export const LC_GROUPS = { lcAdvect: LC_ADVECT_GROUPS, lcCouple: "X8", lcRetire: "X8", lcClear: "G1", lcPublish: "G1" } as const;
 
 export interface LevelSetCoarseKernels {
   readonly lcAdvect: BrickKernel; readonly lcCouple: BrickKernel; readonly lcClear: BrickKernel;
   readonly lcRetire: BrickKernel; readonly lcPublish: BrickKernel;
 }
 
-/** The standalone kernels on list C_ALL at LC_GROUPS: X8 with workgroup 64 (lcAdvect, lcCouple, lcRetire), G1 with
- * workgroup 256 (lcClear, lcPublish). */
+/** The standalone kernels on list C_ACT at LC_GROUPS: X8 with workgroup 64 (lcCouple, lcRetire), G1 with workgroup
+ * 256 (lcClear, lcPublish), and lcAdvect's two 256-lane workgroups a page. */
 export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayout(L, { tiered: true })): LevelSetCoarseKernels {
   if (!F.tiered) throw new Error("levelset-coarse: the C kernels read through the tier owners; build them with fluidLayout(L, { tiered: true })");
   const bindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell, FB.src];
@@ -754,10 +757,10 @@ export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayo
  ${page}(slot,live,lid);
 }`].join("\n"));
   return {
-    // lcAdvect: eight workgroups a page (LC_ADVECT_GROUPS), each one z plane of its C vertices, a lane a vertex.
+    // lcAdvect: two workgroups a page (LC_ADVECT_GROUPS), each four z planes of its C vertices from lcPart, a lane a vertex.
     lcAdvect: fluidKernel(L, F, "lcAdvect", bindings, [levelSetCoarseWGSL.common(L), levelSetCoarseWGSL.advect(), /* wgsl */`
-@compute @workgroup_size(64) fn lcAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
- let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ACT);
+@compute @workgroup_size(256) fn lcAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ let g=nbGroup(wid);let e=g>>1u;lcPart=4u*(g&1u);let live=e<nbListCount(NB_LIST_C_ACT);
  var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ACT,e);}
  lcAdvectPage(slot,live,lid);
 }`].join("\n")),

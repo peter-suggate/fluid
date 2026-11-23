@@ -63,7 +63,8 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   // Still-tank A: the passes that skip the STILL pages (F_ALL's bricks, then C_ACT's pages; C_ACT's pages).
   const bothAct: BrickDispatch = tiered ? { indirect: ARGS.FCA_G1 } : all, pagesAct = list(LIST.C_ACT, "G1");
   const c = tiered ? levelSetCoarseKernels(L, F) : undefined;
-  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: list(LIST.C_ACT, LC_GROUPS[kernel]), z: 0, w: 0 }] : [];
+  const lcDispatch = (g: (typeof LC_GROUPS)[keyof typeof LC_GROUPS]): BrickDispatch => (typeof g === "string" ? list(LIST.C_ACT, g) : g);
+  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: lcDispatch(LC_GROUPS[kernel]), z: 0, w: 0 }] : [];
   // The record passes run over the live records (pArgs's arguments), not the bank's capacity.
   const records: BrickDispatch = { indirect: P_ARGS_RECORDS };
   const at = (kernel: BrickKernel, dispatch: BrickDispatch, z = 0, w = 0): BrickPlacement => ({ kernel, dispatch, z, w });

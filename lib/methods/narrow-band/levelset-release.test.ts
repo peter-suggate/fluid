@@ -408,10 +408,10 @@ test("levelset-release (GPU): reach words, wall reach, the readers and lcAdvect'
     console.log(`levelset-release: ${s0.bricks.size} F, ${s0.pages.size} C pages, ${releasedBits} release bits`);
 
     // ---- lcAdvect with no words (REACH_STEP clear: every tile saturated; no plane reach): nothing fires.
-    // lcAdvect runs eight workgroups a C_ALL entry (its X8 arguments), as the step places it. The plain C_ALL
-    // arguments (one workgroup an entry) advected only the first eighth of the list, and the list's atomic order
-    // chose a different eighth each run.
-    const kernels = levelSetCoarseKernels(L, F), listC = { indirect: 12 * LIST.C_ALL + ARGS[LC_ADVECT_GROUPS] };
+    // lcAdvect runs two workgroups a C_ACT entry (LC_ADVECT_GROUPS), as the step places it. The plain list
+    // arguments (one workgroup an entry) advected only part of the list, and the list's atomic order chose a
+    // different part each run.
+    const kernels = levelSetCoarseKernels(L, F), listC = LC_ADVECT_GROUPS;
     await e.run([{ kernel: kernels.lcAdvect, dispatch: listC }]);
     const before = new Float32Array((await e.read("phi")).buffer).slice();
     e.write("phi", 0, new Uint32Array(phi0));
