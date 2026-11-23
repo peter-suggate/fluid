@@ -1,0 +1,9 @@
+targets: 6:censusCoarse.pack
+  exact 6 censusCoarse (set,census): base 0, pack 0 words differ
+  time   6 censusCoarse   base 273.3 med 280.3  pack 250.2 (-23.1) med 262.9 us
+time: clock probe 100.6 76.3 76.1 76.1 76.1 76.1 76.2
+  clock   6 censusCoarse   base     pass 297.0 us state 2 912/912; dur p50 53.9 p90 84.1 max 191.4; span 279.0, 95% ended 185.0, tail 94.0 us; in flight 186 232 255 255 226 220 233 231 209 129 52 28 19 11 6 2
+  clock   6 censusCoarse   pack     pass 393.7 us state 2 912/912; dur p50 70.0 p90 118.4 max 279.5; span 375.2, 95% ended 232.6, tail 142.6 us; in flight 159 298 319 316 301 263 207 188 148 76 21 8 6 5 3 1
+clock: probe 129.1 us
+fluid-gpu-run: GPU memory in use 0.70 GB at start, peak 2.65 GB; 1 process(es) in the tree
+rc 0

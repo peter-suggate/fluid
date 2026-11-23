@@ -1,0 +1,33 @@
+dam step 100: 283 placements, 7 with the candidate's text (censusCoarse, certError, lcAdvect, lcCouple, lcClear, lcRetire, lcPublish); base /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m5/sab-base-9c82f1df, candidate /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m5/sab-cand-9c82f1df
+fail/info words at the frozen state: 0x0/0x0
+exact #6 censusCoarse: ok: set identical, census identical
+exact #31 certError: ok: set identical, census identical
+exact #57 lcAdvect z0: ok: set identical, phi identical
+exact #60 lcCouple z0: ok: set identical, phi identical
+exact #68 lcClear z0: ok: set identical, phi identical, fcell identical
+exact #78 lcRetire z0: ok: set identical, phi identical
+exact #80 lcPublish z0: ok: set identical, phi identical
+exactness: 7 of 7 changed placements identical
+base: Σ placements min 29.802 ms, median 29.870; Σ of family minima 29.396 ms; GPU wall min 29.449 ms, median 29.550; clock probe 75.9 76.2 76.1 76.2 76.1 76.1 76.1 76.2 76.1 us (top 75.5)
+candidate: Σ placements min 29.507 ms, median 29.701; Σ of family minima 29.141 ms; GPU wall min 29.152 ms, median 29.438; clock probe 75.9 76.1 76.0 76.0 76.1 76.0 75.9 76.1 76.2 us (top 75.5)
+base again: Σ placements min 29.630 ms, median 29.844; Σ of family minima 29.256 ms; GPU wall min 29.413 ms, median 29.627; clock probe 76.1 76.1 76.2 76.5 76.1 76.0 76.2 76.0 76.0 us (top 75.5)
+families (min of samples; A/A = base again - base), the changed ones and the 8 largest other |Δ|:
+  * lcAdvect               0.701 -> 0.545 ms  -0.156 (-22.3%)  A/A -0.002
+  * censusCoarse           0.282 -> 0.256 ms  -0.026 (-9.3%)  A/A -0.006
+  * lcRetire               0.862 -> 0.868 ms  +0.006 (0.7%)  A/A -0.009
+  * certError              0.111 -> 0.106 ms  -0.005 (-4.4%)  A/A -0.001
+  * lcCouple               0.164 -> 0.162 ms  -0.002 (-1.2%)  A/A +0.002
+  * lcPublish              0.023 -> 0.023 ms  -0.000 (-0.7%)  A/A -0.000
+  * lcClear                0.084 -> 0.084 ms  -0.000 (-0.1%)  A/A +0.000
+    censusDecide           0.937 -> 0.924 ms  -0.013 (-1.4%)  A/A -0.075
+    uAdvect                1.176 -> 1.163 ms  -0.013 (-1.1%)  A/A +0.021
+    pMove                  1.093 -> 1.082 ms  -0.011 (-1.0%)  A/A -0.005
+    lDistance              0.861 -> 0.870 ms  +0.009 (1.0%)  A/A +0.005
+    lAdvect                1.600 -> 1.593 ms  -0.007 (-0.5%)  A/A +0.002
+    operator               1.064 -> 1.057 ms  -0.007 (-0.6%)  A/A -0.014
+    pSeparate              1.366 -> 1.372 ms  +0.006 (0.5%)  A/A +0.004
+    pmgDown1C              0.184 -> 0.178 ms  -0.006 (-3.0%)  A/A -0.000
+GATE dam: changed families Σ Δ -0.184 ms (-0.62% of the step's 29.396 ms Σ), their A/A -0.015 ms; unchanged families Σ Δ -0.071 ms, A/A -0.125 ms; Σ placements min -0.295 ms (A/A -0.171); GPU wall min -0.297 ms (-1.01%; A/A -0.036)
+ok
+fluid-gpu-run: GPU memory in use 0.73 GB at start, peak 4.35 GB; 2 process(es) in the tree
+rc 0

@@ -187,3 +187,133 @@ Peak GPU MB is unchanged on every scene.
 Construction on seep and letters went from 4.7/3.0 s to 12.9/11.4 s for the candidate's fenced run; dam and
 paddleboats did not change. (Inference: a cold Metal pipeline cache for the new kernel texts. Dam's and paddleboats'
 new texts were compiled earlier by the m4.mts runs. This is not a steady-state cost.)
+
+## 6. M5 round: construction, the lcRetire race question, three more C passes (lane B2, 2026-11-24)
+
+**Result: three more exact landings** (lcAdvect four planes a workgroup, censusCoarse and certError workgroup memory
+packed). stepab Σ Δ of the changed families: seep −0.304, dam −0.184, letters −0.349, paddleboats −0.494 ms (−0.6 to
+−1.6%). Every changed placement is identical on every scene. The timing round is below.
+
+### Construction time (measured)
+
+At cand-67c09e96 with a warm Metal cache, one construction-only run each gave **seep 4760 ms and letters 3029 ms**.
+These match the parent's 4.7 / 3.0 s. The 12.9 / 11.4 s in the M4 round was a cold pipeline cache for the new kernel
+texts, not a steady-state cost.
+
+### lcRetire: no race (source + a GPU check)
+
+- **Source.** The lcRetire entry calls only lcRetirePage (levelset-coarse.wgsl.ts:695). Its only φ writes are
+  C_PHI1:
+  - `lcMirror(NB_PHI_F_PHI1, NB_PHI_C_PHI1, ...)` (:701) reads F_PHI1 and writes C_PHI1;
+  - `lcSetC(NB_PHI_C_PHI1, ...)` (:702).
+- **What it gathers.**
+  - lcGradient (:611) and lcBuildDistance (:623, :665) gather through nbVertexPhi or lcSample(0u, ...), which is
+    nbVertexPhi.
+  - nbVertexPhi (brick-owner.wgsl.ts:115) reads C_PHI (nbCVertex, :105) and F_PHI or F_PHI1 (nbFPhiBase, :110,
+    F_PHI1 only for a NEAR_SOLID brick in the view build).
+  - lcRetirePage also reads C_PHI (lcPhiC).
+  - The C_PHI writers in the same module (lcPublishPage) are not called from lcRetire.
+- **Verdict.** Nothing in the dispatch writes a word it reads, so there is no order-dependent result.
+- **GPU check: gcheck** (m4.mts).
+  - The cache key and values are kept, but every corner is fetched fresh.
+  - A key hit whose fresh corners differ bit-for-bit from the cached ones writes the sentinel 7777777 to the lane's
+    PHI1.
+  - The compare counts the sentinel words: **0 on paddleboats and 0 on dam**. A cached key's corners never changed
+    within the pass.
+- **The 104–114 differing words come from code shape, not data.**
+  - gcheck reads exactly the base's values (each v[k] is the fresh fetch), yet it differs from base by 22 and 32 words
+    in two paddleboats runs, and by 0 on dam.
+  - gfetch (store then reload in the same call) is exact.
+  - So the generated arithmetic changes with the code shape, not with the data. Inference: Metal fast-math contracts
+    nbfTrilinear's and the pairwise sum's multiply-adds differently once v[] goes through private memory.
+  - The count varies run to run because the frozen state differs between processes (each run's own step 100).
+
+### Per pass (in situ, µs, paddleboats / dam; m4/m5/r5–r11-<scene>.txt, r6-paddleboats-m4.json)
+
+| pass | parent | landed | how | groups in flight |
+|---|---|---|---|---|
+| lcAdvect | 1087 / 668 | **705 / 472** | 4 z planes a 256-lane workgroup, 2 a page (ARGS.C_ACT2_G1 = 430) | 250 × 64 → 63 × 256 |
+| censusCoarse | 681 / 274 | **607 / 248** | workgroup memory 7148 → 4532 B | 250 → 310 |
+| certError | 242 / 110 | **211 / 97** | workgroup memory 6.2 → 1.6 KB | 250 → 600 |
+
+**lcAdvect.** Its staging was the cost:
+- With only the exits, the pass takes 72 / 43 µs. Exits plus the ring staging take 252 / 146 µs. The full pass
+  takes 1151 / 654 µs.
+- Without the ring it takes 1436 / 940 µs, so the ring pays for itself.
+- Variants by planes a workgroup (ring 13 × 13 × (P + 4)), Δ µs paddleboats / dam: **P = 2: −283 / −113, P = 4:
+  −411 / −152, P = 8: −422 / −110**.
+- P = 4 is the best on both scenes.
+- It gains more than the staging it saves: the traces' taps a plane farther in z now fall inside the ring.
+- Thread cap 512 at 256 lanes; ring 5.4 KB.
+
+**censusCoarse.** Its residency was bound by workgroup memory:
+- Thread cap 704, 11 groups of 64 a core. The 7148 B the kernel uses (from the MSL) admitted ~8 a core.
+- Three variants tested the face jobs:
+  - noface (time only): −236 / −84 µs.
+  - Sharing a slab-interior x/y face between its two tiles: exact, but **+23 / +14**.
+  - Compacting the bounded tiles' face jobs into a list: exact, but **+146 / +33**. Its extra 1.5 KB dropped groups
+    in flight 250 → 190.
+- So the cost was residency, not job count.
+- Landed: the job lists packed and the tile flags as bit masks (4532 B, ~10 groups a core in flight, cap unchanged at
+  704).
+
+**certError.** Three 3-bit flag arrays were staged as a u32 an entry (6292 B against a 1024-thread cap). Packing
+four a word, a lane a word, raised groups in flight 250 → ~600.
+
+**Checked, no shape win:**
+- **lcRetire.** Its long groups (666–739 µs on paddleboats, 678 on dam) start at t ≈ 0. The tail is single-lane
+  chain latency, so neither ordering nor workgroup shape helps. Splitting a lane's chain would change the arithmetic
+  shape, which is not bit-exact here (above).
+- **censusDecide.** Register-bound (cap 512, 76 B of workgroup memory).
+- **certCoarse.** Register-bound (cap 832, ~13 groups a core in flight); its tail is per-tile work.
+- **pressureProjectC.** Register-bound (cap 576 at 256 lanes, 2 a core).
+- **uExt4.** 512-lane sweeps over a 12³ window, one group a core (the uExtend pattern, §5 of m3-cpages.md).
+
+Rule from this round: **before reshaping a 64-lane C pass, compare its groups in flight with cap / 64**. If it is
+below, workgroup memory is the bound. Shrink that before anything else, and add none without an A/B.
+
+### Landed
+
+Each commit passed `npm run check:types` and `npm run test:unit` (2584 tests, 0 failures).
+- d09b19d8: lcAdvect over two 256-lane workgroups a page.
+  - ARGS.C_ACT2_G1 = 430; setArgs writes 2 n(C_ACT). ARGS_LIST_END is 433.
+  - `LC_ADVECT_GROUPS = { indirect: ARGS.C_ACT2_G1 }`. The GPU level-set tests dispatch from it.
+- 4637b225: censusCoarse workgroup memory packed.
+- ecfce4fb: certError flags packed.
+
+### Scene-level gates
+
+**stepab** (m4-stepab.mts, step 100; m4/m5/stepab-<scene>.txt):
+- Base: an export of 9c82f1df with the batch's ABI word and setArgs, the kernels and placements at 9c82f1df.
+- Candidate: 9c82f1df plus the batch.
+
+| scene | exact | lcAdvect | censusCoarse | certError | changed Σ Δ (A/A) | GPU wall min (A/A) |
+|---|---|---|---|---|---|---|
+| seep | 7 of 7 | 0.723 → 0.523 | 0.439 → 0.390 | 0.206 → 0.161 | **−0.304 ms, −1.59%** (−0.014) | −0.234 ms, −1.23% (+0.084) |
+| dam | 7 of 7 | 0.701 → 0.545 | 0.282 → 0.256 | 0.111 → 0.106 | **−0.184 ms, −0.62%** (−0.015) | −0.297 ms, −1.01% (−0.036) |
+| letters | 7 of 7 | 0.948 → 0.650 | 0.581 → 0.528 | 0.176 → 0.163 | **−0.349 ms, −0.78%** (−0.012) | −0.533 ms, −1.19% (+0.076) |
+| paddleboats | 7 of 7 | 1.139 → 0.737 | 0.726 → 0.655 | 0.244 → 0.215 | **−0.494 ms, −1.47%** (−0.001) | −0.665 ms, −1.97% (−0.138) |
+
+"7 of 7": the five lc* kernels share one module text, which the lcAdvect commit changed in comments and in lcAdvect's
+ring. All five are identical.
+
+**Timing round** (tools/nbflip-timing-round.sh, balanced order; base export 9c82f1df, candidate ecfce4fb;
+m4/m5/round/):
+- 16 of 16 runs returned rc 0, metal.txt (the round's metal.log) is empty, and `log show` found no 00000206 abort.
+- Peak GPU MB is unchanged on every scene. Construction changed by −0.3 to +0.0%.
+
+| scene | fenced median | pipelined ms/step | order-balanced | volume drift at the end, base → candidate (fenced / pipelined) |
+|---|---|---|---|---|
+| seep (1200 steps) | 25.62 → 25.61 | 24.70 → 23.99 | **−1.5%** | −0.588 → −0.710% / −0.619 → −0.625% |
+| dam (165 steps) | 32.13 → 32.01 | 34.56 → 33.71 | **−1.4%** | |
+| letters (240 steps) | 51.21 → 51.79 | 42.95 → 42.41 | **−0.1%** | +0.677 → +0.416% / +0.538 → +0.464% |
+| paddleboats (300 steps) | 35.63 → 35.34 | 34.15 → 33.55 | **−1.3%** | |
+
+Reading the round:
+- **Letters.** Its fenced pair moved +1.1% against stepab's −0.35 ms (−0.8%) on the frozen letters step. Every
+  changed placement is bit-identical there, so (inference) this is the round's run-to-run spread, not a cost.
+- **Drift.** It moves between runs of the same tree as much as between trees:
+  - base letters is +0.677% fenced against +0.538% pipelined;
+  - M4's base letters was +0.622%.
+  - The kernels write identical words from a frozen state. Inference: the free-running drift spread is atomic-order
+    nondeterminism.

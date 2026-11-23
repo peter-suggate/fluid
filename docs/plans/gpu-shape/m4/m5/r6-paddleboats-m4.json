@@ -1,0 +1,42 @@
+{
+ "scene": "paddleboats",
+ "key": "paddleboats",
+ "head": "6be6abbd",
+ "warmup": 100,
+ "R": 7,
+ "CR": 3,
+ "steps": 100,
+ "date": "2026-11-23T20:49:22.036Z",
+ "status": " M lib/cloth/contact/ogc-detector-wgsl.ts\n M lib/cloth/contact/ogc-detector.ts\n M lib/cloth/contact/ogc-wgsl.ts\n M lib/cloth/gpu-solver-wgsl.ts\n M lib/cloth/system.ts\n M lib/core/webgpu-water-pipeline.ts\n M tools/experiments/gpu-shape/m1/variants.mts\n M tools/experiments/gpu-shape/m4.mts\n M tools/experiments/lane-n/dump-msl.mts\n M tools/experiments/lane-n/features.mts\n?? lib/core/water-caustic-receiver.wgsl.ts\n?? probe-inflow.mts\n?? tests/water-caustic-receiver.test.ts\n",
+ "placements": {
+  "82": {
+   "label": "lcRetire",
+   "part": 2,
+   "dispatch": {
+    "indirect": 225
+   },
+   "variants": {},
+   "rw": [
+    "set",
+    "phi"
+   ],
+   "exact": {
+    "base": {
+     "words": 0,
+     "first": -1,
+     "sentinel": 0
+    },
+    "gcache": {
+     "words": 113,
+     "first": 16175767,
+     "sentinel": 0
+    },
+    "gcheck": {
+     "words": 22,
+     "first": 16187124,
+     "sentinel": 0
+    }
+   }
+  }
+ }
+}

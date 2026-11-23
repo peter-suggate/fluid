@@ -1,0 +1,33 @@
+seep step 100: 290 placements, 7 with the candidate's text (censusCoarse, certError, lcAdvect, lcCouple, lcClear, lcRetire, lcPublish); base /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m5/sab-base-9c82f1df, candidate /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m5/sab-cand-9c82f1df
+fail/info words at the frozen state: 0x0/0x0
+exact #6 censusCoarse: ok: set identical, census identical
+exact #33 certError: ok: set identical, census identical
+exact #64 lcAdvect z0: ok: set identical, phi identical
+exact #67 lcCouple z0: ok: set identical, phi identical
+exact #75 lcClear z0: ok: set identical, phi identical, fcell identical
+exact #85 lcRetire z0: ok: set identical, phi identical
+exact #87 lcPublish z0: ok: set identical, phi identical
+exactness: 7 of 7 changed placements identical
+base: Σ placements min 19.506 ms, median 19.611; Σ of family minima 19.149 ms; GPU wall min 18.975 ms, median 19.140; clock probe 76.1 76.1 76.0 76.1 76.2 76.3 81.0 76.2 76.1 us (top 75.5)
+candidate: Σ placements min 19.232 ms, median 19.263; Σ of family minima 18.754 ms; GPU wall min 18.741 ms, median 18.778; clock probe 76.1 76.2 76.2 76.2 76.0 76.0 76.4 76.2 76.1 us (top 75.5)
+base again: Σ placements min 19.505 ms, median 19.583; Σ of family minima 19.099 ms; GPU wall min 19.059 ms, median 19.165; clock probe 76.1 76.2 76.2 76.2 76.3 76.5 76.2 76.2 76.1 us (top 75.5)
+families (min of samples; A/A = base again - base), the changed ones and the 8 largest other |Δ|:
+  * lcAdvect               0.723 -> 0.523 ms  -0.200 (-27.7%)  A/A -0.009
+  * censusCoarse           0.439 -> 0.390 ms  -0.049 (-11.1%)  A/A -0.003
+  * certError              0.206 -> 0.161 ms  -0.045 (-21.8%)  A/A -0.002
+  * lcRetire               0.664 -> 0.660 ms  -0.004 (-0.5%)  A/A +0.005
+  * lcCouple               0.110 -> 0.107 ms  -0.003 (-2.8%)  A/A -0.003
+  * lcClear                0.109 -> 0.107 ms  -0.003 (-2.4%)  A/A -0.003
+  * lcPublish              0.022 -> 0.022 ms  +0.000 (0.3%)  A/A -0.000
+    censusDecide           0.810 -> 0.779 ms  -0.032 (-3.9%)  A/A -0.022
+    phiSolid               0.849 -> 0.834 ms  -0.015 (-1.7%)  A/A -0.009
+    uExt4                  0.267 -> 0.256 ms  -0.011 (-4.1%)  A/A -0.014
+    pmgDirection           0.325 -> 0.314 ms  -0.011 (-3.3%)  A/A -0.011
+    uAdvect                0.618 -> 0.629 ms  +0.010 (1.7%)  A/A -0.001
+    pDeposit               0.218 -> 0.227 ms  +0.008 (3.9%)  A/A +0.010
+    pmgNativePre0          0.176 -> 0.184 ms  +0.008 (4.6%)  A/A +0.007
+    uExtend                0.656 -> 0.648 ms  -0.007 (-1.1%)  A/A +0.008
+GATE seep: changed families Σ Δ -0.304 ms (-1.59% of the step's 19.149 ms Σ), their A/A -0.014 ms; unchanged families Σ Δ -0.091 ms, A/A -0.036 ms; Σ placements min -0.274 ms (A/A -0.001); GPU wall min -0.234 ms (-1.23%; A/A +0.084)
+ok
+fluid-gpu-run: GPU memory in use 0.41 GB at start, peak 4.63 GB; 4 process(es) in the tree
+rc 0

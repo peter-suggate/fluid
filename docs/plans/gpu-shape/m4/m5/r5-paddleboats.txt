@@ -1,0 +1,47 @@
+targets: 6:censusCoarse.id 29:certCoarse.id 31:certError.id 43:uCache4.id 61:lcAdvect.id 64:lcCouple.id 82:lcRetire.gcache 82:lcRetire.gfetch 82:lcRetire.gcheck 84:lcPublish.id 294:pressureProjectC.id 300:uExt4.id
+  exact 6 censusCoarse (set,census): base 0, id 0 words differ
+  exact 29 certCoarse (set,census): base 0, id 0 words differ
+  exact 31 certError (set,census): base 0, id 0 words differ
+  exact 43 uCache4 (set,fcell): base 0, id 0 words differ
+  exact 61 lcAdvect (set,phi): base 0, id 0 words differ
+  exact 64 lcCouple (set,phi): base 0, id 0 words differ
+  exact 82 lcRetire (set,phi): base 0, gcache 113, gfetch 0, gcheck 32 words differ
+  exact 84 lcPublish (set,phi): base 0, id 0 words differ
+  exact 294 pressureProjectC (set,vel,phi,pres,census): base 0, id 0 words differ
+  exact 300 uExt4 (set,vel,fext4): base 0, id 0 words differ
+  time   6 censusCoarse   base 731.1 med 746.1  id 709.3 (-21.8) med 724.3 us
+  time  29 certCoarse     base 218.0 med 219.0  id 219.1 (1.0) med 224.4 us
+  time  31 certError      base 254.4 med 261.8  id 248.0 (-6.4) med 263.6 us
+  time  43 uCache4        base 70.7 med 79.5  id 70.1 (-0.7) med 80.2 us
+  time  61 lcAdvect       base 1114.7 med 1153.2  id 1104.9 (-9.7) med 1127.4 us
+  time  64 lcCouple       base 175.8 med 190.3  id 176.0 (0.2) med 189.7 us
+  time  82 lcRetire       base 937.2 med 963.1  gcache 782.0 (-155.2) med 819.4  gfetch 909.7 (-27.5) med 955.7  gcheck 903.6 (-33.6) med 960.7 us
+  time  84 lcPublish      base 25.9 med 26.6  id 26.1 (0.2) med 27.9 us
+  time 294 pressureProjectC base 200.2 med 226.7  id 205.6 (5.3) med 208.1 us
+  time 300 uExt4          base 347.8 med 371.6  id 316.6 (-31.2) med 358.7 us
+time: clock probe 76.1 76.5 76.4 76.5 76.8
+  clock   6 censusCoarse   base     pass 734.3 us state 2 2192/2192; dur p50 59.3 p90 129.1 max 275.7; span 731.5, 95% ended 594.4, tail 137.0 us; in flight 251 211 248 253 242 232 248 243 244 244 244 241 218 38 10 2
+  clock   6 censusCoarse   id       pass 748.1 us state 2 2192/2192; dur p50 59.6 p90 126.5 max 279.7; span 720.9, 95% ended 593.2, tail 127.7 us; in flight 251 190 250 251 240 237 249 250 241 235 237 240 207 61 17 3
+  clock  29 certCoarse     base     pass 244.9 us state 2 2192/2192; dur p50 30.3 p90 45.0 max 121.5; span 221.3, 95% ended 148.3, tail 73.0 us; in flight 415 415 415 408 411 411 411 409 398 334 136 68 30 12 7 3
+  clock  29 certCoarse     id       pass 251.1 us state 2 2192/2192; dur p50 29.8 p90 43.5 max 118.3; span 212.8, 95% ended 148.8, tail 64.1 us; in flight 398 415 415 413 414 399 409 398 399 330 196 91 35 12 7 5
+  clock  31 certError      base     pass 296.0 us state 2 2192/2192; dur p50 26.8 p90 31.7 max 50.4; span 247.9, 95% ended 234.7, tail 13.2 us; in flight 255 254 252 244 246 235 226 211 169 221 212 209 226 199 184 18
+  clock  31 certError      id       pass 298.8 us state 2 2192/2192; dur p50 25.4 p90 32.7 max 51.1; span 259.8, 95% ended 229.3, tail 30.6 us; in flight 255 255 244 240 227 238 223 240 241 236 205 219 200 195 61 6
+  clock  43 uCache4        base     pass 76.5 us state 2 274/274; dur p50 9.9 p90 48.7 max 66.9; span 66.9, 95% ended 53.8, tail 13.1 us; in flight 192 192 153 105 62 54 53 45 41 34 33 32 19 7 5 2
+  clock  43 uCache4        id       pass 76.7 us state 2 274/274; dur p50 10.8 p90 47.3 max 62.9; span 74.0, 95% ended 57.2, tail 16.8 us; in flight 192 190 132 97 55 53 51 43 37 34 32 28 12 6 6 2
+  clock  61 lcAdvect       base     pass 1134.7 us state 2 2192/2192; dur p50 121.0 p90 164.0 max 277.9; span 1050.9, 95% ended 927.8, tail 123.1 us; in flight 255 255 236 254 244 251 253 248 247 247 249 254 247 205 46 3
+  clock  61 lcAdvect       id       pass 1115.7 us state 2 2192/2192; dur p50 122.7 p90 188.6 max 264.0; span 1112.3, 95% ended 985.3, tail 127.0 us; in flight 255 255 250 251 247 242 250 252 244 252 248 246 252 191 76 5
+  clock  64 lcCouple       base     pass 208.7 us state 2 2192/2192; dur p50 14.4 p90 21.7 max 129.3; span 162.7, 95% ended 117.1, tail 45.6 us; in flight 101 291 306 289 307 305 289 315 303 288 257 111 38 13 4 2
+  clock  64 lcCouple       id       pass 206.7 us state 2 2192/2192; dur p50 13.2 p90 21.0 max 112.0; span 169.6, 95% ended 108.2, tail 61.4 us; in flight 109 290 308 282 307 306 305 296 289 249 78 19 11 3 1 1
+  clock  82 lcRetire       base     pass 1148.2 us state 2 2192/2192; dur p50 63.8 p90 151.8 max 816.3; span 1109.1, 95% ended 434.4, tail 674.7 us; in flight 508 511 501 510 436 220 85 47 39 29 20 8 3 2 1 1
+  clock  82 lcRetire       gcache   pass 931.5 us state 2 2192/2192; dur p50 68.4 p90 138.6 max 867.8; span 884.2, 95% ended 409.7, tail 474.5 us; in flight 435 511 500 506 505 481 242 96 45 30 21 18 9 3 2 2
+  clock  82 lcRetire       gfetch   pass 1022.7 us state 2 2192/2192; dur p50 74.8 p90 170.7 max 902.1; span 1021.6, 95% ended 449.2, tail 572.4 us; in flight 485 509 505 505 507 497 269 60 31 23 19 14 9 2 2 1
+  clock  82 lcRetire       gcheck   pass 1070.4 us state 2 2192/2192; dur p50 57.8 p90 140.8 max 846.7; span 998.7, 95% ended 363.1, tail 635.6 us; in flight 510 511 505 503 507 168 52 29 25 19 16 8 4 2 2 1
+  clock  84 lcPublish      base     pass 66.3 us state 2 274/274; dur p50 4.1 p90 11.7 max 19.7; span 19.7, 95% ended 13.7, tail 6.0 us; in flight 224 224 207 145 124 77 51 41 34 27 19 7 4 3 3 2
+  clock  84 lcPublish      id       pass 66.2 us state 2 274/274; dur p50 4.1 p90 11.4 max 16.3; span 16.3, 95% ended 13.4, tail 2.8 us; in flight 224 224 224 214 139 123 79 57 47 36 31 28 20 10 1 1
+  clock 294 pressureProjectC base     pass 210.4 us state 2 274/274; dur p50 18.6 p90 66.6 max 115.3; span 203.0, 95% ended 178.0, tail 24.9 us; in flight 31 64 63 64 64 63 62 63 62 54 54 46 33 20 8 4
+  clock 294 pressureProjectC id       pass 260.4 us state 2 274/274; dur p50 19.1 p90 60.0 max 107.3; span 217.2, 95% ended 171.2, tail 46.0 us; in flight 31 64 64 64 64 63 61 59 57 48 35 24 15 8 4 1
+  clock 300 uExt4          base     pass 426.2 us state 2 274/274; dur p50 30.7 p90 71.1 max 120.1; span 392.2, 95% ended 332.5, tail 59.7 us; in flight 32 11 32 29 30 32 32 31 29 25 20 13 10 6 4 2
+  clock 300 uExt4          id       pass 415.7 us state 2 274/274; dur p50 31.6 p90 70.5 max 122.7; span 412.5, 95% ended 314.4, tail 98.1 us; in flight 32 31 32 31 32 32 32 29 29 19 18 11 8 4 3 3
+clock: probe 76.3 us
+fluid-gpu-run: GPU memory in use 0.79 GB at start, peak 7.25 GB; 2 process(es) in the tree
+rc 0

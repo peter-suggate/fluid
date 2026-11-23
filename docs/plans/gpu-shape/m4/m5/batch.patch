@@ -1,0 +1,401 @@
+diff --git a/lib/methods/narrow-band/brick-abi.ts b/lib/methods/narrow-band/brick-abi.ts
+index e70429f7..283b47e5 100644
+--- a/lib/methods/narrow-band/brick-abi.ts
++++ b/lib/methods/narrow-band/brick-abi.ts
+@@ -174,10 +174,11 @@ const LAST_LIST = 18;
+  * C_ALL's pages), FA_* at 400 (F_ACT's bricks, then C_ALL's pages) and FCA_* at 412 (F_ALL's bricks, then C_ACT's
+  * pages), FCA2_G1 at 421 (C_ACT's pages twice, then F_ALL's bricks: uTransfer's pages first, a page over two
+  * workgroups), C_ACT4_G1 at 424 (C_ACT's pages four times: uExt4Seed, a page over four workgroups) and C_ALL2_G1
+- * at 427 (C_ALL's pages twice: pressureRowsC, a page over two). Lanes: P from 512, F from 2048. */
+-export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, X8: 9, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, FA_G1: 400, FA_G8: 403, FA_G64: 406, FCA_G1: 412, FCA_G8: 415, FCA_G64: 418, FCA2_G1: 421, C_ACT4_G1: 424, C_ALL2_G1: 427, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
++ * at 427 (C_ALL's pages twice: pressureRowsC, a page over two) and C_ACT2_G1 at 430 (C_ACT's pages twice: lcAdvect,
++ * a page over two workgroups of four z planes). Lanes: P from 512, F from 2048. */
++export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, X8: 9, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, FA_G1: 400, FA_G8: 403, FA_G64: 406, FCA_G1: 412, FCA_G8: 415, FCA_G64: 418, FCA2_G1: 421, C_ACT4_G1: 424, C_ALL2_G1: 427, C_ACT2_G1: 430, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
+ /** The end of the list arguments a stage may dispatch from, below the lanes' regions (the last triple's last word + 1). */
+-export const ARGS_LIST_END = ARGS.C_ALL2_G1 + 3;
++export const ARGS_LIST_END = ARGS.C_ACT2_G1 + 3;
+ 
+ /**
+  * The active class (brick-abi.md §5.5), a word an F slot (set region ACT):
+diff --git a/lib/methods/narrow-band/brick-census.wgsl.ts b/lib/methods/narrow-band/brick-census.wgsl.ts
+index a2d85bcc..c94cfd44 100644
+--- a/lib/methods/narrow-band/brick-census.wgsl.ts
++++ b/lib/methods/narrow-band/brick-census.wgsl.ts
+@@ -1253,29 +1253,34 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
+   // (tile z = r), a lane a tile; every workgroup word is the 64-tile slab's, so the slabs run side by side.
+   // Out-of-lattice tiles store identity keys and zero words; an h tile without its F brick fails (TIER) when tiered,
+   // and is air all-h (CMASK all-ones a resident page: no slot reads NB_PHI_FAR), so it stores the identity.
++  // Workgroup memory 4.5 KB (GPU-shape M5, docs/plans/gpu-shape/m4-clist.md §6): the job lists packed (cqError and
++  // cqDeep a byte a tile, cqVertex and cqPart 16 bits an entry, atomicOr into words zeroed before the first barrier),
++  // cqIsDeep and cqBounded a bit a tile. At 7.1 KB the residency was the workgroup memory's (~8 groups a core under
++  // a 704-thread cap); at 4.5 KB ~10 (frozen paddleboats 0.71 -> 0.66 ms, dam 0.27 -> 0.25, bit for bit).
+   const censusCoarse = k("censusCoarse", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + REGION + /* wgsl */`
+ var<workgroup> wgFlag:u32;
+ var<workgroup> cqErrors:atomic<u32>;
+-var<workgroup> cqError:array<u32,64>;
++var<workgroup> cqError:array<atomic<u32>,16>;
+ var<workgroup> cqDeeps:atomic<u32>;
+-var<workgroup> cqDeep:array<u32,64>;
++var<workgroup> cqDeep:array<atomic<u32>,16>;
+ var<workgroup> cqWorst:array<atomic<u32>,64>;
+ var<workgroup> cqCurve:array<atomic<u32>,64>;
+ var<workgroup> cqDeepest:array<array<atomic<u32>,2>,64>;
+ // The slab's depth vertices (the 11 x 11 x 4 box of its tiles' 4^3 wide vertices, from (-1,-1,-1) of the slab's
+ // first tile): each one a deep tile reads is sampled once (cqVertex lists them, cqVertexSeen a bit each) and raises
+ // every deep tile holding it.
+-var<workgroup> cqIsDeep:array<u32,64>;
++var<workgroup> cqIsDeep:array<atomic<u32>,2>;
+ var<workgroup> cqVertexSeen:array<atomic<u32>,16>;
+ var<workgroup> cqVertices:atomic<u32>;
+-var<workgroup> cqVertex:array<u32,484>;
+-var<workgroup> cqBounded:array<u32,64>;
++var<workgroup> cqVertex:array<atomic<u32>,242>;
++var<workgroup> cqBounded:array<atomic<u32>,2>;
+ var<workgroup> cqLow:array<array<atomic<u32>,3>,64>;
+ var<workgroup> cqHigh:array<array<atomic<u32>,3>,64>;
+ var<workgroup> cqParts:atomic<u32>;
+ // A face job j (owner j / 6, axis (j % 6) / 2, sign j & 1) beside an h tile, whose sixteen h patches the parts take;
+-// its probe cell, the face job's.
+-var<workgroup> cqPart:array<u32,384>;
++// its probe cell, the face job's. Two entries a word (entry k in bits 16 (k & 1)); cqVertex likewise, cqError and
++// cqDeep four (bits 8 (k & 3)).
++var<workgroup> cqPart:array<atomic<u32>,192>;
+ fn cqFaceProbe(cs:u32,r:u32,j:u32)->vec3i{
+   let owner=j/6u;let axis=(j%6u)/2u;let sign=select(-1,1,(j&1u)!=0u);
+   let origin=4*xTileOf(cs,owner+64u*r);var probe=origin;probe[axis]+=select(-1,4,sign>0);
+@@ -1304,9 +1309,9 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
+   {
+     if(lane==0u){atomicStore(&cqErrors,0u);atomicStore(&cqDeeps,0u);atomicStore(&cqParts,0u);atomicStore(&cqVertices,0u);}
+     if(lane<16u){atomicStore(&cqVertexSeen[lane],0u);}
+-    cqIsDeep[lane]=0u;
++    if(lane<2u){atomicStore(&cqIsDeep[lane],0u);atomicStore(&cqBounded[lane],0u);}if(lane<16u){atomicStore(&cqError[lane],0u);atomicStore(&cqDeep[lane],0u);}
++    for(var z=lane;z<242u;z+=64u){atomicStore(&cqVertex[z],0u);if(z<192u){atomicStore(&cqPart[z],0u);}}
+     for(var a=0u;a<3u;a++){atomicStore(&cqLow[lane][a],ncOrderKey(3.0e38));atomicStore(&cqHigh[lane][a],ncOrderKey(-3.0e38));}
+-    cqBounded[lane]=0u;
+     atomicStore(&cqWorst[lane],0u);atomicStore(&cqCurve[lane],0u);atomicStore(&cqDeepest[lane][0],0u);atomicStore(&cqDeepest[lane][1],0u);
+     workgroupBarrier();
+     let i=lane+64u*r;let t=xTileOf(cs,i);
+@@ -1317,50 +1322,50 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
+       let b=t>>vec3u(1u);
+       if(nbFSlotOfBrick(b)>=NB_SEAM){${tiered ? "nbFail(NB_FAIL_TIER,nbKey(b));" : ""}ncStoreIdentity(cs,i);}
+     }else{
+-      classified=true;cqBounded[lane]=1u;
++      classified=true;atomicOr(&cqBounded[lane>>5u],1u<<(lane&31u));
+       ncClassifyOwner(t,4u,0u,&c,false);
+-      if((c.flags&2u)!=0u&&NC_TOL>0.0){cqError[atomicAdd(&cqErrors,1u)]=lane;}
+-      if((c.flags&2u)!=0u){cqDeep[atomicAdd(&cqDeeps,1u)]=lane;cqIsDeep[lane]=1u;}
++      if((c.flags&2u)!=0u&&NC_TOL>0.0){let k=atomicAdd(&cqErrors,1u);atomicOr(&cqError[k>>2u],lane<<(8u*(k&3u)));}
++      if((c.flags&2u)!=0u){let k=atomicAdd(&cqDeeps,1u);atomicOr(&cqDeep[k>>2u],lane<<(8u*(k&3u)));atomicOr(&cqIsDeep[lane>>5u],1u<<(lane&31u));}
+     }
+     workgroupBarrier();
+     // Face jobs (umFaceFirst, l.691): one patch, or sixteen h patches beside an h tile.
+     for(var j=lane;j<6u*64u;j+=64u){
+-      let owner=j/6u;if(cqBounded[owner]==0u){continue;}
++      let owner=j/6u;if(((atomicLoad(&cqBounded[owner>>5u])>>(owner&31u))&1u)==0u){continue;}
+       let axis=(j%6u)/2u;let sign=select(-1,1,(j&1u)!=0u);
+       let probe=cqFaceProbe(cs,r,j);
+       var nw=0u;if(ncCellKind(probe)==0u){nw=select(4u,1u,ncCellOwnerH(probe));}
+       let width=min(4u,select(4u,nw,nw!=0u));let side=4u/width;var anchor=probe;anchor[axis]-=select(0,1,sign>0);
+       if(side*side==1u){cqBound(owner,axis,anchor);}
+-      else{cqPart[atomicAdd(&cqParts,1u)]=j;}
++      else{let k=atomicAdd(&cqParts,1u);atomicOr(&cqPart[k>>1u],j<<(16u*(k&1u)));}
+     }
+     let errors=atomicLoad(&cqErrors);
+     for(var j=lane;j<8u*errors;j+=64u){
+-      let owner=cqError[j/8u];ncCoarseCurve=0.0;
++      let owner=(atomicLoad(&cqError[(j/8u)>>2u])>>(8u*((j/8u)&3u)))&255u;ncCoarseCurve=0.0;
+       let error=ncResolutionError4(xTileOf(cs,owner+64u*r),j%8u);
+       atomicMax(&cqWorst[owner],bitcast<u32>(error));atomicMax(&cqCurve[owner],bitcast<u32>(ncCoarseCurve));
+     }
+     // Depth jobs (umDepthSample, lane j % 64 of deep tile j / 64): the vertex t + corner - 1 of deep tile t, listed once.
+     let deeps=atomicLoad(&cqDeeps);
+     for(var j=lane;j<64u*deeps;j+=64u){
+-      let owner=cqDeep[j/64u];let c=ncCorner(j%64u,4u);
++      let owner=(atomicLoad(&cqDeep[(j/64u)>>2u])>>(8u*((j/64u)&3u)))&255u;let c=ncCorner(j%64u,4u);
+       let v=(owner&7u)+c.x+11u*((owner>>3u)+c.y)+121u*c.z;
+       let bit=1u<<(v&31u);
+-      if((atomicOr(&cqVertexSeen[v>>5u],bit)&bit)==0u){cqVertex[atomicAdd(&cqVertices,1u)]=v;}
++      if((atomicOr(&cqVertexSeen[v>>5u],bit)&bit)==0u){let k=atomicAdd(&cqVertices,1u);atomicOr(&cqVertex[k>>1u],v<<(16u*(k&1u)));}
+     }
+     workgroupBarrier();
+     let vertices=atomicLoad(&cqVertices);let first=xTileOf(cs,64u*r);
+     for(var j=lane;j<vertices;j+=64u){
+-      let v=cqVertex[j];let u=vec3u(v%11u,(v/11u)%11u,v/121u);
++      let v=(atomicLoad(&cqVertex[j>>1u])>>(16u*(j&1u)))&0xffffu;let u=vec3u(v%11u,(v/11u)%11u,v/121u);
+       let d=ncDepthAt(first+vec3i(u)-vec3i(1));
+       // The slab's tiles holding u: x in u.x-3..u.x, y in u.y-3..u.y (its z is the slab's).
+       for(var y=max(i32(u.y)-3,0);y<=min(i32(u.y),7);y++){for(var x=max(i32(u.x)-3,0);x<=min(i32(u.x),7);x++){
+-        let owner=u32(x)+8u*u32(y);if(cqIsDeep[owner]==0u){continue;}
++        let owner=u32(x)+8u*u32(y);if(((atomicLoad(&cqIsDeep[owner>>5u])>>(owner&31u))&1u)==0u){continue;}
+         atomicMax(&cqDeepest[owner][0],d.x);atomicMax(&cqDeepest[owner][1],d.y);
+       }}
+     }
+     let parts=atomicLoad(&cqParts);
+     for(var j=lane;j<16u*parts;j+=64u){
+-      let face=cqPart[j/16u];let part=j%16u;
++      let face=(atomicLoad(&cqPart[(j/16u)>>1u])>>(16u*((j/16u)&1u)))&0xffffu;let part=j%16u;
+       let axis=(face%6u)/2u;var anchor=cqFaceProbe(cs,r,face);anchor[axis]-=select(0,1,(face&1u)!=0u);
+       anchor[(axis+1u)%3u]+=i32(part%4u);anchor[(axis+2u)%3u]+=i32(part/4u);
+       cqBound(face/6u,axis,anchor);
+diff --git a/lib/methods/narrow-band/brick-fluid-stages.ts b/lib/methods/narrow-band/brick-fluid-stages.ts
+index 7c99865b..9eda09e3 100644
+--- a/lib/methods/narrow-band/brick-fluid-stages.ts
++++ b/lib/methods/narrow-band/brick-fluid-stages.ts
+@@ -63,7 +63,8 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
+   // Still-tank A: the passes that skip the STILL pages (F_ALL's bricks, then C_ACT's pages; C_ACT's pages).
+   const bothAct: BrickDispatch = tiered ? { indirect: ARGS.FCA_G1 } : all, pagesAct = list(LIST.C_ACT, "G1");
+   const c = tiered ? levelSetCoarseKernels(L, F) : undefined;
+-  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: list(LIST.C_ACT, LC_GROUPS[kernel]), z: 0, w: 0 }] : [];
++  const lcDispatch = (g: (typeof LC_GROUPS)[keyof typeof LC_GROUPS]): BrickDispatch => (typeof g === "string" ? list(LIST.C_ACT, g) : g);
++  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: lcDispatch(LC_GROUPS[kernel]), z: 0, w: 0 }] : [];
+   // The record passes run over the live records (pArgs's arguments), not the bank's capacity.
+   const records: BrickDispatch = { indirect: P_ARGS_RECORDS };
+   const at = (kernel: BrickKernel, dispatch: BrickDispatch, z = 0, w = 0): BrickPlacement => ({ kernel, dispatch, z, w });
+diff --git a/lib/methods/narrow-band/brick-region-heat.wgsl.ts b/lib/methods/narrow-band/brick-region-heat.wgsl.ts
+index 14b0c1e3..1190072e 100644
+--- a/lib/methods/narrow-band/brick-region-heat.wgsl.ts
++++ b/lib/methods/narrow-band/brick-region-heat.wgsl.ts
+@@ -397,10 +397,15 @@ ${uniformTileFineDefectWGSL}
+   const certError = k("certError", STILL_PAGE + /* wgsl */`
+ var<workgroup> wgGo:u32;
+ // The region's 10^3 tile neighbourhood (from 4R - 3): bits 0..1 the seed flags, bit 2 stored (a resident page's tile
+-// in the lattice: umKeyStored); then the x pass on 4 x 10 x 10, the y pass on 4 x 4 x 10.
+-var<workgroup> sSeed:array<u32,1000>;
+-var<workgroup> sX:array<u32,400>;
+-var<workgroup> sY:array<u32,160>;
++// in the lattice: umKeyStored); then the x pass on 4 x 10 x 10, the y pass on 4 x 4 x 10. Four entries a word (entry
++// k in bits 8 (k & 3)), a lane a word: 1.6 KB of workgroup memory, not 6.2 (GPU-shape M5, m4-clist.md §6: ~8 groups a
++// core at 6.2 KB under a 1024-thread cap, ~18 at 1.6; frozen paddleboats 0.24 -> 0.21 ms, dam 0.11 -> 0.10, bit for bit).
++var<workgroup> sSeed:array<u32,250>;
++var<workgroup> sX:array<u32,100>;
++var<workgroup> sY:array<u32,40>;
++fn ceSeed(c:u32)->u32{return (sSeed[c>>2u]>>(8u*(c&3u)))&255u;}
++fn ceX(c:u32)->u32{return (sX[c>>2u]>>(8u*(c&3u)))&255u;}
++fn ceY(c:u32)->u32{return (sY[c>>2u]>>(8u*(c&3u)))&255u;}
+ var<workgroup> eErr:atomic<u32>;var<workgroup> eRate:atomic<u32>;var<workgroup> eAcc:atomic<u32>;
+ var<workgroup> eRel:atomic<u32>;var<workgroup> eClass:atomic<u32>;var<workgroup> eFine:atomic<u32>;
+ var<workgroup> eVel:array<atomic<u32>,6>;
+@@ -430,31 +435,34 @@ fn ceMean(T:vec3i)->vec3f{
+   }
+   if(workgroupUniformLoad(&wgGo)==2u){if(lane==0u){rgDeep(cs,r,false);}return;}
+   let origin=4*rgCoord(cs,r)-vec3i(3);
+-  for(var k=lane;k<1000u;k+=64u){
++  for(var m=lane;m<250u;m+=64u){var word=0u;for(var b=0u;b<4u;b++){let k=4u*m+b;
+     let T=origin+vec3i(i32(k%10u),i32((k/10u)%10u),i32(k/100u));var w=0u;
+     if(nbTileInLattice(T)){
+       let ps=nbCSlotOfPage(T>>vec3u(3u));
+       if(ps!=NB_NONE){w=4u|select(0u,3u,(census[NC_S*ps+RG_TC+16u*ncTileLocal(T)+8u]&1u)!=0u);}
+     }
+-    sSeed[k]=w;
++    word|=w<<(8u*b);}
++    sSeed[m]=word;
+   }
+   workgroupBarrier();
+-  for(var k=lane;k<400u;k+=64u){
++  for(var m=lane;m<100u;m+=64u){var word=0u;for(var b=0u;b<4u;b++){let k=4u*m+b;
+     let c=3u+(k%4u)+10u*(k/4u);var f=0u;
+-    if((sSeed[c]&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(sSeed[u32(i32(c)+d)],d);}}
+-    sX[k]=f;
++    if((ceSeed(c)&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(ceSeed(u32(i32(c)+d)),d);}}
++    word|=f<<(8u*b);}
++    sX[m]=word;
+   }
+   workgroupBarrier();
+-  for(var k=lane;k<160u;k+=64u){
++  for(var m=lane;m<40u;m+=64u){var word=0u;for(var b=0u;b<4u;b++){let k=4u*m+b;
+     let c=(k%4u)+4u*(3u+((k/4u)%4u)+10u*(k/16u));var f=0u;
+-    if((sX[c]&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(sX[u32(i32(c)+4*d)],d);}}
+-    sY[k]=f;
++    if((ceX(c)&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(ceX(u32(i32(c)+4*d)),d);}}
++    word|=f<<(8u*b);}
++    sY[m]=word;
+   }
+   workgroupBarrier();
+   let i=rgTile(r,lane);let t=xTileOf(cs,i);
+   if(nbTileInLattice(t)){
+     let c=(lane&15u)+16u*(3u+(lane>>4u));var support=0u;
+-    for(var d=-3;d<=3;d++){support|=ceDilate(sY[u32(i32(c)+16*d)],d);}
++    for(var d=-3;d<=3;d++){support|=ceDilate(ceY(u32(i32(c)+16*d)),d);}
+     let o=NC_S*cs+RG_TC+16u*i;let h=ncH();
+     let bits=census[o+8u];let width=census[o+5u];
+     // tuReaderClass: 0 unused, 1 submerged, 2 surface (open: every cell at M2).
+diff --git a/lib/methods/narrow-band/brick-set.wgsl.ts b/lib/methods/narrow-band/brick-set.wgsl.ts
+index 043333bb..aa84132c 100644
+--- a/lib/methods/narrow-band/brick-set.wgsl.ts
++++ b/lib/methods/narrow-band/brick-set.wgsl.ts
+@@ -553,7 +553,8 @@ fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold
+   // FCA: at least one workgroup, uAdvect's group 0 sets the volume control's rate (every page still, no F brick).
+   if(lid==NB_LIST_C_ACT+3u){let nA=count(NB_LIST_F_ALL)+count(NB_LIST_C_ACT);fold(NB_ARGS_FCA_G1,max(nA,1u));fold(NB_ARGS_FCA_G8,(nA+7u)/8u);fold(NB_ARGS_FCA_G64,(nA+63u)/64u);
+     fold(NB_ARGS_FCA2_G1,count(NB_LIST_F_ALL)+2u*count(NB_LIST_C_ACT));
+-    fold(NB_ARGS_C_ACT4_G1,4u*count(NB_LIST_C_ACT));fold(NB_ARGS_C_ALL2_G1,2u*count(NB_LIST_C_ALL));}
++    fold(NB_ARGS_C_ACT4_G1,4u*count(NB_LIST_C_ACT));fold(NB_ARGS_C_ALL2_G1,2u*count(NB_LIST_C_ALL));
++    fold(NB_ARGS_C_ACT2_G1,2u*count(NB_LIST_C_ACT));}
+   if(lid==NB_LIST_C_ACT+1u){
+     let nF=count(NB_LIST_F_ALL);let nC=count(NB_LIST_C_ALL);
+     fold(NB_ARGS_FC_G1,nF+nC);fold(NB_ARGS_FC_G8,(nF+nC+7u)/8u);fold(NB_ARGS_FC_G64,(nF+nC+63u)/64u);
+diff --git a/lib/methods/narrow-band/levelset-coarse.test.ts b/lib/methods/narrow-band/levelset-coarse.test.ts
+index 69099cc1..3e6b5b0c 100644
+--- a/lib/methods/narrow-band/levelset-coarse.test.ts
++++ b/lib/methods/narrow-band/levelset-coarse.test.ts
+@@ -737,7 +737,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
+       vel.fill(f32(U[a]!), at, at + n);
+     }
+     e.write("phi", 0, phiWords); e.write("vel", 0, velWords); e.write("fcell", 0, fcell); e.write("set", 0, set); e.write("dir", 0, dir);
+-    const kernels = levelSetCoarseKernels(L, F), listC = { indirect: 12 * LIST.C_ALL }, listX8 = { indirect: 12 * LIST.C_ALL + ARGS[LC_ADVECT_GROUPS] };
++    const kernels = levelSetCoarseKernels(L, F), listC = { indirect: 12 * LIST.C_ALL }, listX8 = { indirect: 12 * LIST.C_ALL + ARGS.X8 };
+     // Lane F's uCache (488c4ebf): fgSampleVel reads the caches it builds from the opening velocity, as the engine runs
+     // it before lcAdvect every step. The fixture's velocity never changes, so one pass serves the whole chain; the
+     // caches are fcell words, so "fcell untouched" below is against fcell after it.
+@@ -754,7 +754,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
+       const before = new Uint32Array(await e.read("phi")), setBefore = new Uint32Array(await e.read("set"));
+       W.phi = new Float32Array(before.slice().buffer); W.set = setBefore;
+       const tally: Tally = {}, setWant = new Map<number, number>(), want = oracle(W, tally, setWant);
+-      await e.run([{ kernel: kernels[name], dispatch: LC_GROUPS[name] === "X8" ? listX8 : listC }]);
++      await e.run([{ kernel: kernels[name], dispatch: name === "lcAdvect" ? LC_ADVECT_GROUPS : LC_GROUPS[name] === "X8" ? listX8 : listC }]);
+       const after = await e.read("phi"), af = new Float32Array(after.buffer), setAfter = new Uint32Array(await e.read("set"));
+       assert.equal(setAfter[H.FAIL], 0, `${name}: FAIL ${setAfter[H.FAIL]} info ${setAfter[H.FAIL_INFO]}`);
+       let setBad = 0, gateBits = 0; const setReport: string[] = [];
+@@ -825,7 +825,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
+     const skirt = L.dir.page + L.pageIndex(2, 0, 0);
+     assert.equal(dir[skirt], NONE, "the skirt page is absent");
+     e.write("dir", skirt, new Uint32Array([0xa0000000]));
+-    await e.run([{ kernel: kernels.lcAdvect, dispatch: listX8 }]);
++    await e.run([{ kernel: kernels.lcAdvect, dispatch: LC_ADVECT_GROUPS }]);
+     const header = new Uint32Array(await e.read("set", 0, 256));
+     assert.equal(header[H.FAIL]! & FAIL.UNSUPPORTED, FAIL.UNSUPPORTED, `the BULK16 latch: FAIL ${header[H.FAIL]}`);
+     assert.equal(header[H.FAIL_INFO], 0x4c430003, "the BULK16 latch's info");
+diff --git a/lib/methods/narrow-band/levelset-coarse.wgsl.ts b/lib/methods/narrow-band/levelset-coarse.wgsl.ts
+index 0d28e7ea..7fa7ad76 100644
+--- a/lib/methods/narrow-band/levelset-coarse.wgsl.ts
++++ b/lib/methods/narrow-band/levelset-coarse.wgsl.ts
+@@ -123,7 +123,7 @@
+  * FC list (FC_G1: F_ALL then C_ALL; LC_FOLD): the twin's F-side and this C-side read and write disjoint words. The
+  * page bodies take the page and a uniform live flag, and every barrier they hold is under uniform control.
+  */
+-import { BOX_TOKEN, type BrickLayout } from "./brick-abi";
++import { ARGS, BOX_TOKEN, type BrickLayout } from "./brick-abi";
+ import { CFG, type BrickKernel } from "./brick-kernel";
+ import { brickOwnerWGSL } from "./brick-owner.wgsl";
+ import { FB, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel, fluidLayout } from "./fluid-grid.wgsl";
+@@ -205,7 +205,8 @@ fn lcSample(f:u32,p:vec3f)->f32{
+ }
+ fn lcPhiC(base:u32,slot:u32,l:u32)->f32{return bitcast<f32>(phi[base+NB_STRIDE*slot+l]);}
+ fn lcSetC(base:u32,slot:u32,l:u32,value:f32){phi[base+NB_STRIDE*slot+l]=bitcast<u32>(value);}
+-// The page's z plane a workgroup of the X8 kernels (lcAdvect, lcCouple, lcRetire: eight workgroups a page) takes.
++// The page's first z plane a workgroup takes: the X8 kernels' one (lcCouple, lcRetire: eight workgroups a page), lcAdvect's
++// four (two workgroups a page).
+ var<private> lcPart:u32;
+ fn lcCheckLattice(lid:u32){if(lid==0u&&any((NB_LATTICE&vec3i(31))!=vec3i(0))){nbFail(NB_FAIL_UNSUPPORTED,0x4c430001u);}}
+ `;
+@@ -306,13 +307,15 @@ fn nbxPointFrom(q:vec3f,x:vec3f)->vec3f{return lcHeld(x);}
+ fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x4c430002u);}
+ var<private> lcBase:vec3i;
+ var<private> lcW:i32;
+-// The staged C ring (lane E, 2026-11-16): lcAdvect's workgroup (one z plane of a C page, LC_ADVECT_GROUPS) stages
+-// the resolved φ (nbVertexPhi) at the C lattice vertices 4T about its plane, T from lcRingLow over 13 x 13 x 5 (two
+-// vertices of halo each way), before its traces read them. lcPhiTap reads a C lattice vertex inside the ring from it
++// The staged C ring (lane E, 2026-11-16): lcAdvect's workgroup (four z planes of a C page, LC_ADVECT_GROUPS) stages
++// the resolved φ (nbVertexPhi) at the C lattice vertices 4T about its planes, T from lcRingLow over 13 x 13 x 8 (two
++// vertices of halo each way), before its traces read them. Four planes a workgroup (GPU-shape M5,
++// docs/plans/gpu-shape/m4-clist.md §6): one ring of 13 x 13 x 8 for four planes instead of four of 13 x 13 x 5, and
++// the traces' taps a z plane farther stay in it (frozen paddleboats 1.15 -> 0.74 ms, dam 0.65 -> 0.50, bit for bit). lcPhiTap reads a C lattice vertex inside the ring from it
+ // and any other vertex through nbVertexPhi. The kernel writes only PHI1, so the staged values are the reads the taps
+ // would make. Half of lcAdvect was the cubic's 64 owner-resolved taps (nbVertexCoarse's 8 tiles each); the ring
+ // resolves each vertex once a workgroup. Off (lcRingOn) in a kernel that staged none.
+-var<workgroup> lcRing:array<f32,845>;
++var<workgroup> lcRing:array<f32,1352>;
+ var<private> lcRingLow:vec3i;
+ var<private> lcRingOn:bool=false;
+ // nbVertexPhi(v) at lcAdvect's place: after the move's lResolve and before the step's first C PHI writer (lcCouple;
+@@ -324,7 +327,7 @@ fn lcFResolved(v:vec3i)->f32{
+  return nbVertexPhi(v);
+ }
+ fn lcPhiTap(v:vec3i)->f32{
+- if(lcRingOn&&all((v&vec3i(3))==vec3i(0))){let r=vec3u((v>>vec3u(2u))-lcRingLow);if(all(r<vec3u(13u,13u,5u))){return lcRing[r.x+13u*(r.y+13u*r.z)];}}
++ if(lcRingOn&&all((v&vec3i(3))==vec3i(0))){let r=vec3u((v>>vec3u(2u))-lcRingLow);if(all(r<vec3u(13u,13u,8u))){return lcRing[r.x+13u*(r.y+13u*r.z)];}}
+  return lcFResolved(v);
+ }
+ // umCubicPhi's taps: the departure cell's width-aligned vertices, held to the box (umVertexNearFromPage).
+@@ -420,8 +423,8 @@ fn lcCheckBulk(slot:u32,live:bool,lid:u32){
+  if(bulk){nbFail(NB_FAIL_UNSUPPORTED,0x4c430003u);}
+ }
+ // The page body: C slot slot (live: the workgroup's liveness), φ → PHI1 at its C vertices. One C vertex a lane, the
+-// plane's 64: exits 1 to 4 store at once; the full path (exit 5) alone reads the ring (lcPhiTap from
+-// lcFullAdvected), so the plane stages it only when one of its lanes takes that path, then traces.
++// four planes' 256 from lcPart: exits 1 to 4 store at once; the full path (exit 5) alone reads the ring (lcPhiTap from
++// lcFullAdvected), so the workgroup stages it only when one of its lanes takes that path, then traces.
+ var<workgroup> sRingLive:u32;
+ var<workgroup> sRingFull:atomic<u32>;
+ fn lcAdvectPage(slot:u32,live:bool,lid:u32){
+@@ -449,7 +452,7 @@ fn lcAdvectPage(slot:u32,live:bool,lid:u32){
+  if(lid==0u){sRingLive=atomicLoad(&sRingFull);}
+  if(workgroupUniformLoad(&sRingLive)==0u){return;}
+  lcRingLow=(o>>vec3u(2u))+vec3i(-2,-2,i32(lcPart)-2);
+- for(var j=lid;j<845u;j+=64u){lcRing[j]=lcFResolved(4*(lcRingLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u))));}
++ for(var j=lid;j<1352u;j+=256u){lcRing[j]=lcFResolved(4*(lcRingLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u))));}
+  workgroupBarrier();lcRingOn=true;
+  // Exit 5: the full path.
+  if(full){lcSetC(NB_PHI_C_PHI1,slot,l,lcFullAdvected(v,c,dt,hm));}
+@@ -721,22 +724,22 @@ export const levelSetCoarseWGSL = {
+   retire: (L: BrickLayout) => [nbfRedistanceWGSL, LC_NEAR_KNOWN_WGSL, lcRetireWGSL(L.staticTiles)].join("\n"),
+ };
+ 
+-/** lcAdvect's dispatch over C_ALL: eight workgroups an entry (the brick set's X8 arguments). */
+-export const LC_ADVECT_GROUPS = "X8" as const;
++/** lcAdvect's dispatch over C_ACT: two 256-lane workgroups an entry (ARGS.C_ACT2_G1), each four z planes. */
++export const LC_ADVECT_GROUPS = { indirect: ARGS.C_ACT2_G1 } as const;
+ 
+-/** Each C kernel's dispatch over C_ALL. lcAdvect, lcCouple and lcRetire take eight 64-lane workgroups an entry (X8), a
++/** Each C kernel's dispatch over C_ACT. lcCouple and lcRetire take eight 64-lane workgroups an entry (X8), a
+  * vertex a lane: each runs in one wave, so its time is its slowest lane's chain, and one vertex a lane cuts the
+  * couple's and retire's (lane E, 2026-11-16, frozen dam at step 100: 0.37 -> 0.27 and 0.63 -> 0.40 ms, bit for bit).
+- * lcClear and lcPublish take a 256-lane workgroup an entry (G1). */
+-export const LC_GROUPS = { lcAdvect: "X8", lcCouple: "X8", lcRetire: "X8", lcClear: "G1", lcPublish: "G1" } as const;
++ * lcClear and lcPublish take a 256-lane workgroup an entry (G1); lcAdvect takes LC_ADVECT_GROUPS. */
++export const LC_GROUPS = { lcAdvect: LC_ADVECT_GROUPS, lcCouple: "X8", lcRetire: "X8", lcClear: "G1", lcPublish: "G1" } as const;
+ 
+ export interface LevelSetCoarseKernels {
+   readonly lcAdvect: BrickKernel; readonly lcCouple: BrickKernel; readonly lcClear: BrickKernel;
+   readonly lcRetire: BrickKernel; readonly lcPublish: BrickKernel;
+ }
+ 
+-/** The standalone kernels on list C_ALL at LC_GROUPS: X8 with workgroup 64 (lcAdvect, lcCouple, lcRetire), G1 with
+- * workgroup 256 (lcClear, lcPublish). */
++/** The standalone kernels on list C_ACT at LC_GROUPS: X8 with workgroup 64 (lcCouple, lcRetire), G1 with workgroup
++ * 256 (lcClear, lcPublish), and lcAdvect's two 256-lane workgroups a page. */
+ export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayout(L, { tiered: true })): LevelSetCoarseKernels {
+   if (!F.tiered) throw new Error("levelset-coarse: the C kernels read through the tier owners; build them with fluidLayout(L, { tiered: true })");
+   const bindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell, FB.src];
+@@ -754,10 +757,10 @@ export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayo
+  ${page}(slot,live,lid);
+ }`].join("\n"));
+   return {
+-    // lcAdvect: eight workgroups a page (LC_ADVECT_GROUPS), each one z plane of its C vertices, a lane a vertex.
++    // lcAdvect: two workgroups a page (LC_ADVECT_GROUPS), each four z planes of its C vertices from lcPart, a lane a vertex.
+     lcAdvect: fluidKernel(L, F, "lcAdvect", bindings, [levelSetCoarseWGSL.common(L), levelSetCoarseWGSL.advect(), /* wgsl */`
+-@compute @workgroup_size(64) fn lcAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+- let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ACT);
++@compute @workgroup_size(256) fn lcAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
++ let g=nbGroup(wid);let e=g>>1u;lcPart=4u*(g&1u);let live=e<nbListCount(NB_LIST_C_ACT);
+  var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ACT,e);}
+  lcAdvectPage(slot,live,lid);
+ }`].join("\n")),
+diff --git a/lib/methods/narrow-band/levelset-release.test.ts b/lib/methods/narrow-band/levelset-release.test.ts
+index 8628641f..e4f879c6 100644
+--- a/lib/methods/narrow-band/levelset-release.test.ts
++++ b/lib/methods/narrow-band/levelset-release.test.ts
+@@ -408,10 +408,10 @@ test("levelset-release (GPU): reach words, wall reach, the readers and lcAdvect'
+     console.log(`levelset-release: ${s0.bricks.size} F, ${s0.pages.size} C pages, ${releasedBits} release bits`);
+ 
+     // ---- lcAdvect with no words (REACH_STEP clear: every tile saturated; no plane reach): nothing fires.
+-    // lcAdvect runs eight workgroups a C_ALL entry (its X8 arguments), as the step places it. The plain C_ALL
+-    // arguments (one workgroup an entry) advected only the first eighth of the list, and the list's atomic order
+-    // chose a different eighth each run.
+-    const kernels = levelSetCoarseKernels(L, F), listC = { indirect: 12 * LIST.C_ALL + ARGS[LC_ADVECT_GROUPS] };
++    // lcAdvect runs two workgroups a C_ACT entry (LC_ADVECT_GROUPS), as the step places it. The plain list
++    // arguments (one workgroup an entry) advected only part of the list, and the list's atomic order chose a
++    // different part each run.
++    const kernels = levelSetCoarseKernels(L, F), listC = LC_ADVECT_GROUPS;
+     await e.run([{ kernel: kernels.lcAdvect, dispatch: listC }]);
+     const before = new Float32Array((await e.read("phi")).buffer).slice();
+     e.write("phi", 0, new Uint32Array(phi0));

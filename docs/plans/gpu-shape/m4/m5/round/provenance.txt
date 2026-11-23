@@ -1,0 +1,4 @@
+round start 2026-11-24 10:26:00
+base: commit 9c82f1df (2026-11-24 09:58:58 +1300) lib/methods/uniform tree a60c776f54, lib/core tree 0f350ad0b1 exported 2026-11-24 10:25:59 
+candidate: commit ecfce4fb (2026-11-24 10:25:48 +1300) lib/methods/uniform tree a60c776f54, lib/core tree 0f350ad0b1 exported 2026-11-24 10:26:00 
+main checkout HEAD ecfce4fb, dirty lib/tools: 11 files

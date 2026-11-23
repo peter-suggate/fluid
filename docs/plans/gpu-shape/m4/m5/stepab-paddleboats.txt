@@ -1,0 +1,33 @@
+paddleboats step 100: 307 placements, 7 with the candidate's text (censusCoarse, certError, lcAdvect, lcCouple, lcClear, lcRetire, lcPublish); base /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m5/sab-base-9c82f1df, candidate /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m5/sab-cand-9c82f1df
+fail/info words at the frozen state: 0x0/0x0
+exact #6 censusCoarse: ok: set identical, census identical
+exact #31 certError: ok: set identical, census identical
+exact #61 lcAdvect z0: ok: set identical, phi identical
+exact #64 lcCouple z0: ok: set identical, phi identical
+exact #72 lcClear z0: ok: set identical, phi identical, fcell identical
+exact #82 lcRetire z0: ok: set identical, phi identical
+exact #84 lcPublish z0: ok: set identical, phi identical
+exactness: 7 of 7 changed placements identical
+base: Σ placements min 34.104 ms, median 34.288; Σ of family minima 33.678 ms; GPU wall min 33.773 ms, median 33.888; clock probe 76.2 76.1 76.3 76.3 76.2 76.2 76.2 76.4 76.0 us (top 75.5)
+candidate: Σ placements min 33.641 ms, median 33.781; Σ of family minima 33.142 ms; GPU wall min 33.107 ms, median 33.319; clock probe 76.2 76.6 76.2 76.2 76.2 76.2 76.2 76.2 76.3 us (top 75.5)
+base again: Σ placements min 34.174 ms, median 34.249; Σ of family minima 33.603 ms; GPU wall min 33.635 ms, median 33.822; clock probe 76.2 76.7 76.6 76.1 76.1 76.2 76.3 76.2 76.1 us (top 75.5)
+families (min of samples; A/A = base again - base), the changed ones and the 8 largest other |Δ|:
+  * lcAdvect               1.139 -> 0.737 ms  -0.402 (-35.3%)  A/A +0.007
+  * censusCoarse           0.726 -> 0.655 ms  -0.071 (-9.8%)  A/A +0.004
+  * certError              0.244 -> 0.215 ms  -0.028 (-11.7%)  A/A +0.001
+  * lcRetire               1.002 -> 1.008 ms  +0.006 (0.6%)  A/A -0.012
+  * lcCouple               0.180 -> 0.181 ms  +0.001 (0.5%)  A/A -0.001
+  * lcClear                0.133 -> 0.134 ms  +0.000 (0.3%)  A/A -0.001
+  * lcPublish              0.026 -> 0.026 ms  -0.000 (-0.4%)  A/A -0.000
+    pressureRowsC          0.423 -> 0.403 ms  -0.020 (-4.8%)  A/A +0.013
+    pDeposit               0.505 -> 0.486 ms  -0.019 (-3.8%)  A/A -0.008
+    lSplat                 0.228 -> 0.244 ms  +0.016 (7.0%)  A/A -0.003
+    censusDecide           1.857 -> 1.872 ms  +0.015 (0.8%)  A/A -0.007
+    pSeed                  0.685 -> 0.672 ms  -0.014 (-2.0%)  A/A -0.002
+    operator               2.349 -> 2.360 ms  +0.010 (0.4%)  A/A +0.013
+    certCoarse             0.211 -> 0.221 ms  +0.010 (4.8%)  A/A +0.007
+    uTransfer              1.402 -> 1.394 ms  -0.008 (-0.6%)  A/A -0.013
+GATE paddleboats: changed families Σ Δ -0.494 ms (-1.47% of the step's 33.678 ms Σ), their A/A -0.001 ms; unchanged families Σ Δ -0.041 ms, A/A -0.074 ms; Σ placements min -0.463 ms (A/A +0.070); GPU wall min -0.665 ms (-1.97%; A/A -0.138)
+ok
+fluid-gpu-run: GPU memory in use 0.27 GB at start, peak 5.99 GB; 2 process(es) in the tree
+rc 0

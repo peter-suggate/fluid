@@ -1,0 +1,17 @@
+targets: 6:censusCoarse.ref 31:certError.pack 57:lcAdvect.ref
+  exact 6 censusCoarse (set,census): base 0, ref 0 words differ
+  exact 31 certError (set,census): base 0, pack 0 words differ
+  exact 57 lcAdvect (set,phi): base 0, ref 0 words differ
+  time   6 censusCoarse   base 247.7 med 269.5  ref 274.2 (26.5) med 278.3 us
+  time  31 certError      base 109.5 med 113.8  pack 96.5 (-13.0) med 103.1 us
+  time  57 lcAdvect       base 487.2 med 491.4  ref 681.5 (194.3) med 695.7 us
+time: clock probe 76.2 76.0 76.1 76.1 76.1 76.2 76.1
+  clock   6 censusCoarse   base     pass 285.4 us state 2 816/816; dur p50 52.4 p90 87.2 max 200.7; span 274.3, 95% ended 170.9, tail 103.4 us; in flight 162 310 319 318 301 234 169 148 118 58 24 10 5 2 2 1
+  clock   6 censusCoarse   ref      pass 282.7 us state 2 816/816; dur p50 57.7 p90 91.1 max 188.8; span 267.2, 95% ended 191.9, tail 75.4 us; in flight 89 242 255 254 230 217 221 210 199 160 75 41 20 14 4 1
+  clock  31 certError      base     pass 124.3 us state 2 816/816; dur p50 26.2 p90 32.5 max 45.9; span 119.0, 95% ended 90.6, tail 28.4 us; in flight 255 255 229 222 236 255 147 249 184 197 152 69 35 22 13 7
+  clock  31 certError      pack     pass 197.1 us state 2 816/816; dur p50 29.3 p90 44.3 max 59.7; span 98.6, 95% ended 65.1, tail 33.5 us; in flight 538 538 538 508 493 454 379 244 152 97 43 15 12 11 7 3
+  clock  57 lcAdvect       base     pass 530.3 us state 2 204/204; dur p50 113.0 p90 169.4 max 300.8; span 528.9, 95% ended 399.6, tail 129.4 us; in flight 61 63 62 63 63 60 57 56 48 42 29 14 7 1 1 1
+  clock  57 lcAdvect       ref      pass 698.8 us state 2 816/816; dur p50 143.0 p90 222.1 max 469.5; span 638.1, 95% ended 480.4, tail 157.6 us; in flight 243 255 255 252 250 251 246 243 217 168 103 64 22 11 6 2
+clock: probe 80.4 us
+fluid-gpu-run: GPU memory in use 0.39 GB at start, peak 2.70 GB; 1 process(es) in the tree
+rc 0

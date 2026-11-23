@@ -99,11 +99,11 @@ const COMPARE_WGSL = /* wgsl */`
 @group(0) @binding(2) var<storage,read_write> co:array<atomic<u32>>;
 @group(0) @binding(3) var<uniform> cn:vec4u;
 @compute @workgroup_size(256) fn main(@builtin(global_invocation_id) g:vec3u){
- for(var i=g.x;i<cn.x;i+=cn.y){if(ca[i]!=cb[i]){atomicAdd(&co[0],1u);atomicMin(&co[1],i+cn.z);}}
+ for(var i=g.x;i<cn.x;i+=cn.y){if(ca[i]!=cb[i]){atomicAdd(&co[0],1u);atomicMin(&co[1],i+cn.z);if(ca[i]==0x4aed5be2u){atomicAdd(&co[2],1u);}}}
 }`;
 
 // ---- the M4 variants ----
-type Variant = { label: string; name: string; k: number; make: (code: string, entry: string) => string };
+type Variant = { label: string; name: string; k: number; at?: number; make: (code: string, entry: string) => string };
 /** A page of a G1 list over k workgroups: the gate on k n, the slot of g / k, m4Sub = g % k. */
 const splitGate = (c: string, gate: string, slot: string, list: string, k: number, what: string) => {
   c = sub1(c, gate, gate.replace("workgroupUniformLoad(", `${k}u*workgroupUniformLoad(`), `${what} gate`);
@@ -154,6 +154,15 @@ const lcGfetch = (c0: string) => {
   const c = sub1(c0, " var v:array<f32,8>;var terms:array<f32,8>;\n for(var k=0u;k<8u;k++){\n  v[k]=nbVertexPhi(origin+width*lcCorner(k));",
     " var v:array<f32,8>;var terms:array<f32,8>;\n {for(var k=0u;k<8u;k++){m4GV[k]=nbVertexPhi(origin+width*lcCorner(k));}m4GO=origin;m4GW=width;}\n for(var k=0u;k<8u;k++){\n  v[k]=m4GV[k];", "lcGradient");
   return sub1(c, "fn lcGradient(", "var<private> m4GO:vec3i=vec3i(-2147483647);\nvar<private> m4GW:i32=0;\nvar<private> m4GV:array<f32,8>;\nfn lcGradient(", "lcGradient decl");
+};
+/** lcRetire race check: gfetch's values (always fetched), plus the cache kept beside them; a cache hit whose cached
+ * corners differ from the fresh ones (bit for bit) marks the lane, whose PHI1 word becomes 7777777. Exact against
+ * base: no corner changed between two reads in the pass (gcache's difference is not a race). */
+const lcGcheck = (c0: string) => {
+  let c = sub1(c0, " var v:array<f32,8>;var terms:array<f32,8>;\n for(var k=0u;k<8u;k++){\n  v[k]=nbVertexPhi(origin+width*lcCorner(k));",
+    " var v:array<f32,8>;var terms:array<f32,8>;\n {let m4Hit=all(origin==m4GO)&&width==m4GW;for(var k=0u;k<8u;k++){let m4x=nbVertexPhi(origin+width*lcCorner(k));if(m4Hit&&bitcast<u32>(m4x)!=bitcast<u32>(m4GV[k])){m4Bad=true;}m4GV[k]=m4x;}m4GO=origin;m4GW=width;}\n for(var k=0u;k<8u;k++){\n  v[k]=m4GV[k];", "lcGradient");
+  c = sub1(c, "  lcSetC(NB_PHI_C_PHI1,slot,l,lcRetired(v,lcPhiC(NB_PHI_C_PHI,slot,l)));", "  {let m4r=lcRetired(v,lcPhiC(NB_PHI_C_PHI,slot,l));lcSetC(NB_PHI_C_PHI1,slot,l,select(m4r,7777777.0,m4Bad));}", "lcRetirePage store");
+  return sub1(c, "fn lcGradient(", "var<private> m4GO:vec3i=vec3i(-2147483647);\nvar<private> m4GW:i32=0;\nvar<private> m4GV:array<f32,8>;\nvar<private> m4Bad:bool=false;\nfn lcGradient(", "lcGradient decl");
 };
 /** lcRetire: the 3^3 stencil's h owners of the workgroup's plane (10 x 10 x 3 tiles) staged once a workgroup. */
 const lcStencil = (c0: string) => {
@@ -228,6 +237,87 @@ const cdCount = (c0: string) => {
   c = sub1(c, "    if(c.w!=0u){atomicAdd(&nbSet[NB_H_CENSUS_TRIGGERED],c.w);}", "    if(c.w!=0u){atomicAdd(&nbSet[NB_H_CENSUS_TRIGGERED],c.w);}\n" + CD_COUNTERS.map((n, k) => `    {let m4x=atomicLoad(&m4Cnt[${k}u]);if(m4x!=0u){atomicAdd(&nbSet[${n}],m4x);}}`).join("\n"), "censusDecide count flush");
   return sub1(c, "var<workgroup> wgGo:u32;", `var<workgroup> wgGo:u32;\nvar<workgroup> m4Cnt:array<atomic<u32>,${CD_COUNTERS.length}>;`, "censusDecide count decl");
 };
+/** lcAdvect over P z planes a workgroup (64 P lanes, 8 / P workgroups a page on C_ACT's G1 words): one ring of
+ * 13 x 13 x (P + 4) a workgroup instead of P rings of 13 x 13 x 5. Each vertex's path is unchanged. */
+const laPlanes = (P: number) => (c0: string) => {
+  const K = 8 / P, z = P + 4;
+  let c = sub1(c0, "@compute @workgroup_size(64) fn lcAdvect(", `@compute @workgroup_size(${64 * P}) fn lcAdvect(`, "lcAdvect size");
+  c = sub1(c, "let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ACT);\n var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ACT,e);}\n lcAdvectPage(",
+    `let g=nbGroup(wid);let e=g/${K}u;lcPart=${P}u*(g%${K}u);let live=e<nbListCount(NB_LIST_C_ACT);\n var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ACT,e);}\n lcAdvectPage(`, "lcAdvect entry");
+  c = sub1(c, "for(var j=lid;j<845u;j+=64u){lcRing[j]", `for(var j=lid;j<${169 * z}u;j+=${64 * P}u){lcRing[j]`, "lcAdvect stage");
+  c = sub1(c, "var<workgroup> lcRing:array<f32,845>;", `var<workgroup> lcRing:array<f32,${169 * z}>;`, "lcRing decl");
+  return sub1(c, "if(all(r<vec3u(13u,13u,5u))){return lcRing[", `if(all(r<vec3u(13u,13u,${z}u))){return lcRing[`, "lcPhiTap bound");
+};
+const LA_RING = " lcRingLow=(o>>vec3u(2u))+vec3i(-2,-2,i32(lcPart)-2);\n for(var j=lid;j<845u;j+=64u){lcRing[j]=lcFResolved(4*(lcRingLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u))));}\n workgroupBarrier();lcRingOn=true;\n";
+/** Exact: no ring (every tap resolved where it is read). */
+const laNoRing = (c: string) => sub1(c, LA_RING, " workgroupBarrier();\n", "lcAdvect ring");
+/** Time only (not exact): the exits alone, or the exits and the staging, no full path. */
+const laExits = (c: string) => sub1(c, LA_RING + " // Exit 5: the full path.\n if(full){", " return;\n if(full){", "lcAdvect exits");
+const laStage = (c: string) => sub1(c, " // Exit 5: the full path.\n if(full){", " if(lcRing[lid]==1.2345e-37){lcSetC(NB_PHI_C_PHI1,slot,l,0.0);}return;\n if(full){", "lcAdvect stage only");
+/** The full path's lane count and ticks (diag): m4A = 1 on a lane taking it. */
+const laDiag = (c: string) => laneDiag(c, "let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;", " if(full){lcSetC(NB_PHI_C_PHI1,slot,l,lcFullAdvected(v,c,dt,hm));}", [
+  [" // Exit 5: the full path.\n", " // Exit 5: the full path.\n m4A=select(0u,1u,full);\n"],
+]);
+/** censusCoarse ablations (time only, not exact): one job phase dropped. */
+const ccDrop = (from: string, to: string) => (c: string) => sub1(c, from, to, "censusCoarse drop");
+/** censusCoarse: a face between two bounded tiles of the slab (x and y) read once, by the lower tile's high job, and
+ * bounding both (both probes coarse: one 4h patch at the same anchor). */
+const ccShare = (c0: string) => {
+  let c = sub1(c0, "      let axis=(j%6u)/2u;let sign=select(-1,1,(j&1u)!=0u);\n      let probe=cqFaceProbe(cs,r,j);",
+    "      let axis=(j%6u)/2u;let sign=select(-1,1,(j&1u)!=0u);\n      let m4x=vec2u(owner&7u,owner>>3u);let m4d=select(8u,1u,axis==0u);\n      if(axis<2u&&sign<0&&m4x[min(axis,1u)]>0u&&cqBounded[owner-m4d]!=0u){continue;}\n      var m4o=64u;if(axis<2u&&sign>0&&m4x[min(axis,1u)]<7u&&cqBounded[owner+m4d]!=0u){m4o=owner+m4d;}\n      let probe=cqFaceProbe(cs,r,j);", "cc share job");
+  c = sub1(c, "      if(side*side==1u){cqBound(owner,axis,anchor);}", "      if(side*side==1u){m4Bound2(owner,m4o,axis,anchor);}", "cc share bound");
+  return sub1(c, "fn cqBound(owner:u32,axis:u32,anchor:vec3i){", `fn m4Bound2(owner:u32,other:u32,axis:u32,anchor:vec3i){
+  if(ncFaceLow(anchor,axis)){return;}
+  let u=ncFace(anchor,axis);
+  let finite=abs(u)<=3.0e38;let lo=ncOrderKey(select(-3.0e38,u,finite));let hi=ncOrderKey(select(3.0e38,u,finite));
+  atomicMin(&cqLow[owner][axis],lo);atomicMax(&cqHigh[owner][axis],hi);
+  if(other<64u){atomicMin(&cqLow[other][axis],lo);atomicMax(&cqHigh[other][axis],hi);}
+}
+fn cqBound(owner:u32,axis:u32,anchor:vec3i){`, "cc share fn");
+};
+/** censusCoarse: the bounded tiles' face jobs listed as they classify (a workgroup list), the face loop over the list
+ * instead of all 384 jobs a slab (the unbounded tiles' lanes idled through their six). */
+const ccCompact = (c0: string) => {
+  let c = sub1(c0, "      classified=true;cqBounded[lane]=1u;", "      classified=true;cqBounded[lane]=1u;\n      {let m4b=atomicAdd(&m4Jobs,6u);for(var f=0u;f<6u;f++){m4Job[m4b+f]=6u*lane+f;}}", "cc compact push");
+  c = sub1(c, "if(lane==0u){atomicStore(&cqErrors,0u);", "if(lane==0u){atomicStore(&m4Jobs,0u);atomicStore(&cqErrors,0u);", "cc compact init");
+  c = sub1(c, "    for(var j=lane;j<6u*64u;j+=64u){\n      let owner=j/6u;if(cqBounded[owner]==0u){continue;}", "    let m4n=atomicLoad(&m4Jobs);\n    for(var m4k=lane;m4k<m4n;m4k+=64u){\n      let j=m4Job[m4k];let owner=j/6u;", "cc compact loop");
+  return sub1(c, "var<workgroup> cqParts:atomic<u32>;", "var<workgroup> cqParts:atomic<u32>;\nvar<workgroup> m4Jobs:atomic<u32>;\nvar<workgroup> m4Job:array<u32,384>;", "cc compact decl");
+};
+/** censusCoarse's workgroup memory 7148 -> 4532 B (its residency was its workgroup memory's: ~8 groups a core against
+ * a 704-thread cap): the job lists packed (u8 tiles, u16 faces and vertices), the tile flags bit masks. */
+const CC_PACK: [string, string][] = [
+  ["var<workgroup> cqError:array<u32,64>;", "var<workgroup> cqError:array<atomic<u32>,16>;"],
+  ["var<workgroup> cqDeep:array<u32,64>;", "var<workgroup> cqDeep:array<atomic<u32>,16>;"],
+  ["var<workgroup> cqIsDeep:array<u32,64>;", "var<workgroup> cqIsDeep:array<atomic<u32>,2>;"],
+  ["var<workgroup> cqVertex:array<u32,484>;", "var<workgroup> cqVertex:array<atomic<u32>,242>;"],
+  ["var<workgroup> cqBounded:array<u32,64>;", "var<workgroup> cqBounded:array<atomic<u32>,2>;"],
+  ["var<workgroup> cqPart:array<u32,384>;", "var<workgroup> cqPart:array<atomic<u32>,192>;"],
+  ["    cqIsDeep[lane]=0u;\n", "    if(lane<2u){atomicStore(&cqIsDeep[lane],0u);atomicStore(&cqBounded[lane],0u);}if(lane<16u){atomicStore(&cqError[lane],0u);atomicStore(&cqDeep[lane],0u);}\n    for(var z=lane;z<242u;z+=64u){atomicStore(&cqVertex[z],0u);if(z<192u){atomicStore(&cqPart[z],0u);}}\n"],
+  ["    cqBounded[lane]=0u;\n", ""],
+  ["classified=true;cqBounded[lane]=1u;", "classified=true;atomicOr(&cqBounded[lane>>5u],1u<<(lane&31u));"],
+  ["cqError[atomicAdd(&cqErrors,1u)]=lane;", "let k=atomicAdd(&cqErrors,1u);atomicOr(&cqError[k>>2u],lane<<(8u*(k&3u)));"],
+  ["cqDeep[atomicAdd(&cqDeeps,1u)]=lane;cqIsDeep[lane]=1u;", "let k=atomicAdd(&cqDeeps,1u);atomicOr(&cqDeep[k>>2u],lane<<(8u*(k&3u)));atomicOr(&cqIsDeep[lane>>5u],1u<<(lane&31u));"],
+  ["let owner=j/6u;if(cqBounded[owner]==0u){continue;}", "let owner=j/6u;if(((atomicLoad(&cqBounded[owner>>5u])>>(owner&31u))&1u)==0u){continue;}"],
+  ["else{cqPart[atomicAdd(&cqParts,1u)]=j;}", "else{let k=atomicAdd(&cqParts,1u);atomicOr(&cqPart[k>>1u],j<<(16u*(k&1u)));}"],
+  ["let owner=cqError[j/8u];", "let owner=(atomicLoad(&cqError[(j/8u)>>2u])>>(8u*((j/8u)&3u)))&255u;"],
+  ["let owner=cqDeep[j/64u];", "let owner=(atomicLoad(&cqDeep[(j/64u)>>2u])>>(8u*((j/64u)&3u)))&255u;"],
+  ["cqVertex[atomicAdd(&cqVertices,1u)]=v;", "let k=atomicAdd(&cqVertices,1u);atomicOr(&cqVertex[k>>1u],v<<(16u*(k&1u)));"],
+  ["let v=cqVertex[j];", "let v=(atomicLoad(&cqVertex[j>>1u])>>(16u*(j&1u)))&0xffffu;"],
+  ["if(cqIsDeep[owner]==0u){continue;}", "if(((atomicLoad(&cqIsDeep[owner>>5u])>>(owner&31u))&1u)==0u){continue;}"],
+  ["let face=cqPart[j/16u];", "let face=(atomicLoad(&cqPart[(j/16u)>>1u])>>(16u*((j/16u)&1u)))&0xffffu;"]
+];
+const ccPack = (c0: string) => CC_PACK.reduce((c, [a, b]) => sub1(c, a, b, `cc pack ${a.slice(0, 30)}`), c0);
+/** certError's workgroup memory 6.3 -> 1.6 KB: the seed flags and the x and y passes (3 bits an entry) four entries
+ * a word, a lane a word (no atomics). */
+const CE_PACK: [string, string][] = [
+  ["var<workgroup> sSeed:array<u32,1000>;\nvar<workgroup> sX:array<u32,400>;\nvar<workgroup> sY:array<u32,160>;", "var<workgroup> sSeed:array<u32,250>;\nvar<workgroup> sX:array<u32,100>;\nvar<workgroup> sY:array<u32,40>;\nfn ceSeed(c:u32)->u32{return (sSeed[c>>2u]>>(8u*(c&3u)))&255u;}\nfn ceX(c:u32)->u32{return (sX[c>>2u]>>(8u*(c&3u)))&255u;}\nfn ceY(c:u32)->u32{return (sY[c>>2u]>>(8u*(c&3u)))&255u;}"],
+  ["  for(var k=lane;k<1000u;k+=64u){\n    let T=origin+vec3i(i32(k%10u),i32((k/10u)%10u),i32(k/100u));var w=0u;", "  for(var m=lane;m<250u;m+=64u){var word=0u;for(var b=0u;b<4u;b++){let k=4u*m+b;\n    let T=origin+vec3i(i32(k%10u),i32((k/10u)%10u),i32(k/100u));var w=0u;"],
+  ["    sSeed[k]=w;\n  }", "    word|=w<<(8u*b);}\n    sSeed[m]=word;\n  }"],
+  ["  for(var k=lane;k<400u;k+=64u){\n    let c=3u+(k%4u)+10u*(k/4u);var f=0u;\n    if((sSeed[c]&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(sSeed[u32(i32(c)+d)],d);}}\n    sX[k]=f;\n  }", "  for(var m=lane;m<100u;m+=64u){var word=0u;for(var b=0u;b<4u;b++){let k=4u*m+b;\n    let c=3u+(k%4u)+10u*(k/4u);var f=0u;\n    if((ceSeed(c)&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(ceSeed(u32(i32(c)+d)),d);}}\n    word|=f<<(8u*b);}\n    sX[m]=word;\n  }"],
+  ["  for(var k=lane;k<160u;k+=64u){\n    let c=(k%4u)+4u*(3u+((k/4u)%4u)+10u*(k/16u));var f=0u;\n    if((sX[c]&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(sX[u32(i32(c)+4*d)],d);}}\n    sY[k]=f;\n  }", "  for(var m=lane;m<40u;m+=64u){var word=0u;for(var b=0u;b<4u;b++){let k=4u*m+b;\n    let c=(k%4u)+4u*(3u+((k/4u)%4u)+10u*(k/16u));var f=0u;\n    if((ceX(c)&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(ceX(u32(i32(c)+4*d)),d);}}\n    word|=f<<(8u*b);}\n    sY[m]=word;\n  }"],
+  ["support|=ceDilate(sY[u32(i32(c)+16*d)],d);", "support|=ceDilate(ceY(u32(i32(c)+16*d)),d);"]
+];
+const cePack = (c0: string) => CE_PACK.reduce((c, [a, b]) => sub1(c, a, b, `ce pack ${a.slice(0, 30)}`), c0);
 const VARIANTS: Variant[] = [
   { label: "censusDecide", name: "count", k: 1, make: cdCount },
   { label: "censusDecide", name: "count+trig64", k: 1, make: c => cdTrig64(cdCount(c)) },
@@ -235,6 +325,31 @@ const VARIANTS: Variant[] = [
   { label: "lcRetire", name: "diag", k: 1, make: lrDiag },
   { label: "lcRetire", name: "gcache", k: 1, make: lcGcache },
   { label: "lcRetire", name: "gfetch", k: 1, make: lcGfetch },
+  { label: "lcRetire", name: "gcheck", k: 1, make: lcGcheck },
+  { label: "lcAdvect", name: "noring", k: 1, make: laNoRing },
+  { label: "lcAdvect", name: "exits", k: 1, make: laExits },
+  { label: "lcAdvect", name: "stage", k: 1, make: laStage },
+  { label: "lcAdvect", name: "diag", k: 1, make: laDiag },
+  { label: "lcAdvect", name: "p2", k: 4, at: 12 * 18, make: laPlanes(2) },
+  { label: "lcAdvect", name: "p4", k: 2, at: 12 * 18, make: laPlanes(4) },
+  { label: "lcAdvect", name: "p8", k: 1, at: 12 * 18, make: laPlanes(8) },
+  { label: "censusCoarse", name: "share", k: 1, make: ccShare },
+  { label: "censusCoarse", name: "compact", k: 1, make: ccCompact },
+  { label: "censusCoarse", name: "pack", k: 1, make: ccPack },
+  { label: "certError", name: "pack", k: 1, make: cePack },
+  { label: "censusCoarse", name: "noface", k: 1, make: ccDrop("for(var j=lane;j<6u*64u;j+=64u){", "for(var j=lane;j<0u;j+=64u){") },
+  { label: "censusCoarse", name: "noerr", k: 1, make: ccDrop("for(var j=lane;j<8u*errors;j+=64u){", "for(var j=lane;j<0u*errors;j+=64u){") },
+  { label: "censusCoarse", name: "nodepth", k: 1, make: ccDrop("for(var j=lane;j<vertices;j+=64u){", "for(var j=lane;j<0u*vertices;j+=64u){") },
+  { label: "censusCoarse", name: "noparts", k: 1, make: ccDrop("for(var j=lane;j<16u*parts;j+=64u){", "for(var j=lane;j<0u*parts;j+=64u){") },
+  { label: "lcAdvect", name: "id", k: 1, make: c => c },
+  { label: "censusCoarse", name: "id", k: 1, make: c => c },
+  { label: "uExt4", name: "id", k: 1, make: c => c },
+  { label: "certError", name: "id", k: 1, make: c => c },
+  { label: "certCoarse", name: "id", k: 1, make: c => c },
+  { label: "pressureProjectC", name: "id", k: 1, make: c => c },
+  { label: "lcCouple", name: "id", k: 1, make: c => c },
+  { label: "lcPublish", name: "id", k: 1, make: c => c },
+  { label: "uCache4", name: "id", k: 1, make: c => c },
   { label: "lcRetire", name: "stencil", k: 1, make: lcStencil },
   { label: "lcRetire", name: "both", k: 1, make: c => lcStencil(lcGcache(c)) },
   { label: "censusDecide", name: "trig64", k: 1, make: cdTrig64 },
@@ -405,7 +520,7 @@ async function main() {
   const argsOf = (i: number, k: number, w: number, at = sch[i].dispatch.indirect) => (k === 1 && w === 0 && at === sch[i].dispatch.indirect ? undefined : argsRec(at, at, k - 1, w));
   for (let i = 0; i < sch.length; i++) {
     const k0 = sch[i].kernel;
-    for (const v of VARIANTS) if (v.label === k0.label && (!only || only.has(`${v.label}.${v.name}`))) targets.push({ i, key: `${v.label}.${v.name}`, name: v.name, code: () => v.make(k0.code, k0.entry), a: w => argsOf(i, v.k, w) });
+    for (const v of VARIANTS) if (v.label === k0.label && (!only || only.has(`${v.label}.${v.name}`))) targets.push({ i, key: `${v.label}.${v.name}`, name: v.name, code: () => v.make(k0.code, k0.entry), a: w => argsOf(i, v.k, w, v.at) });
     if (ref && ref.dispatch[k0.label] && existsSync(resolve(ref.dir, `${k0.label}.wgsl`)) && (!only || only.has(`${k0.label}.ref`))) {
       const d = ref.dispatch[k0.label]; if (!("indirect" in d)) continue;
       const text = readFileSync(resolve(ref.dir, `${k0.label}.wgsl`), "utf8");
@@ -435,7 +550,7 @@ async function main() {
     const cmpMod = raw.createShaderModule({ code: COMPARE_WGSL }), cmpPipe = raw.createComputePipeline({ layout: "auto", compute: { module: cmpMod, entryPoint: "main" } });
     const cmpOut = raw.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const cmpRead = raw.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    const compare = async (a: GPUBuffer, b: GPUBuffer): Promise<[number, number]> => {
+    const compare = async (a: GPUBuffer, b: GPUBuffer): Promise<[number, number, number]> => {
       raw.queue.writeBuffer(cmpOut, 0, new Uint32Array([0, 0xffffffff, 0, 0]));
       const enc = raw.createCommandEncoder(); const CH = 2 ** 30;
       for (let off = 0; off < a.size; off += CH) {
@@ -445,7 +560,7 @@ async function main() {
         const pass = enc.beginComputePass(); pass.setPipeline(cmpPipe); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(1024); pass.end();
       }
       enc.copyBufferToBuffer(cmpOut, 0, cmpRead, 0, 16); raw.queue.submit([enc.finish()]);
-      await cmpRead.mapAsync(GPUMapMode.READ); const w = new Uint32Array(cmpRead.getMappedRange().slice(0)); cmpRead.unmap(); return [w[0]!, w[1]!];
+      await cmpRead.mapAsync(GPUMapMode.READ); const w = new Uint32Array(cmpRead.getMappedRange().slice(0)); cmpRead.unmap(); return [w[0]!, w[1]!, w[2]!];
     };
     const bufOf = (name: string): GPUBuffer => P.buffers.get(name) ?? P.external.get(name);
     const refs = new Map<GPUBuffer, GPUBuffer>();
@@ -462,13 +577,13 @@ async function main() {
       copyAll(live, snap); await raw.queue.onSubmittedWorkDone();
       const names = k.bindings.filter((b: any) => b.kind === "rw").map((b: any) => b.name as string), bufs = [...new Set(names.map(bufOf))] as GPUBuffer[];
       await fromSnap([all[i]]); { const enc = raw.createCommandEncoder(); for (const b of bufs) enc.copyBufferToBuffer(b, 0, refOf(b), 0, b.size); raw.queue.submit([enc.finish()]); }
-      const ex: Record<string, { words: number; first: number }> = {};
+      const ex: Record<string, { words: number; first: number; sentinel: number }> = {};
       const cases: [string, any[]][] = [["base", [all[i]]], ...targets.filter(t => t.i === i && !isDiag(t)).map(t => { const v = variants.get(`${i}\t${t.name}`)!; return [t.name, [...v.pre, v.rec]] as [string, any[]]; })];
       for (const [v, list] of cases) {
-        await fromSnap(list); let d = 0, first = -1; for (const b of bufs) { const [n, f] = await compare(b, refOf(b)); if (n && first < 0) first = f; d += n; } ex[v] = { words: d, first };
+        await fromSnap(list); let d = 0, first = -1, sent = 0; for (const b of bufs) { const [n, f, s] = await compare(b, refOf(b)); if (n && first < 0) first = f; d += n; sent += s; } ex[v] = { words: d, first, sentinel: sent };
       }
       result.placements[i].rw = names; result.placements[i].exact = ex;
-      log(`  exact ${i} ${k.label} (${names.join(",")}): ${Object.entries(ex).map(([v, d]) => `${v} ${d.words}`).join(", ")} words differ`);
+      log(`  exact ${i} ${k.label} (${names.join(",")}): ${Object.entries(ex).map(([v, d]) => `${v} ${d.words}${d.sentinel ? ` (${d.sentinel} the gcheck sentinel 7777777)` : ""}`).join(", ")} words differ`);
     }
     for (const b of snap) b.destroy();
     fail("in the exactness check");
