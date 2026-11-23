@@ -362,7 +362,83 @@ const uextHalf = (code: string) => {
   return sub(sub(code, body, halfText), "@compute @workgroup_size(512) fn uExtend(", "@compute @workgroup_size(256) fn uExtend(");
 };
 
+// uExt4 (GPU-shape lane A2, fifth task): uExtend's pattern on the 4h sweep. "half": 256 lanes sweep the page's two z
+// halves in turn, wV/wD a half's 12 x 12 x 8 window (13.8 KB, not 20.7). "pub": one axis loop, each axis's state
+// published (yPublish: the old loop body, continue as return) as soon as it is swept. "seam": the seam's
+// vLiquidOwner(c) on the h-owned tile T, whose slot fs is held: fgCellCoarse(c) false (foCellOwnerH(c) =
+// foTileOwnerH(T)) and fgSlot(c) = fs, so the FC_LIQ bit of fs, vLiquidOwner's own path.
+const UX4_OLD = ` var state:array<vec3f,3>;
+ if(flagged){
+  for(var a=0u;a<3u;a++){
+   for(var r=0u;r<4u;r++){let k=lid+512u*r;if(k<1728u){let s=ySeed(P+yCell(k),a);wV[k]=s.xy;wD[k]=s.z;}}
+   workgroupBarrier();
+   var held:array<Ufx,2>;
+   for(var r=0u;r<2u;r++){let k=lid+512u*r;if(k<1000u){held[r]=ySweepAt(yInset(k),h4);}}
+   workgroupBarrier();
+   for(var r=0u;r<2u;r++){let k=lid+512u*r;if(k<1000u){let i=yAt(yInset(k));wV[i]=held[r].v;wD[i]=held[r].d;}}
+   workgroupBarrier();
+   let s=ySweepAt(nbLocalCoord(j),h4);state[a]=vec3f(s.v,s.d);
+   workgroupBarrier();
+  }
+ }else{for(var a=0u;a<3u;a++){state[a]=x4Load(slot,0u,j,a);}}
+ for(var a=0u;a<3u;a++){
+`;
+const UX4_END = `   vel[vAt(NB_VEL_F_US0,fs,a,nbLocal(c))]=value;vel[iu]=value-select(kept,s.y,take);
+  }
+ }
+}`;
+const ux4Half = (code: string) => {
+  code = sub(code, "var<workgroup> wV:array<vec2f,1728>;\nvar<workgroup> wD:array<f32,1728>;", "var<workgroup> wV:array<vec2f,1152>;\nvar<workgroup> wD:array<f32,1152>;");
+  code = sub(code, "var<private> yPage:vec3i;\nfn yCell(k:u32)->vec3i{return vec3i(vec3u(k%12u,(k/12u)%12u,k/144u))-vec3i(2);}\nfn yInset(j:u32)->vec3i{return vec3i(vec3u(j%10u,(j/10u)%10u,j/100u))-vec3i(1);}\nfn yAt(c:vec3i)->u32{let q=vec3u(c+vec3i(2));return q.x+12u*(q.y+12u*q.z);}",
+    "var<private> yPage:vec3i;\nvar<private> yZ0:i32;\nfn yCell(k:u32)->vec3i{return vec3i(vec3u(k%12u,(k/12u)%12u,k/144u))-vec3i(2,2,2-yZ0);}\nfn yInset(j:u32)->vec3i{return vec3i(vec3u(j%10u,(j/10u)%10u,j/100u))-vec3i(1,1,1-yZ0);}\nfn yAt(c:vec3i)->u32{let q=vec3u(c+vec3i(2,2,2-yZ0));return q.x+12u*(q.y+12u*q.z);}");
+  code = sub(code, "@compute @workgroup_size(512) fn uExt4(", "@compute @workgroup_size(256) fn uExt4(");
+  code = sub(code, " let j=lid;let T=P+vec3i(i32(j&7u),i32((j>>3u)&7u),i32(j>>6u));let h4=4.0*vH();\n", " let h4=4.0*vH();\n");
+  code = sub(code, " if(x4Support(T)){atomicOr(&wFlag,1u);}\n", " for(var hz=0u;hz<2u;hz++){let j=lid+256u*hz;if(x4Support(P+vec3i(i32(j&7u),i32((j>>3u)&7u),i32(j>>6u)))){atomicOr(&wFlag,1u);}}\n");
+  code = sub(code, UX4_OLD, " for(var hz=0u;hz<2u;hz++){\n yZ0=4*i32(hz);let j=lid+256u*hz;let T=P+vec3i(i32(j&7u),i32((j>>3u)&7u),i32(j>>6u));\n" +
+    UX4_OLD.replace("r<4u;r++){let k=lid+512u*r;if(k<1728u)", "r<5u;r++){let k=lid+256u*r;if(k<1152u)").replace("array<Ufx,2>", "array<Ufx,3>")
+      .split("for(var r=0u;r<2u;r++){let k=lid+512u*r;if(k<1000u)").join("for(var r=0u;r<3u;r++){let k=lid+256u*r;if(k<600u)"));
+  return sub(code, UX4_END, UX4_END.slice(0, -1) + " }\n}");
+};
+const ux4Pub = (code: string) => {
+  code = sub(code, " var state:array<vec3f,3>;\n if(flagged){\n  for(var a=0u;a<3u;a++){\n   for(var r=0u;r<5u;r++){let k=lid+256u*r;if(k<1152u){let s=ySeed(P+yCell(k),a);wV[k]=s.xy;wD[k]=s.z;}}",
+    " for(var a=0u;a<3u;a++){\n  var s=vec3f(0.0);\n  if(flagged){\n   for(var r=0u;r<5u;r++){let k=lid+256u*r;if(k<1152u){let e=ySeed(P+yCell(k),a);wV[k]=e.xy;wD[k]=e.z;}}");
+  code = sub(code, `   let s=ySweepAt(nbLocalCoord(j),h4);state[a]=vec3f(s.v,s.d);
+   workgroupBarrier();
+  }
+ }else{for(var a=0u;a<3u;a++){state[a]=x4Load(slot,0u,j,a);}}
+ for(var a=0u;a<3u;a++){
+  let s=state[a];x4Store(slot,1u,j,a,s);
+  if(vcFace(T,a)){vel[vcAt(NB_VEL_C_US0,slot,a,j)]=s.x;vel[vcAt(NB_VEL_C_UP0,slot,a,j)]=s.x-s.y;continue;}
+  let O=T-fgUnit(a);
+  if(!foTileOwnerH(T)||!foTileInLattice(O)||foTileOwnerH(O)||fgTileCSlot(O)==NB_NONE){continue;}
+`, `   let t=ySweepAt(nbLocalCoord(j),h4);s=vec3f(t.v,t.d);
+   workgroupBarrier();
+  }else{s=x4Load(slot,0u,j,a);}
+  yPublish(slot,j,T,a,s);
+`);
+  const i = code.indexOf("  // ufxPublish4's seam"), e = code.indexOf("  }\n", code.indexOf("vel[iu]=value-select(kept,s.y,take);", i)) + 4;
+  const seam = code.slice(i, e); code = code.slice(0, i) + code.slice(e);
+  const fn = "// uExt4's publish of tile T's axis-a state s: the C face, or ufxPublish4's seam to an h tile.\nfn yPublish(slot:u32,j:u32,T:vec3i,a:u32,s:vec3f){\n x4Store(slot,1u,j,a,s);\n" +
+    " if(vcFace(T,a)){vel[vcAt(NB_VEL_C_US0,slot,a,j)]=s.x;vel[vcAt(NB_VEL_C_UP0,slot,a,j)]=s.x-s.y;return;}\n" +
+    " let O=T-fgUnit(a);\n if(!foTileOwnerH(T)||!foTileInLattice(O)||foTileOwnerH(O)||fgTileCSlot(O)==NB_NONE){return;}\n" +
+    seam.replace(/\n$/, "").split("\n").map(l => l.slice(1)).join("\n") + "\n}\n";
+  return sub(code, "@compute @workgroup_size(256) fn uExt4(", fn + "@compute @workgroup_size(256) fn uExt4(");
+};
+const ux4Seam = (code: string) => sub(sub(code, "let source=!fgFaceOpen(c,a)||owner||vLiquidOwner(c);", "let source=!fgFaceOpen(c,a)||owner||yLiquidH(c,fs);"),
+  "// uExt4's publish of tile T's axis-a state s:", "// vLiquidOwner(c) for a cell c of an h-owned tile held by slot fs (fgCellCoarse false, fgSlot(c) = fs).\nfn yLiquidH(c:vec3i,fs:u32)->bool{if(!nbInLattice(c)){return false;}let l=nbLocal(c);return ((fcLoad(FC_LIQ+16u*fs+(l>>5u))>>(l&31u))&1u)!=0u;}\n// uExt4's publish of tile T's axis-a state s:");
+
 export const variants: Variant[] = [
+  { kernel: "uExt4", name: "half", apply: ux4Half },
+  // "axis": the page over C_ACT4_G1's four workgroups (g/4 the page, as uExt4Seed), workgroup g%4 sweeps axis g%4 and
+  // the fourth leaves: the three axes' sweeps run side by side, not one after another (the dispatch moves to C_ACT4_G1).
+  { kernel: "uExt4", name: "axis", apply: c => sub(sub(sub(sub(c, "sCount=nbListCount(NB_LIST_C_ACT);", "sCount=4u*nbListCount(NB_LIST_C_ACT);"),
+    "if(g>=workgroupUniformLoad(&sCount)){return;}", "if(g>=workgroupUniformLoad(&sCount)||g%4u==3u){return;}"),
+    "let slot=nbListSlot(NB_LIST_C_ACT,g);", "let slot=nbListSlot(NB_LIST_C_ACT,g/4u);"), "for(var a=0u;a<3u;a++){", "for(var a=g%4u;a<g%4u+1u;a++){", 3) },
+  { kernel: "uExt4", name: "pub", apply: c => ux4Pub(ux4Half(c)) },
+  { kernel: "uExt4", name: "seam", apply: c => ux4Seam(ux4Pub(ux4Half(c))) },
+  // "seam2": the seam's face tests before its loads (pure reads either way; Metal caps it at 768, three groups a core).
+  { kernel: "uExt4", name: "seam2", apply: c => sub(ux4Seam(ux4Pub(ux4Half(c))), "  let iu=vAt(NB_VEL_F_UP0,fs,a,nbLocal(c));\n  let own=fgFace(NB_VEL_F_U0,c,a);let kept=vel[iu];\n  let source=!fgFaceOpen(c,a)||owner||yLiquidH(c,fs);\n  let take=!source&&reached;",
+    "  let source=!fgFaceOpen(c,a)||owner||yLiquidH(c,fs);\n  let take=!source&&reached;\n  let iu=vAt(NB_VEL_F_UP0,fs,a,nbLocal(c));\n  let own=fgFace(NB_VEL_F_U0,c,a);let kept=vel[iu];") },
   { kernel: "uExtend", name: "half", apply: uextHalf },
   { kernel: "lAdvect", name: "ls-corners", apply: lsCorners },
   { kernel: "lAdvect", name: "ls-tri2", apply: lsTri2 },

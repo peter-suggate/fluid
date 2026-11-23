@@ -347,3 +347,69 @@ bit and 8 staged depth vertices once (private), and the count pass's sites read 
 - The go line (≥ 15% on dam and paddleboats) is met.
 - velocity-formulas.test's "volume control" fails identically at HEAD without the change.
 - The same shape likely applies to uExt4 (m4-clist.md: "the uExtend pattern"). Not tried.
+
+## uExt4 and the uExtend pattern (lane A2, 2026-11-24, fifth task)
+
+**Verdict: no-go.** uExt4's time is not set by residency, so the uExtend pattern does not help it. No lib change.
+
+uExt4's time in the step (stepab family minima, base at 8a50eb74):
+
+| scene | uExt4 |
+|---|---|
+| dam | 0.23–0.33 ms (it varies between processes; the A/A within a process is 0.000) |
+| paddleboats | 0.33 ms |
+| seep | 0.25 ms |
+| letters | 0.44 ms |
+
+So uExt4 is above the 0.2 ms floor on every scene.
+
+**Variants.** All are in m1/variants.mts, kernel uExt4. Every one is exact: m1fix BUFS=all gives 0 words, and
+stepab gives set, vel and fext4 identical.
+- half: 256 lanes over the page's two z halves, with a 12 x 12 x 8 window (wV/wD 13.8 KB, not 20.7). Cap 576.
+- pub: half, with one axis loop that publishes each axis's state as soon as it is swept (yPublish). Cap 640.
+- seam: pub, with the seam's vLiquidOwner(c) read from the held slot. Cap 704.
+- seam2: seam, with the seam's face tests ahead of its loads. Cap 768, so three groups a core.
+- axis: the page over C_ACT4_G1's four workgroups, one axis a workgroup (the fourth leaves). Run with m4-stepab
+  for the dispatch. Cap 640.
+
+The base is 512 lanes at cap 640: one group a core.
+
+**stepab, dam:**
+
+| variant | uExt4 in step |
+|---|---|
+| seam | 0.267 → 0.320 ms (+20.0%) |
+| seam2 | 0.226 → 0.232 ms (+2.8%) |
+| axis | 0.250 → 0.294 ms (+17.9%) |
+
+Each misses on dam, so none can land ("wins everywhere"). The other three scenes were not run.
+
+**Attribution.**
+- noflag: the base with the page sweep switched off, timing only. uExt4 went 0.326 → 0.246 ms (−24.6%). So the
+  sweeps, which are what the pattern reshapes, are about a quarter of the kernel. The rest is the per-tile flag
+  (x4Support's z taps) and the publish (C faces and ufxPublish4's 16-subface seam).
+- Clock trace (t2/cpages-dam.log, dam):
+  - 124 groups (C_ACT pages);
+  - 32 in flight for the first quarter of the pass, falling to 1 over the second half;
+  - group time p50 22 µs, p90 106 µs.
+- So the pass is a tail of a few long pages, not a residency limit:
+  - three groups a core (seam2) gains nothing;
+  - halving a page's lanes doubles each page's serial work;
+  - the axis split runs x4Support's flag three times over.
+
+**Other F-side kernels with the signature** (≥ 512 lanes, wgmem ≥ 12 KB, ≤ 1 group a core). From a static scan
+of the four scenes' schedules, regcap, and lane B2's M6 table (fluid-scratch/gpu-shape/m6/table.md;
+m6-residency.md has not landed):
+
+| kernel | lanes | wgmem | cap | groups a core | in step | worth reshaping? |
+|---|---|---|---|---|---|---|
+| nbOperator | 512 | 15.7 KB | 512–576 | 1 | dam 1.14 ms, paddleboats 2.34 ms | no (see below) |
+| pmgCoarsenC | 512 | 18–20 KB | 1024 | 1–2 (peak 32 dam, 63 paddleboats) | 57–88 µs | no |
+
+- nbOperator is register-bound, not memory-bound. Its cap is 512–576. At 256 lanes the same per-thread code gives
+  two groups, still 512 threads a core. The uExtend win came from cap 768: three groups of 256 against one of 512.
+- pmgCoarsenC is below the 0.2 ms floor, and B2's table classes it few/full+tail.
+- pmgSetupF and pmgUpdate already run two groups a core (B2: "full").
+- pmgCoarsenTop and pmgTopCycle are 1024-lane, few-group passes. Their cost is serial latency, not residency.
+
+No candidate remains for this pattern.
