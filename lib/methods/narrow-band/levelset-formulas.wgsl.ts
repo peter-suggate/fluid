@@ -22,6 +22,27 @@ const NB_TRACE_TURN:f32=0.25;
 
 `;
 
+/** nbfCubicLimited's text as fn `name` over the taps `tap(x, y, z)`: a kernel whose taps come by two routes (lAdvect's
+ * stencil slots, levelset-kernels.wgsl.ts) takes a second copy of the same arithmetic rather than a branch a tap. */
+export const nbfCubicLimitedWGSL = (name: string, tap: string) => /* wgsl */`fn ${name}(fraction:vec3f,lowHeld:vec3<bool>,highHeld:vec3<bool>)->f32{
+ let wx=nbfHeldWeights(nbfCatmull(fraction.x),lowHeld.x,highHeld.x);let wy=nbfHeldWeights(nbfCatmull(fraction.y),lowHeld.y,highHeld.y);let wz=nbfHeldWeights(nbfCatmull(fraction.z),lowHeld.z,highHeld.z);
+ var value=0.0;var low=1e30;var high=-1e30;
+ let upper=fraction>=vec3f(0.5);
+ var zEndLow=0.0;var zEndHigh=0.0;
+ for(var z=0u;z<4u;z++){var plane=0.0;var planeLow=1e30;var planeHigh=-1e30;var yEndLow=0.0;var yEndHigh=0.0;
+  for(var y=0u;y<4u;y++){var row=0.0;var rowLow=1e30;var rowHigh=-1e30;var xEnd=0.0;
+   for(var x=0u;x<4u;x++){
+    let s=${tap}(x,y,z);row+=wx[x]*s;
+    if(x==1u||x==2u){rowLow=min(rowLow,s);rowHigh=max(rowHigh,s);}else if((x==3u)==upper.x){xEnd=s;}
+   }plane+=wy[y]*row;rowLow=min(rowLow,xEnd);rowHigh=max(rowHigh,xEnd);
+   if(y==1u||y==2u){planeLow=min(planeLow,rowLow);planeHigh=max(planeHigh,rowHigh);}else if((y==3u)==upper.y){yEndLow=rowLow;yEndHigh=rowHigh;}
+  }value+=wz[z]*plane;planeLow=min(planeLow,yEndLow);planeHigh=max(planeHigh,yEndHigh);
+  if(z==1u||z==2u){low=min(low,planeLow);high=max(high,planeHigh);}else if((z==3u)==upper.z){zEndLow=planeLow;zEndHigh=planeHigh;}
+ }low=min(low,zEndLow);high=max(high,zEndHigh);
+ return clamp(value,low,high);
+}
+`;
+
 /** phiAdvect's trace and interpolants; the kernel defines nbxTraceVelocity, nbxPointFrom, nbxTraceFatal and nbxCubicTap. */
 export const nbfPhiAdvectWGSL = /* wgsl */`
 // ---- phiAdvect: the surface trace's steps (umSurfaceTrace).
@@ -97,24 +118,7 @@ fn nbfHeldWeights(w:vec4f,low:bool,high:bool)->vec4f{
 // The tricubic over the 4^3 taps nbxCubicTap(x, y, z) (offset (x, y, z) - 1 widths from the cell's base), clamped
 // to the 27 taps about the vertex nearest q: on each axis the two inner taps and the end tap on q's side. The
 // caller returns the cell's trilinear value instead where a weighted tap is buried (umCubicPhi).
-fn nbfCubicLimited(fraction:vec3f,lowHeld:vec3<bool>,highHeld:vec3<bool>)->f32{
- let wx=nbfHeldWeights(nbfCatmull(fraction.x),lowHeld.x,highHeld.x);let wy=nbfHeldWeights(nbfCatmull(fraction.y),lowHeld.y,highHeld.y);let wz=nbfHeldWeights(nbfCatmull(fraction.z),lowHeld.z,highHeld.z);
- var value=0.0;var low=1e30;var high=-1e30;
- let upper=fraction>=vec3f(0.5);
- var zEndLow=0.0;var zEndHigh=0.0;
- for(var z=0u;z<4u;z++){var plane=0.0;var planeLow=1e30;var planeHigh=-1e30;var yEndLow=0.0;var yEndHigh=0.0;
-  for(var y=0u;y<4u;y++){var row=0.0;var rowLow=1e30;var rowHigh=-1e30;var xEnd=0.0;
-   for(var x=0u;x<4u;x++){
-    let s=nbxCubicTap(x,y,z);row+=wx[x]*s;
-    if(x==1u||x==2u){rowLow=min(rowLow,s);rowHigh=max(rowHigh,s);}else if((x==3u)==upper.x){xEnd=s;}
-   }plane+=wy[y]*row;rowLow=min(rowLow,xEnd);rowHigh=max(rowHigh,xEnd);
-   if(y==1u||y==2u){planeLow=min(planeLow,rowLow);planeHigh=max(planeHigh,rowHigh);}else if((y==3u)==upper.y){yEndLow=rowLow;yEndHigh=rowHigh;}
-  }value+=wz[z]*plane;planeLow=min(planeLow,yEndLow);planeHigh=max(planeHigh,yEndHigh);
-  if(z==1u||z==2u){low=min(low,planeLow);high=max(high,planeHigh);}else if((z==3u)==upper.z){zEndLow=planeLow;zEndHigh=planeHigh;}
- }low=min(low,zEndLow);high=max(high,zEndHigh);
- return clamp(value,low,high);
-}
-// The taps a buried test must cover: those with a nonzero weight (umCubicPhi's weighted mask).
+${nbfCubicLimitedWGSL("nbfCubicLimited", "nbxCubicTap")}// The taps a buried test must cover: those with a nonzero weight (umCubicPhi's weighted mask).
 fn nbfCubicWeighted(fraction:vec3f,lowHeld:vec3<bool>,highHeld:vec3<bool>,x:u32,y:u32,z:u32)->bool{
  let wx=nbfHeldWeights(nbfCatmull(fraction.x),lowHeld.x,highHeld.x);let wy=nbfHeldWeights(nbfCatmull(fraction.y),lowHeld.y,highHeld.y);let wz=nbfHeldWeights(nbfCatmull(fraction.z),lowHeld.z,highHeld.z);
  return wx[x]*wy[y]*wz[z]!=0.0;

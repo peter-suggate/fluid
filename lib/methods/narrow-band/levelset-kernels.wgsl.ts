@@ -34,7 +34,7 @@ import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, FG_WIN_VERTEX_PHI_AT_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
-import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
+import { nbfCubicLimitedWGSL, nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 import { CENSUS } from "./brick-census.wgsl";
 import { brickSourceWGSL } from "./brick-source.wgsl";
@@ -131,7 +131,37 @@ fn lCorners0(c:vec3i)->array<f32,8>{
  return v;
 }
 fn nbxCubicTap(x:u32,y:u32,z:u32)->f32{return lPhi0(lBase+vec3i(i32(x),i32(y),i32(z))-vec3i(1));}
-` + nbfPhiAdvectWGSL + /* wgsl */`
+// A stencil's bricks, each looked up once (docs/plans/gpu-shape/m1-distinct-once.md). lPhi0 walks the directory a tap
+// and branches on the walk, and the branch holds back the next tap's loads: the cubic's 64 taps were 64 serial walks
+// of at most 8 bricks. A stencil over cells lo..hi (hi - lo < 8 an axis) lies in bricks lo >> 3 and hi >> 3 an axis;
+// lStencil walks each distinct one once, the walks independent of one another, and holds where every walk hits, lo is
+// in the lattice and the lattice is tiered. Then lPhi0 at each vertex of the stencil is its slot's PHIU word (lPhi0's
+// first branch), which lStencilPhi reads with the slot picked by selects: the same words, no walk and no branch a tap.
+var<private> lsBrick:vec3i;
+var<private> lsSlot0:u32;var<private> lsSlot1:u32;var<private> lsSlot2:u32;var<private> lsSlot3:u32;
+var<private> lsSlot4:u32;var<private> lsSlot5:u32;var<private> lsSlot6:u32;var<private> lsSlot7:u32;
+fn lStencil(lo:vec3i,hi:vec3i)->bool{
+ // Bricks x + 2y + 4z of the 2^3 at lo >> 3; on an axis the stencil does not cross, the upper ones repeat the lower.
+ let b0=lo>>vec3u(3u);let b1=hi>>vec3u(3u);let d=b1!=b0;lsBrick=b0;
+ lsSlot0=fgBrickSlot(b0);
+ if(d.x){lsSlot1=fgBrickSlot(vec3i(b1.x,b0.y,b0.z));}else{lsSlot1=lsSlot0;}
+ if(d.y){lsSlot2=fgBrickSlot(vec3i(b0.x,b1.y,b0.z));if(d.x){lsSlot3=fgBrickSlot(vec3i(b1.x,b1.y,b0.z));}else{lsSlot3=lsSlot2;}}else{lsSlot2=lsSlot0;lsSlot3=lsSlot1;}
+ if(d.z){
+  lsSlot4=fgBrickSlot(vec3i(b0.x,b0.y,b1.z));if(d.x){lsSlot5=fgBrickSlot(vec3i(b1.x,b0.y,b1.z));}else{lsSlot5=lsSlot4;}
+  if(d.y){lsSlot6=fgBrickSlot(vec3i(b0.x,b1.y,b1.z));if(d.x){lsSlot7=fgBrickSlot(b1);}else{lsSlot7=lsSlot6;}}else{lsSlot6=lsSlot4;lsSlot7=lsSlot5;}
+ }else{lsSlot4=lsSlot0;lsSlot5=lsSlot1;lsSlot6=lsSlot2;lsSlot7=lsSlot3;}
+ let low=(lsSlot0==NB_NONE)||(lsSlot1==NB_NONE)||(lsSlot2==NB_NONE)||(lsSlot3==NB_NONE);
+ let high=(lsSlot4==NB_NONE)||(lsSlot5==NB_NONE)||(lsSlot6==NB_NONE)||(lsSlot7==NB_NONE);
+ return FG_TIERED&&!(low||high)&&all(lo>=vec3i(0));
+}
+// lPhi0 at a vertex of the last stencil lStencil held for.
+fn lStencilPhi(v:vec3i)->f32{
+ let d=(v>>vec3u(3u))!=lsBrick;
+ let s=select(select(select(lsSlot0,lsSlot1,d.x),select(lsSlot2,lsSlot3,d.x),d.y),select(select(lsSlot4,lsSlot5,d.x),select(lsSlot6,lsSlot7,d.x),d.y),d.z);
+ return fcLoadF(FC_PHIU+512u*s+nbLocal(v));
+}
+fn lStencilCubicTap(x:u32,y:u32,z:u32)->f32{return lStencilPhi(lBase+vec3i(i32(x),i32(y),i32(z))-vec3i(1));}
+` + nbfPhiAdvectWGSL + nbfCubicLimitedWGSL("lStencilCubic", "lStencilCubicTap") + /* wgsl */`
 // umWallWithin for the box: within reach cells of a wall plane along the axis.
 fn lWallWithin(v:vec3i,a:u32,reach:i32)->bool{return v[a]<reach||v[a]>NB_WALL_BOX[a]-reach;}
 fn lOnWall(v:vec3i)->bool{return any(v==vec3i(0))||any(v==NB_WALL_BOX);}
@@ -160,7 +190,9 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
   var at:array<vec3f,10>;var t:array<f32,10>;
   for(var a=0u;a<3u;a++){let e=vec3f(fgUnit(a));at[2u*a]=fgHeld(p-e);at[2u*a+1u]=fgHeld(p+e);}
   for(var k=0u;k<4u;k++){var q=p;q[select(0u,2u,k>1u)]+=select(-2.0,2.0,(k&1u)!=0u);at[6u+k]=q;}
-  for(var k=0u;k<10u;k++){t[k]=lPhi0(vec3i(at[k]));}
+  // The ten taps lie in v - 2 .. v + 2.
+  if(lStencil(v-vec3i(2),v+vec3i(2))){for(var k=0u;k<10u;k++){t[k]=lStencilPhi(vec3i(at[k]));}}
+  else{for(var k=0u;k<10u;k++){t[k]=lPhi0(vec3i(at[k]));}}
   var gr=vec3f(0.0);
   for(var a=0u;a<3u;a++){gr[a]=(t[2u*a+1u]-t[2u*a])/max(at[2u*a+1u][a]-at[2u*a][a],1e-6);}
   let g2=dot(gr,gr);
@@ -195,7 +227,8 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
  if(abs(value)<2.0&&lCubicAt(v)){
   lBase=cell;
   let lowHeld=cell-vec3i(1)<vec3i(0);let highHeld=cell+vec3i(2)>NB_WALL_BOX;
-  value=nbfCubicLimited(f,lowHeld,highHeld);
+  // The departure cubic over cell - 1 .. cell + 2: from the stencil's slots where lStencil holds, else lPhi0 a tap.
+  if(lStencil(cell-vec3i(1),cell+vec3i(2))){value=lStencilCubic(f,lowHeld,highHeld);}else{value=nbfCubicLimited(f,lowHeld,highHeld);}
  }
  // umWallContact ("clip"): a wall vertex whose inner neighbour flows into the wall takes the departure held at it.
  if(wall&&dt>0.0){

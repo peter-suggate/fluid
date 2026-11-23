@@ -343,7 +343,7 @@ const LADVECT_FOOT_TAPS = "for(var a=0u;a<3u;a++){let e=vec3f(fgUnit(a));at[2u*a
 const LADVECT_FOOT = "foot=fgHeld(p+offset);shift=p-foot;}";
 const LADVECT_SMOOTH_AXIS = "var part=6.0*c;var valid=true;var different=0u;";
 const LADVECT_CELL = "let cell=min(vec3i(floor(q)),NB_WALL_BOX-vec3i(1));let f=q-vec3f(cell);";
-const LADVECT_CUBIC = "value=nbfCubicLimited(f,lowHeld,highHeld);";
+const LADVECT_CUBIC = "if(lStencil(cell-vec3i(1),cell+vec3i(2))){value=lStencilCubic(f,lowHeld,highHeld);}else{value=nbfCubicLimited(f,lowHeld,highHeld);}";
 
 /** lAdvect's text with statics: phiSolid advects the NEAR_SOLID bricks. Elsewhere the walk is proven empty only for
  * a trace that stays inside the ring of its vertex (the foot and the end): lAdvect leaves a vertex whose trace leaves
