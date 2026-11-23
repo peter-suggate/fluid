@@ -514,6 +514,23 @@ var<private> psStaged:bool=false;
 fn psIn(c:vec3i)->bool{return all(vec3u(c-psO)<vec3u(8u));}
 fn psReach1(c:vec3i)->bool{if(psStaged&&psIn(c)){return sTileReach[fgTileOf(c)]!=0u;}return fgReach1(c);}
 fn psDepthVertex(v:vec3i)->f32{let r=vec3u(v-psO);if(psStaged&&all(r<vec3u(9u))){return sDepth[r.x+9u*(r.y+9u*r.z)];}return fgDepthVertex(v);}
+// psDepthCell (GPU-shape M1, docs/plans/gpu-shape/m1-distinct-once.md): a cell's centre and its sites share one floor
+// cell (a site lies in its cell, but for a rounding to c + 1), so psCellGate reads the cell's reach bit and 8 staged
+// depth vertices once, and the count pass's sites take them (pSeed -7..-10% a step, its written buffers identical on
+// dam, letters, paddleboats and seep). The write pass keeps psDepth: under Metal's relaxed fp math the cached sum,
+// stored there, came out other in the last bits (the count pass only compares its sites' depths).
+var<private> psCC:vec3i=vec3i(-2147483647);var<private> psCR:bool;var<private> psCV:array<f32,8>;
+fn psDepthCell(p:vec3f)->f32{
+ let c=vec3i(floor(p));
+ if(any(c!=psCC)){return psDepth(p);}
+ if(!psCR){let far=fgPhiAt(p);return select(max(far,6.0),min(far,-6.0),far<0.0);}
+ let f=p-vec3f(c);var value=0.0;
+ for(var k=0u;k<8u;k++){
+  let corner=vec3u(k&1u,(k>>1u)&1u,k>>2u);let w=select(1.0-f,f,corner!=vec3u(0));
+  value+=w.x*w.y*w.z*psCV[k];
+ }
+ return value;
+}
 ` + PS_DEPTH_WGSL + /* wgsl */`
 fn psCoarse(c:vec3i)->bool{let t=vec3u((c>>vec3u(2u))-((psO>>vec3u(2u))-vec3i(1)));if(all(t<vec3u(4u))){return nbInWallBox(c)&&sCoarse[t.x+4u*(t.y+4u*t.z)]!=0u;}return fgCellCoarse(c);}
 fn psSeam(c:vec3i)->bool{
@@ -531,6 +548,7 @@ fn psSeam(c:vec3i)->bool{
 }
 // A site's depth: the re-entry's φ, else fgDepth's (staged).
 fn psSiteDistance(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site);}return psDepth(site);}
+fn psSiteDistanceCell(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site);}return psDepthCell(site);}
 // The cell's gates and depth: x 1 where the cell may seed (0 none), y the centre depth d, z the heat.
 fn psCellGate(c:vec3i,re:bool)->vec3f{
  let none=vec3f(0.0);
@@ -543,7 +561,7 @@ fn psCellGate(c:vec3i,re:bool)->vec3f{
  let reentry=cfg.w==2u;
  let centre=vec3f(c)+0.5;var heat=sTileHeat[t];var d=0.0;
  if(reentry){d=fgPhiAt(centre);heat=1.0;}
- else{d=psDepth(centre);}
+ else{psCC=c;psCR=psReach1(c);if(psCR){for(var k=0u;k<8u;k++){psCV[k]=psDepthVertex(c+vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u)));}}d=psDepthCell(centre);}
  if(!nbfSeedCellDepthOk(d)){if(re){atomicAdd(&nbSet[NB_H_REENTRY_NO_DEPTH],1u);}return none;}
  return vec3f(1.0,d,heat);
 }
@@ -580,7 +598,7 @@ fn pSeedCellMask(c:vec3i,bank:u32,initial:bool)->u32{
   // the union (transfer): part 2's seed; part 1's re-entry (cfg.w = 2) runs before this step's drop is in φ.
   let sourcePhi=select(1.0,nbSourcePhi(site,1.0),cfg.w!=2u);
   if(covered&&sourcePhi>=0.0){continue;}
-  let distance=psSiteDistance(site,reentry);
+  let distance=psSiteDistanceCell(site,reentry);
   if(!known&&(distance>-1.0||d>-1.5)){uncovered=(n0==0u&&pUncovered(c))||psSeam(c);known=true;}
   if(!nbfSeedSiteOk(distance,false,initial,d,sourcePhi,uncovered,fine)){continue;}
   mask|=1u<<j;
