@@ -297,3 +297,53 @@ bit and 8 staged depth vertices once (private), and the count pass's sites read 
 - Caveat: exactness here is measured, not by construction. Under relaxed math the count pass's cached site depths
   could differ from psDepth's in the last bit. That would flip a seed decision only at a threshold, and none
   flipped on the four gate states.
+
+## The ulp tier, its re-gates, and the uExtend reshape (lane A2, 2026-11-24, fourth task)
+
+**The tier (82edb8b1).** stepab now takes `TOL=ulp4` or `--tol=ulp4`.
+- f32 words may differ by ≤ 4 ulp; the tool reports the count and the max.
+- Every other word stays exact.
+- Which words count as f32:
+  - a binding's declared `array<f32>`: vel, pres, pmgF, pmgRed, xfer, fext4, pEnergy;
+  - the phi pool's PHI and PHI1 channels, from the layout's own bases (FLAGS exact; a new channel fails);
+  - particle records (parts, fmoved), every word but before.w, which packs mass, mode and age.
+- pmgC stays exact: its PDELTA words hold u32 patterns as bitcast f32.
+- Order-dependent particle buffers: bit-identical records cancel, and the rest pair by exact words and by floats
+  with their low 8 bits cleared.
+
+**Re-gates on the tier (HEAD 82edb8b1, step 100).** None landed.
+
+| variant | where | result |
+|---|---|---|
+| pSeed write-pass caching ("depth") | dam | fails: 2444 seeded records differ in word 7 (velocity.w, the site depth); max 59 ulp, 15 over 4 |
+| ls-corners (lCorners0 through the landed lStencil) | dam / paddleboats | fails: 419 / 109 φ words over 4 ulp (e.g. 32 ulp near φ = 0), 31-68k within; lAdvect −1.8% / −5.4% |
+| ls-tri2 (trilinear in two copies) | dam / paddleboats | fails: 409 / 134 φ words over 4 ulp; lAdvect −5.7% / −6.8% |
+| pMove corners (fgCornersOf) | dam / paddleboats | exact, but pMove +6.0% / +5.7% |
+
+- pSeed: the excess is cancellation near zero, where the trilinear sum is small against its corners.
+- lAdvect: the earlier "1 ulp" for all-distinct (above) was measured against a different base text. On the landed
+  form the corner paths miss the tier, and they win only 2-7% on top of the landed −15%, not the −16 to −19.5% the
+  earlier table had against the old base.
+
+**uExtend shape (43e10865, landed).** 256-lane groups now sweep the brick's two z halves in turn, each over a
+12 x 12 x 8 window. The dispatch is unchanged: one group a brick.
+- Workgroup memory, ~15.4 KB a group (was ~23 KB):
+  - wV/wD 9.2 KB, not 13.8;
+  - wD is u32 with the distances bitcast, so the FC_LIQ words (wLiqW, removed) live in it until the first seed;
+  - wS4 is three f32 a state, 4.5 KB, not 6.
+- Cap 768 (regcap).
+- Per-workgroup clock trace (cpages.mts MODE=clock, dam):
+  - before (m3-cpages.md §5): 26–32 groups in flight;
+  - now: 85–95 groups in flight through the pass, about three a core.
+- stepab, exact (vel and fext4 identical) on all four scenes:
+
+  | scene | uExtend in step | GPU wall |
+  |---|---|---|
+  | dam | 1.663 → 1.286 ms (−22.7%) | −1.49% |
+  | paddleboats | 1.924 → 1.526 ms (−20.7%) | −1.20% |
+  | seep | 0.653 → 0.530 ms (−18.9%) | −0.43% |
+  | letters | 2.253 → 1.755 ms (−22.1%) | −1.11% |
+
+- The go line (≥ 15% on dam and paddleboats) is met.
+- velocity-formulas.test's "volume control" fails identically at HEAD without the change.
+- The same shape likely applies to uExt4 (m4-clist.md: "the uExtend pattern"). Not tried.

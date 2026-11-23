@@ -248,7 +248,124 @@ ${PS_DEPTH}`);
   c = sub(c, "fn psSiteDistance(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site);}return psDepth(site);}", "fn psSiteDistance(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site);}return psDepthCell(site);}");
   return sub(c, " else{d=psDepth(centre);}", " else{psCC=c;psCR=psReach1(c);if(psCR){for(var k=0u;k<8u;k++){psCV[k]=psDepthVertex(c+vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u)));}}d=psDepthCell(centre);}");
 };
+// On the landed lAdvect (e8a33481: lStencil/lStencilPhi): the cell's 8 corners (lCorners0) through the stencil too,
+// for the ulp tier (2026-11-24). "ls-corners": lCorners0 itself takes the stencil; "ls-tri2": the trilinear in two
+// copies, one over the stencil's words.
+const LS_CORNERS = "fn lCorners0(c:vec3i)->array<f32,8>{\n var v:array<f32,8>;\n for(var k=0u;k<8u;k++){v[k]=lPhi0(c+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)));}\n return v;\n}";
+const lsCorners = (c: string) => sub(c, LS_CORNERS, LS_CORNERS.replace("fn lCorners0(", "fn lCorners0Slow(") + `
+fn lCorners0(c:vec3i)->array<f32,8>{
+ if(!lStencil(c,c+vec3i(1))){return lCorners0Slow(c);}
+ var v:array<f32,8>;
+ for(var k=0u;k<8u;k++){v[k]=lStencilPhi(c+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)));}
+ return v;
+}`);
+const lsTri2 = (c: string) => sub(c, "var value=nbfCellTrilinear(lCorners0(cell),f);", "var value=0.0;if(lStencil(cell,cell+vec3i(1))){var v:array<f32,8>;for(var k=0u;k<8u;k++){v[k]=lStencilPhi(cell+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)));}value=nbfCellTrilinear(v,f);}else{value=nbfCellTrilinear(lCorners0(cell),f);}");
+// uExtend in 256-lane groups over the brick's two z halves in turn (GPU-shape, lane A2, 2026-11-24). The per-half
+// sweep window (12 x 12 x 8, wV/wD 9.2 KB, not 13.8), wS4 as three f32 a state (4.5 KB, not 6) and wLiqW in wD's
+// words (wD a u32 array, the distances bitcast; dead before the first seed): ~15.4 KB a group, under 16 KB, so two groups fit a core where one did.
+const uextHalf = (code: string) => {
+  code = sub(code, "var<workgroup> wV:array<f32,1728>;\nvar<workgroup> wD:array<f32,1728>;", "var<workgroup> wV:array<f32,1152>;\nvar<workgroup> wD:array<u32,1152>;\nvar<private> xZ0:i32;");
+  code = sub(code, "var<workgroup> wS4:array<vec4f,375>;", "var<workgroup> wS4:array<f32,1125>;");
+  code = sub(code, "var<workgroup> wLiqW:array<u32,432>;\n", "");
+  code = sub(code, "return ((wLiqW[16u*(n.x+3u*n.y+9u*n.z)+(l>>5u)]>>(l&31u))&1u)!=0u;", "return ((wD[16u*(n.x+3u*n.y+9u*n.z)+(l>>5u)]>>(l&31u))&1u)!=0u;");
+  code = sub(code, "fn xCell(k:u32)->vec3i{return vec3i(vec3u(k%12u,(k/12u)%12u,k/144u))-vec3i(2);}", "fn xCell(k:u32)->vec3i{return vec3i(vec3u(k%12u,(k/12u)%12u,k/144u))-vec3i(2,2,2-xZ0);}");
+  code = sub(code, "fn xInset(j:u32)->vec3i{return vec3i(vec3u(j%10u,(j/10u)%10u,j/100u))-vec3i(1);}", "fn xInset(j:u32)->vec3i{return vec3i(vec3u(j%10u,(j/10u)%10u,j/100u))-vec3i(1,1,1-xZ0);}");
+  code = sub(code, "fn xAt(c:vec3i)->u32{let q=vec3u(c+vec3i(2));return q.x+12u*(q.y+12u*q.z);}", "fn xAt(c:vec3i)->u32{let q=vec3u(c+vec3i(2,2,2-xZ0));return q.x+12u*(q.y+12u*q.z);}");
+  code = sub(code, "let s=wS4[125u*a+d.x+5u*d.y+25u*d.z];return Uf4(s.xy,s.z);}", "let i=3u*(125u*a+d.x+5u*d.y+25u*d.z);return Uf4(vec2f(wS4[i],wS4[i+1u]),wS4[i+2u]);}");
+  code = sub(code, "fn xUpwind(i:u32)->Ufx{let d=wD[i];", "fn xUpwind(i:u32)->Ufx{let d=bitcast<f32>(wD[i]);");
+  code = sub(code, "let old=Ufx(wV[i],wD[i]);", "let old=Ufx(wV[i],bitcast<f32>(wD[i]));");
+  const body = fnText(code, "uExtend");
+  const half = `fn uExtend(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ let g=nbGroup(wid);var live=g<nbListCount(NB_LIST_F_ALL);
+ var slot=0u;var o=vec3i(0);
+ if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);}
+ vRingMarkDir(o,lid,live);workgroupBarrier();
+ if(lid==0u){sRing=select(0u,1u,!live||vRingOf(live));}
+ if(workgroupUniformLoad(&sRing)!=0u){return;}
+ let h=vH();
+ xLow=o-vec3i(3);xBase4=o>>vec3u(2u);xBrick=o>>vec3u(3u);
+ fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();
+ if(lid<69u){atomicStore(&wLiq[lid],0u);}
+ if(lid<27u){atomicStore(&wSwept[lid],0u);}
+ if(lid==0u){atomicStore(&wReach,0u);}
+ if(live){
+  for(var j=lid;j<432u;j+=256u){
+   let n=j>>4u;let b=xBrick+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);
+   let s=fgBrickSlot(b);var w=0u;if(s!=NB_NONE){w=fcLoad(FC_LIQ+16u*s+(j&15u));}
+   wD[j]=w;
+  }
+  if(lid>=192u){
+   let j=lid-192u;let T=xBase4+vec3i(i32(j&3u),i32((j>>2u)&3u),i32(j>>4u))-vec3i(1);
+   var bits=0u;
+   if(FG_TIERED&&nbInWallBox(4*T)&&!foTileOwnerH(T)){bits=1u;if(fgTileCentre4(T)< -0.001){bits=3u;}}
+   if(fgTileSupported(4*T)){bits|=4u;}
+   if(FG_TIERED&&foTileOwnerH(T)){bits|=8u;}
+   wTile4[j]=bits;
+  }
+  if(FG_TIERED){
+   for(var j=lid;j<375u;j+=256u){
+    let d=j%125u;let a=j/125u;let C=xBase4+vec3i(vec3u(d%5u,(d/5u)%5u,d/25u))-vec3i(2);let T=C+fgUnit(a);
+    let cs=x4Slot(T);var st=vec3f(0.0,0.0,-1.0);if(cs!=NB_NONE){st=x4Load(cs,1u,foTileIndex(T),a);}
+    wS4[3u*j]=st.x;wS4[3u*j+1u]=st.y;wS4[3u*j+2u]=st.z;
+   }
+  }
+ }
+ workgroupBarrier();
+ if(live){
+  var wet=false;
+  for(var j=lid;j<2197u;j+=256u){
+   if(xLiquidStaged(xLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u)))){atomicOr(&wLiq[j>>5u],1u<<(j&31u));wet=true;}
+  }
+  var reach=select(0u,8u,wet);
+  if(FG_TIERED){for(var j=lid;j<375u;j+=256u){if(ufxReached(wS4[3u*j+2u])){reach|=1u<<(j/125u);}}}
+  if(reach!=0u){atomicOr(&wReach,reach);}
+  if(FG_TIERED&&lid<216u){
+   let n=lid>>3u;let b=xBrick+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);let tc=2*b+fsBit4(lid&7u);
+   if(foTileOwnerH(tc)&&fgTileSupported(4*tc)){atomicOr(&wSwept[n],1u);}
+  }
+ }
+ workgroupBarrier();
+ let reach=atomicLoad(&wReach);
+ for(var a=0u;a<3u;a++){
+  let sweep=(reach&(8u|(1u<<a)))!=0u;
+  for(var hz=0u;hz<2u;hz++){
+   xZ0=4*i32(hz);
+   let l=lid+256u*hz;let c=o+nbLocalCoord(l);
+   if(live&&sweep){
+    for(var r=0u;r<5u;r++){
+     let k=lid+256u*r;if(k>=1152u){continue;}
+     let s=xSeed(o+xCell(k),a);
+     wV[k]=s.v;wD[k]=bitcast<u32>(s.d);
+    }
+   }
+   workgroupBarrier();
+   var held:array<Ufx,3>;
+   if(live&&sweep){for(var r=0u;r<3u;r++){let k=lid+256u*r;if(k<600u){held[r]=xSweepAt(xInset(k),h);}}}
+   workgroupBarrier();
+   if(live&&sweep){for(var r=0u;r<3u;r++){let k=lid+256u*r;if(k<600u){let i=xAt(xInset(k));wV[i]=held[r].v;wD[i]=bitcast<u32>(held[r].d);}}}
+   workgroupBarrier();
+   if(live&&(!FG_TIERED||xOwnerH(c)||xOwnerH(c-fgUnit(a)))&&!xCoarse(c-fgUnit(a))){
+    var s=Ufx(0.0,-1.0);
+    if(sweep){s=xSweepAt(nbLocalCoord(l),h);}else{s=xSeed(c,a);}
+    let iu=vAt(NB_VEL_F_UP0,slot,a,l);
+    var out=xFinish(s,c,a,xCode(c,a),vel[iu],xSwept(c-fgUnit(a)));
+    if(!fgFaceOpen(c,a)){out.y=0.0;}
+    vel[vAt(NB_VEL_F_US0,slot,a,l)]=out.x;vel[iu]=out.y;
+   }
+   workgroupBarrier();
+  }
+ }
+}`;
+  // The box test as the scene's text resolved it (pressureResolveBox-style: nbInLattice on an unpadded box).
+  const box = /&&(nb\w+)\(4\*T\)&&!foTileOwnerH/.exec(body)?.[1]; if (!box) throw new Error("uExtend: the tile box test moved");
+  const halfText = half.split("nbInWallBox(").join(`${box}(`);
+  return sub(sub(code, body, halfText), "@compute @workgroup_size(512) fn uExtend(", "@compute @workgroup_size(256) fn uExtend(");
+};
+
 export const variants: Variant[] = [
+  { kernel: "uExtend", name: "half", apply: uextHalf },
+  { kernel: "lAdvect", name: "ls-corners", apply: lsCorners },
+  { kernel: "lAdvect", name: "ls-tri2", apply: lsTri2 },
   { kernel: "pSeed", name: "depth", apply: psDepthOnce },
   // depth-w: the write pass takes the uncached depth (a probe of where depth's difference lies).
   { kernel: "pSeed", name: "depth-w", apply: c => sub(psDepthOnce(c), "let distance=psSiteDistance(site,reentry);\n  let u=fgSampleVel", "let distance=select(psDepth(site),fgPhiAt(site),reentry);\n  let u=fgSampleVel") },
