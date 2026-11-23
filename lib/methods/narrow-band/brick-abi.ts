@@ -107,6 +107,7 @@ export const H = {
   /** The head's residency (brick-residency.wgsl.ts; brick-abi.md §5.4): the largest region radius this census, in
    * tiles (the old pageSeed's closure radius), and the bricks and pages its request claimed. */
   RES_RADIUS: 246, RES_CLAIMED_F: 247, RES_CLAIMED_C: 248,
+  /* 249..255: the real D's region heat words, REGION_H (brick-census.wgsl.ts; brick-abi.md §5.1). */
 } as const;
 
 /** Latched failure bits (H.FAIL), brick-abi.md §8. */

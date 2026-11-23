@@ -483,8 +483,9 @@ faster than at 384, and the second pass costs more than that saving. Nothing lan
 Method:
 - 300 steps a scene: brick engine, fixed dt 1/60, census settings, moored bodies on paddleboats.
 - Atomic counters in a scratch tree only: trees/fbprobe, made from t5/probe.patch.
-- The counters live in nbSet's unused list-slot-31 padding. Header words 249..255 are not free: something
-  overwrites them.
+- The counters live in nbSet's unused list-slot-31 padding. Header words 249..255 are taken: they are lane E's
+  REGION_H (brick-census.wgsl.ts, brick-abi.md §5.1), which censusBegin, regionSpread, regionDeep and regionHeat
+  write each step.
 
 Fallback share by step range (1–100 / 101–200 / 201–300):
 
