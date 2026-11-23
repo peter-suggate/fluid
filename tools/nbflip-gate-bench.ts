@@ -150,7 +150,14 @@ try {
   const admit = async (step: number) => {
     if (nbStats && mode === "fenced" && isSample(step)) probe?.requestNarrowBandVolumeProbe?.();
     while (!s.advanceTo(step * dt, bodies(step * dt))) {
-      if (!s.framePending) throw new Error(`Step ${step} refused with no frame pending`);
+      if (!s.framePending) {
+        // The engine's failMixedFrame message (simulationPipelineError), when a failed frame is why it refused.
+        const why = (s.info as { simulationPipelineError?: unknown }).simulationPipelineError;
+        // The engine's admission state, for a refusal with no failure (its clock, a deferred admission, frames in flight).
+        const e = s as unknown as Record<string, unknown>;
+        const state = { requested_s: step * dt, lastTime_s: e.lastTime, fixedStep_s: e.fixedStep_s, disposed: e.disposed, failure: String(e.pressureFrameFailure ?? ""), admission: e.mixedPipelineAdmission !== undefined, inFlight: e.mixedFramesInFlight, encodedSteps: (s.info as { encodedSteps?: unknown }).encodedSteps, completed_s: (s.info as { completedTime_s?: unknown }).completedTime_s };
+        throw new Error(`Step ${step} refused with no frame pending${why ? `: ${String(why).slice(0, 2000)}` : ""} ${JSON.stringify(state)}`);
+      }
       await new Promise<void>(r => setImmediate(r));
     }
   };
