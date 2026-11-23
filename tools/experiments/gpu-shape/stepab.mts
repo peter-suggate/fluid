@@ -25,7 +25,15 @@
 //              their Δ is the A/A's). The clock probe (clock-probe.ts) after every sample (100-250 us: a low clock,
 //              invalid).
 //
-//   SCENE=seep|dam|letters|paddleboats|<id> STEPS=100 BASE=tree CAND=tree [S=9] [R=4] [OUT=x.jsonl] [NOEXACT=1] [NOTIME=1]
+//   ulp tier (TOL=ulp4 or --tol=ulp4; the coordinator's tier for changes that only reuse or reorder the same
+//              arithmetic, under Metal's relaxed fp math, 2026-11-24): an f32 word may differ by at most 4 ulp (the
+//              count and the max reported); every other word stays exact. A word is f32 by its binding's declared type
+//              (array<f32>: vel, pres, pmgF, pmgRed, xfer, fext4, pEnergy), by the phi pool's channels (PHI, PHI1;
+//              FLAGS exact) or by the particle record (every word but before.w, which packs mass, mode and age).
+//              Anything else (set, dir, args, census, fcell, pmgTop, cut's BMASK, and pmgC, which stores u32
+//              patterns as bitcast f32 in its PDELTA words) stays exact. An order-dependent particle buffer
+//              cancels its identical records and pairs the rest by their exact words and quantized floats.
+//   SCENE=seep|dam|letters|paddleboats|<id> STEPS=100 BASE=tree CAND=tree [S=9] [R=4] [OUT=x.jsonl] [NOEXACT=1] [NOTIME=1] [TOL=ulp4]
 //   tools/gpu/fluid-gpu-run.sh timing node --import tsx tools/experiments/gpu-shape/stepab.mts
 // A tree is a checkout or a read-only export (tools/nbflip-export.sh). BASE defaults to this checkout; CANDTEXT=file
 // (a DUMPTEXT dump) stands in for CAND. DUMPTEXT=file (internal): build TREE's engine, write its schedule, exit.
@@ -131,10 +139,59 @@ const bag = (w: Uint32Array, stride: number) => {
   return [s1, s2, w.length];
 };
 const sameBag = (x: number[], y: number[]) => x.every((v, k) => v === y[k]);
+// ---- the ulp tier ----
+const TOL = (process.argv.find(a => a.startsWith("--tol="))?.slice(6) ?? process.env.TOL ?? "") as string;
+if (TOL && TOL !== "ulp4") throw new Error(`stepab: unknown tolerance ${TOL} (ulp4)`);
+const ULP = TOL ? 4 : 0;
+const F32_BUFFERS = new Set(["vel", "pres", "pmgF", "pmgRed", "xfer", "fext4", "pEnergy"]);
+const PARTICLE_BUFFERS = new Set(["parts", "fmoved"]);
+/** The f32 test of a buffer's words (null: every word exact). */
+const floatWords = (name: string, type: string | undefined): ((k: number) => boolean) | null => {
+  const L = e.layout;
+  if (PARTICLE_BUFFERS.has(name)) { const st = L.particleStride; return k => k % st !== 11; }
+  if (name === "phi") {
+    // The pool's channels (brick-abi.ts POOLS.phi: PHI, PHI1, FLAGS); its layout's own bases, so a new channel fails.
+    const f = L.base("phi", "F", "PHI1") - L.base("phi", "F", "PHI"), c = L.base("phi", "C", "PHI1") - L.base("phi", "C", "PHI");
+    const flagsF = L.base("phi", "F", "FLAGS"), flagsC = L.base("phi", "C", "FLAGS"), end = flagsC + c;
+    if (flagsF + f !== L.base("phi", "C", "PHI")) throw new Error("stepab: the phi pool has a channel after FLAGS (classify it)");
+    return k => k < end && !(k >= flagsF && k < flagsF + f) && !(k >= flagsC && k < flagsC + c);
+  }
+  if (F32_BUFFERS.has(name) && type === "array<f32>") return () => true;
+  return null;
+};
+const f32v = new Float32Array(1), u32v = new Uint32Array(f32v.buffer);
+const ordered = (w: number) => (w & 0x80000000) ? 0x80000000 - (w & 0x7fffffff) : 0x80000000 + w; // monotone in the float
+const ulps = (a: number, b: number) => { u32v[0] = a; if (Number.isNaN(f32v[0])) return Infinity; u32v[0] = b; if (Number.isNaN(f32v[0])) return Infinity; return Math.abs(ordered(a >>> 0) - ordered(b >>> 0)); };
+// An order-dependent record buffer under the tier: cancel bit-identical records, then pair the rest sorted by their
+// exact words and their floats with the low 8 bits cleared, and compare each pair within ULP.
+const tolerantBag = (a: Uint32Array, c: Uint32Array, stride: number, isF: (k: number) => boolean) => {
+  const key = (w: Uint32Array, r: number) => { let h1 = 0x811c9dc5, h2 = 0x9e3779b9; for (let k = 0; k < stride; k++) { const x = w[r + k]!; h1 = Math.imul(h1 ^ x, 0x01000193); h2 = Math.imul((h2 ^ x) + k, 0x85ebca6b); h2 ^= h2 >>> 13; } return (h1 >>> 0) * 2097152 + ((h2 >>> 0) & 0x1fffff); };
+  const left = new Map<number, number[]>();
+  for (let r = 0; r + stride <= a.length; r += stride) { const h = key(a, r); const l = left.get(h); if (l) l.push(r); else left.set(h, [r]); }
+  const cOnly: number[] = [];
+  for (let r = 0; r + stride <= c.length; r += stride) { const l = left.get(key(c, r)); if (l?.length) l.pop(); else cOnly.push(r); }
+  const aOnly: number[] = []; for (const l of left.values()) aOnly.push(...l);
+  if (aOnly.length !== cOnly.length) return { ok: false, note: `${aOnly.length} base-only vs ${cOnly.length} candidate-only records` };
+  const sortKey = (w: Uint32Array, r: number) => { const o: number[] = []; for (let k = 0; k < stride; k++) o.push(isF(k) ? (w[r + k]! & 0xffffff00) >>> 0 : w[r + k]!); return o; };
+  const cmp = (x: number[], y: number[]) => { for (let k = 0; k < x.length; k++) if (x[k] !== y[k]) return x[k]! - y[k]!; return 0; };
+  const sa = aOnly.map(r => [sortKey(a, r), r] as const).sort((x, y) => cmp(x[0], y[0]));
+  const sc = cOnly.map(r => [sortKey(c, r), r] as const).sort((x, y) => cmp(x[0], y[0]));
+  let maxU = 0, words = 0, over = 0, exact = 0; const at = new Map<number, number>();
+  for (let i = 0; i < sa.length; i++) for (let k = 0; k < stride; k++) {
+    const x = a[sa[i]![1] + k]!, y = c[sc[i]![1] + k]!; if (x === y) continue;
+    if (!isF(k)) { exact++; continue; }
+    const u = ulps(x, y); words++; maxU = Math.max(maxU, u); if (u > ULP) { over++; at.set(k, (at.get(k) ?? 0) + 1); }
+  }
+  const where = [...at].map(([k, n]) => `word ${k}: ${n}`).join(", ");
+  const note = `${sa.length} records paired, ${words} f32 words differ (max ${maxU} ulp${over ? `, ${over} over ${ULP}: ${where}` : ""})${exact ? `, ${exact} exact words differ` : ""}`;
+  return { ok: !over && !exact, note };
+};
 if (!process.env.NOEXACT) {
   const reads = async (names: string[]) => { const o: Record<string, Uint32Array> = {}; for (const b of names) o[b] = new Uint32Array(await e.read(b)); return o; };
   for (const i of changed) {
-    const p = basePl[i], written = (p.kernel.bindings as { name: string; kind: string }[]).filter(b => b.kind === "rw").map(b => b.name);
+    const binds = (p: any) => (p.kernel.bindings as { name: string; kind: string; type?: string }[]);
+    const p = basePl[i], written = binds(p).filter(b => b.kind === "rw").map(b => b.name);
+    const typeOf = (b: string) => binds(candPl[i]).find(x => x.name === b)?.type;
     await e.restore(S0); await e.run(basePl.slice(0, i)); const Si = await e.save();
     const from = async (pl: any) => { await e.restore(Si); await e.run([pl]); return reads(written); };
     const A = await from(p), B = await from(candPl[i]), A2 = await from(p);
@@ -142,20 +199,29 @@ if (!process.env.NOEXACT) {
     for (const b of written) {
       const a = A[b]!, a2 = A2[b]!, c = B[b]!;
       if (equal(a, a2)) {
-        let d = 0; for (let k = 0; k < a.length; k++) if (a[k] !== c[k]) { d++; if (ex.length < 4) ex.push(`${b}[${k}] ${a[k]}/${c[k]}`); }
-        verdict[b] = d ? `${d} words differ` : "identical"; if (d) bad++;
+        const isF = ULP ? floatWords(b, typeOf(b)) : null;
+        let d = 0, tol = 0, maxU = 0;
+        for (let k = 0; k < a.length; k++) if (a[k] !== c[k]) {
+          if (isF?.(k)) { const u = ulps(a[k]!, c[k]!); if (u <= ULP) { tol++; maxU = Math.max(maxU, u); continue; } }
+          d++; if (ex.length < 4) ex.push(`${b}[${k}] ${a[k]}/${c[k]}`);
+        }
+        verdict[b] = d ? `${d} words differ${tol ? ` (and ${tol} f32 within ${ULP} ulp)` : ""}` : tol ? `within ${ULP} ulp (${tol} f32 words differ, max ${maxU} ulp)` : "identical"; if (d) bad++;
       } else {
         const stride = b === "parts" ? e.layout.particleStride : 1, ha = bag(a, stride);
         if (!sameBag(ha, bag(a2, stride))) verdict[b] = "order-dependent, base vs base again differ as a multiset too: NOT JUDGED";
         else if (sameBag(ha, bag(c, stride))) verdict[b] = "identical up to order";
-        else { verdict[b] = "DIFFERS as a multiset"; bad++; }
+        else {
+          const isF = ULP && stride > 1 ? floatWords(b, typeOf(b)) : null;
+          const t = isF ? tolerantBag(a, c, stride, isF) : null;
+          if (t?.ok) verdict[b] = `up to order, ${t.note}`; else { verdict[b] = `DIFFERS as a multiset${t ? ` (${t.note})` : ""}`; bad++; }
+        }
       }
     }
     if (bad) exactFail++;
     console.log(`exact #${i} ${p.kernel.label}${p.z !== undefined ? ` z${p.z}` : ""}: ${bad ? "DIFFERS" : "ok"}: ${written.map(b => `${b} ${verdict[b]}`).join(", ")}${ex.length ? ` e.g. ${ex.join(" ")}` : ""}`);
     emit({ kind: "exact", placement: i, label: p.kernel.label, z: p.z, written, verdict, examples: ex });
   }
-  console.log(`exactness: ${changed.length - exactFail} of ${changed.length} changed placements identical${exactFail ? `; ${exactFail} DIFFER` : ""}`);
+  console.log(`exactness${ULP ? ` (ulp tier, f32 within ${ULP} ulp)` : ""}: ${changed.length - exactFail} of ${changed.length} changed placements ${ULP ? "pass" : "identical"}${exactFail ? `; ${exactFail} DIFFER` : ""}`);
 }
 
 // ---- timing: the whole step from S0, interleaved ----
