@@ -423,8 +423,12 @@ fn poAcross(q:vec3i)->u32{
   return NP_ACROSS_RESIDENT;
 }
 // The band face of h cell c (own φ, liquid) on face f (pRows' S path, no solids).
-struct PoFace {face:NpFace,qWet:bool,native:bool}
-fn poBandFace(c:vec3i,own:f32,liquid:bool,f:u32)->PoFace{
+struct PoFace {face:NpFace,qWet:bool,native:bool}${cuts ? `
+// With the cuts, poBandFaceO takes c's open fraction from the caller: rowsF asks it once a row, not once a face
+// (GPU-shape M1, docs/plans/gpu-shape/m1-distinct-once.md).
+fn poBandFace(c:vec3i,own:f32,liquid:bool,f:u32)->PoFace{return poBandFaceO(c,own,liquid,f,poFrac(c));}
+fn poBandFaceO(c:vec3i,own:f32,liquid:bool,f:u32,open:f32)->PoFace{` : `
+fn poBandFace(c:vec3i,own:f32,liquid:bool,f:u32)->PoFace{`}
   let a=f/2u;let sign=npSign(f);let q=c+sign*poUnit(a);
   let across=poAcross(q);
   var band=false;var native=false;var n=NpCell(NB_PHI_AIR,false,false);
@@ -436,7 +440,7 @@ fn poBandFace(c:vec3i,own:f32,liquid:bool,f:u32)->PoFace{
 ${cuts ? `  // The cuts (§5): the face's aperture, AP of its upper cell's lower face, and both cells' open fractions; the
   // solid flags as the old rows take them: shut = FRAC <= 1e-5 (umCellIsOpen), inside = FLAGS.INSIDE (the stamps'
   // umCellInsideSolid), read only where npBandFace's θ rule can take it (a wet-dry face, both open fractions < 0.1).
-  let volume=poFaceAP(select(c,q,sign>0),a);let open=poFrac(c);var qOpen=1.0;if(across==NP_ACROSS_RESIDENT){qOpen=poFrac(q);}
+  let volume=poFaceAP(select(c,q,sign>0),a);var qOpen=1.0;if(across==NP_ACROSS_RESIDENT){qOpen=poFrac(q);}
   var fp=0.0;if(across==NP_ACROSS_RESIDENT&&liquid!=n.wet){fp=poFacePhi(c,a,sign);}
   var inside=false;var qInside=false;
   if(across==NP_ACROSS_RESIDENT&&liquid!=n.wet&&open<0.1&&qOpen<0.1){inside=poInside(c);qInside=poInside(q);}
@@ -712,7 +716,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
   let l=lid;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
   let owned=nbInWallBox(c)&&poOwnerH(c);
   var own=NB_PHI_AIR;if(owned){own=poCentre(c);}
-  let liquid=owned&&${cuts ? "poRowWet(c,own)" : "poWet(own,1.0)"};
+  let liquid=owned&&${cuts ? "poRowWet(c,own)" : "poWet(own,1.0)"};${cuts ? "let openC=poFrac(c);" : ""}
   var start=0.0;if(liquid){start=poStart(c,own);}
   poSH[poIndex(nbLocalCoord(l)+vec3i(1),10)]=start;
   if(lid<384u){
@@ -737,10 +741,10 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
       // The row's capacity (bHeadCapacity, the old head capacity: its own FRAC on all six faces). A static solid cell
       // is no row (poRowWet, option (b)); a shut cell of a brick with a body is the body's (a body brick's row, as in a
       // brick with no static cut). With no body a shut row is a static one poRowWet missed: it latches.
-      let capacity=poFrac(c);
+      let capacity=openC;
       if(staticCut&&bmask==0u&&capacity<=1e-5){nbFail(NB_FAIL_UNSUPPORTED,0xa2000000u|nbFRec(slot,NB_REC_KEY));}` : ""}
       for(var f=0u;f<6u;f++){
-        let a=f/2u;let sign=npSign(f);let pf=poBandFace(c,own,true,f);let face=pf.face;${faces === undefined ? "" : cuts ? `
+        let a=f/2u;let sign=npSign(f);let pf=${cuts ? "poBandFaceO(c,own,true,f,openC)" : "poBandFace(c,own,true,f)"};let face=pf.face;${faces === undefined ? "" : cuts ? `
         // A wall face's cache word is its coupling (V, the walls' re-decision reads it; its ratio is 1), a closed
         // face's 0.
         kinds|=(face.kind+1u)<<(4u*f);if(face.kind!=NP_K_SEAM){pmgF[poFcAt(slot,f,l)]=select(select(face.coefficient/face.fraction,face.coefficient,face.kind==NP_K_WALL),0.0,face.kind==NP_K_CLOSED);}` : `
@@ -774,7 +778,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
     // Every cell's X is its start, 0 off the liquid rows (the slot contract's zero rows, cells of 4h-owned tiles and
     // the skirt included: they hold no state, and a refined tile's rows start cold).
     pres[NB_PRES_F_B+at]=start;pres[NB_PRES_F_X+at]=start;
-    pres[NB_PRES_F_RHS+at]=select(0.0,-h*div+h*h*rate*${cuts ? "poFrac(c)" : "capacity"}+extra,liquid);
+    pres[NB_PRES_F_RHS+at]=select(0.0,-h*div+h*h*rate*${cuts ? "openC" : "capacity"}+extra,liquid);
     pres[NB_PRES_F_DIAG+at]=diag;pres[NB_PRES_F_PPHI+at]=select(0.0,${cuts ? "select(own,NB_PHI_AIR,poStaticShut(c))" : "own"},owned);
     pres[NB_PRES_F_K0+at]=kk.x;pres[NB_PRES_F_K1+at]=kk.y;pres[NB_PRES_F_K2+at]=kk.z;
     pres[NB_PRES_F_KU0+at]=ku.x;pres[NB_PRES_F_KU1+at]=ku.y;pres[NB_PRES_F_KU2+at]=ku.z;${faces === undefined ? "" : `
