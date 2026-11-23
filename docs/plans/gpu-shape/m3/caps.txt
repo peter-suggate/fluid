@@ -1,0 +1,17 @@
+uAdvect-base.wgsl uAdvect-base 768 0 32
+uAdvect.m3.app2.83.wgsl uAdvect.m3.app2.83 768 0 32
+uAdvect.m3.app4.83.wgsl uAdvect.m3.app4.83 768 0 32
+uAdvect.m3.app8.83.wgsl uAdvect.m3.app8.83 768 0 32
+uAdvect.m3.first.83.wgsl uAdvect.m3.first.83 704 0 32
+uAdvect.m3.first2.83.wgsl uAdvect.m3.first2.83 704 0 32
+uAdvect.m3.first4.83.wgsl uAdvect.m3.first4.83 704 0 32
+uAdvect.m3.first8.83.wgsl uAdvect.m3.first8.83 704 0 32
+uExtend-base.wgsl uExtend-base 768 0 32
+uTransfer-base.wgsl uTransfer-base 512 0 32
+uTransfer.m3.app2.85.wgsl uTransfer.m3.app2.85 576 0 32
+uTransfer.m3.app4.85.wgsl uTransfer.m3.app4.85 512 0 32
+uTransfer.m3.app8.85.wgsl uTransfer.m3.app8.85 512 0 32
+uTransfer.m3.first.85.wgsl uTransfer.m3.first.85 512 0 32
+uTransfer.m3.first2.85.wgsl uTransfer.m3.first2.85 576 0 32
+uTransfer.m3.first4.85.wgsl uTransfer.m3.first4.85 512 0 32
+uTransfer.m3.first8.85.wgsl uTransfer.m3.first8.85 512 0 32
