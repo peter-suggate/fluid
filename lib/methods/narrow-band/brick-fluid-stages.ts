@@ -100,7 +100,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
     [T.levelPublish, [at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all), ...(l.lWall ? [at(l.lWall, all)] : [])]],
   ]);
   const velocity = runs([[T.velocityAdvect, [at(v.uAdvect, bothAct)]], [T.velocityDeposit, [at(v.pDeposit, all)]],
-    [T.velocityViscous, v.viscous ? [at(v.uViscous, bothAct)] : []], [T.velocityTransfer, [at(v.uTransfer, bothAct)]]]);
+    [T.velocityViscous, v.viscous ? [at(v.uViscous, bothAct)] : []], [T.velocityTransfer, [at(v.uTransfer, tiered ? { indirect: ARGS.FCA2_G1 } : all)]]]);
   const tail = runs([[T.tailExtend, [...ext4, at(v.uExtend, all)]], [T.tailParticles, [args(0, 1), at(p.pJoin, records), at(p.pDelta, records)]]]);
   const stages: BrickStages = {
     label: tiered ? "lane F (NB-FLIP tiered)" : "lane F (NB-FLIP all-h)", bringUp: false, tiered,

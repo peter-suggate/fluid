@@ -551,7 +551,8 @@ fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold
   if(lid<=NB_LIST_C_ACT){triple(NB_ARGS_PER_LIST*lid,count(lid));}
   if(lid==NB_LIST_C_ACT+2u){let nA=count(NB_LIST_F_ACT)+count(NB_LIST_C_ALL);fold(NB_ARGS_FA_G1,nA);fold(NB_ARGS_FA_G8,(nA+7u)/8u);fold(NB_ARGS_FA_G64,(nA+63u)/64u);}
   // FCA: at least one workgroup, uAdvect's group 0 sets the volume control's rate (every page still, no F brick).
-  if(lid==NB_LIST_C_ACT+3u){let nA=count(NB_LIST_F_ALL)+count(NB_LIST_C_ACT);fold(NB_ARGS_FCA_G1,max(nA,1u));fold(NB_ARGS_FCA_G8,(nA+7u)/8u);fold(NB_ARGS_FCA_G64,(nA+63u)/64u);}
+  if(lid==NB_LIST_C_ACT+3u){let nA=count(NB_LIST_F_ALL)+count(NB_LIST_C_ACT);fold(NB_ARGS_FCA_G1,max(nA,1u));fold(NB_ARGS_FCA_G8,(nA+7u)/8u);fold(NB_ARGS_FCA_G64,(nA+63u)/64u);
+    fold(NB_ARGS_FCA2_G1,count(NB_LIST_F_ALL)+2u*count(NB_LIST_C_ACT));}
   if(lid==NB_LIST_C_ACT+1u){
     let nF=count(NB_LIST_F_ALL);let nC=count(NB_LIST_C_ALL);
     fold(NB_ARGS_FC_G1,nF+nC);fold(NB_ARGS_FC_G8,(nF+nC+7u)/8u);fold(NB_ARGS_FC_G64,(nF+nC+63u)/64u);

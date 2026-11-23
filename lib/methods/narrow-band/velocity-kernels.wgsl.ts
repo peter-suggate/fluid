@@ -223,10 +223,10 @@ fn vcInflowForced(T:vec3i,a:u32,forced:f32)->f32{
  for(var j=0;j<4;j++){for(var i=0;i<4;i++){sum+=nbInflowForced(base+i*u+j*v,a,forced);}}
  return sum/16.0;
 }
-fn vcTransferPage(slot:u32,lid:u32){
+fn vcTransferPage(slot:u32,lid:u32,sub:u32){
  let dt=vDt();let h=vH();let gravity=vGravity();let bank=(cfg.y^cfg.z^1u)&1u;
- for(var r=0u;r<2u;r++){
-  let j=lid+256u*r;let T=vcTile(slot,j);let occ=vOcc4(T,h.y);
+ {
+  let j=lid+256u*sub;let T=vcTile(slot,j);let occ=vOcc4(T,h.y);
   // Still-tank A: the gravity rule of each lower face (FLAG.KICK0 << a), which a STILL page's held face keeps.
   var kick=0u;
   for(var a=0u;a<3u;a++){
@@ -366,10 +366,17 @@ fn fgTileH(t:vec3i)->bool{return (fgWinTile[fgWinTileStrict(t)]>>31u)!=0u;}`],
   // (FG_SLOT_WINDOW_WGSL) and, with ring, the vertex φ ring from o + ring (FG_RING_WGSL), then barriers. Every
   // branch is workgroup-uniform (the split and the C count by workgroupUniformLoad), so a page may barrier.
   // gate: code between the window and the ring (uAdvect's ring-brick exit, so a ring brick stages no ring).
-  const stagedHead = (page: string, ring?: number, lanes = 256, gate = "") => /* wgsl */`
+  // pagesFirst k (GPU-shape M4, docs/plans/gpu-shape/m4-clist.md): the C pages first, a page over k workgroups (page's
+  // third argument the k-th), then the F bricks at nbGroup - k nC; the dispatch is k nC + nF exactly (FCA2_G1, k 2).
+  const stagedHead = (page: string, ring?: number, lanes = 256, gate = "", pagesFirst = 0) => (pagesFirst ? /* wgsl */`
+ if(lid==0u){sSplit=select(0u,${pagesFirst}u*nbListCount(NB_LIST_C_ACT),FG_TIERED);}
+ let pages=workgroupUniformLoad(&sSplit);let g0=nbGroup(wid);
+ if(g0<pages){${page}(nbListSlot(NB_LIST_C_ACT,g0/${pagesFirst}u),lid,g0%${pagesFirst}u);return;}
+ if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);}
+ let split=workgroupUniformLoad(&sSplit);let g=g0-pages;if(g>=split){return;}` : /* wgsl */`
  if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);}
  let split=workgroupUniformLoad(&sSplit);let g=nbGroup(wid);
- if(g>=split){${page ? `if(FG_TIERED){if(lid==0u){sSplit=nbListCount(NB_LIST_C_ACT);}if(g-split<workgroupUniformLoad(&sSplit)){${page}(nbListSlot(NB_LIST_C_ACT,g-split),lid);}}` : ""}return;}
+ if(g>=split){${page ? `if(FG_TIERED){if(lid==0u){sSplit=nbListCount(NB_LIST_C_ACT);}if(g-split<workgroupUniformLoad(&sSplit)){${page}(nbListSlot(NB_LIST_C_ACT,g-split),lid);}}` : ""}return;}`) + /* wgsl */`
  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
  fgWindowStage(o>>vec3u(3u),lid,${lanes}u);workgroupBarrier();${gate}${ring === undefined ? "" : `
  fgRingStage(o+vec3i(${ring}),lid,${lanes}u);workgroupBarrier();`}`;
@@ -631,7 +638,7 @@ fn pdLiquidAt(c:vec3i)->bool{
     ["if(nbInflowOn()){value=nbInflowForced(n,a,value);}", "if(nbInflowOn()){value=nbInflowForced(n,a,value);}\n   value=nbDetailForced(n,a,value);"],
     ...(F.tiered ? [["if(nbInflowOn()){value=vcInflowForced(T,a,value);}", "if(nbInflowOn()){value=vcInflowForced(T,a,value);}\n   value=nbDetailForced4(T,a,value);"]] : []),
   ].reduce((c, [from, to]) => strictSub(c, from!, to!), code) + brickDetailWGSL(L);
-  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdepPlain, ...(F.tiered ? [FB.partsRO] : []), ...(L.detail ? [FB.src] : [])], vDetail(windowBase + FG_RING_WGSL(10, null, false) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + BRICK_SOURCE_RING_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordFor(L), L.apic ? V_TRANSFER4_APIC_WGSL : V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
+  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdepPlain, ...(F.tiered ? [FB.partsRO] : []), ...(L.detail ? [FB.src] : [])], vDetail(windowBase + FG_RING_WGSL(10, null, false) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + BRICK_SOURCE_RING_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordFor(L), L.apic ? V_TRANSFER4_APIC_WGSL : V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32,sub:u32){}") + /* wgsl */`
 var<workgroup> wHeat:array<f32,125>;
 var<workgroup> wHot:array<f32,125>;
 var<workgroup> wDepth:array<f32,729>;
@@ -673,7 +680,7 @@ fn vOcc(c:vec3i,hy:f32)->f32{
 fn vCoarseMassS(c:vec3i)->bool{return (vSeam(c)&2u)!=0u;}
 var<workgroup> sSplit:u32;
 @compute @workgroup_size(256) fn uTransfer(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-${stagedHead("vcTransferPage", -1)}
+${stagedHead("vcTransferPage", -1, 256, "", 2)}
  let live=true;tOrigin=o;tLow=(tOrigin>>vec3u(2u))-vec3i(2);
  // A ring brick only clears its deposit (and stores its FC_LIQ words).
  vRingMark(o,lid,true);workgroupBarrier();
