@@ -87,6 +87,8 @@ const phiRW: BrickBinding = { name: "phi", kind: "rw", type: "array<u32>" };
 const ROWS = [CFG, setRW, dirRO, velRO, phiRW, presRW, cutRO];
 const PROJECT = [CFG, setRW, dirRO, velRW, phiRW, presRW, cutRO];
 const FACES: BrickBinding = { name: "pmgF", kind: "rw", type: "array<f32>" };
+// The live projection's dry list count (pmgTop's DRYN: projectF appends, projectDry reads).
+const TOP: BrickBinding = { name: "pmgTop", kind: "rw", type: "array<atomic<u32>>" };
 // Still-tank A: projectC stores a STILL page's discarded correction in the census's region words (RG FROZEN).
 const CENSUS_RW: BrickBinding = { name: "census", kind: "rw", type: "array<u32>" };
 
@@ -582,7 +584,7 @@ const headerWGSL = (L: BrickLayout, staged = false, tiered = true, cuts = false)
  * `tiered: false` (the all-h engine) drops the absent-page guard: all-h, an absent page is air (brick-abi.md §2.5). */
 /** pressureRowsC's dispatch: a C_ALL page over two workgroups of 256 lanes (GPU-shape M4, C_ALL2_G1). */
 export const ROWS_C_PAGES = { indirect: ARGS.C_ALL2_G1 } as const;
-export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [string, string]; projectF?: [string, string] } = {}, opt: { readonly tiered?: boolean; readonly faces?: number; readonly live?: { readonly hb: number; readonly hp: number; readonly rl: number; readonly rln: number; readonly dry: number }; readonly cuts?: boolean } = {}) {
+export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [string, string]; projectF?: [string, string] } = {}, opt: { readonly tiered?: boolean; readonly faces?: number; readonly live?: { readonly hb: number; readonly hp: number; readonly rl: number; readonly rln: number; readonly dry: number; readonly dryl: number; readonly dryn: number }; readonly cuts?: boolean } = {}) {
   const tiered = opt.tiered !== false;
   // The cuts (opt.cuts, default off; M5 design §5): rowsF and projectF read the K slots' FRAC / AP / W (static and
   // body), so a brick with a cut no longer latches FAIL.UNSUPPORTED there. Off, their text is the cut-free rows'.
@@ -604,7 +606,8 @@ export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [strin
   // rowsF / projectF). Their zero rows are pressureRowsZero's, their FLAGS bits pressureProjectRest's.
   const live = opt.live;
   if (live && faces === undefined) throw new Error("Pressure composite: the live lists need the face cache (pmgF)");
-  const LIVE = live === undefined ? "" : `const PO_HBL:u32=${live.hb}u;const PO_HPL:u32=${live.hp}u;const PO_RLL:u32=${live.rl}u;const PO_RLN:u32=${live.rln}u;const PO_DRY:u32=${live.dry}u;\n`;
+  const projectLiveB = live === undefined ? projectB : [...projectB, TOP];
+  const LIVE = live === undefined ? "" : `const PO_HBL:u32=${live.hb}u;const PO_HPL:u32=${live.hp}u;const PO_RLL:u32=${live.rl}u;const PO_RLN:u32=${live.rln}u;const PO_DRY:u32=${live.dry}u;const PO_DRYL:u32=${live.dryl}u;const PO_DRYN:u32=${live.dryn}u;\n`;
   const head = (list: "hb" | "hp", go: string, fill = "") => live === undefined
     ? `let g=nbGroup(wid);if(lid==0u){${fill}${go}=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}if(workgroupUniformLoad(&${go})==0u){return;}\n  let slot=nbListSlot(NB_LIST_F_ALL,g);`
     : `let g=nbGroup(wid);${fill ? `if(lid==0u){${fill}}` : ""}\n  let slot=u32(pmgF[${list === "hb" ? "PO_HBL" : "PO_HPL"}+g]);`;
@@ -1003,30 +1006,38 @@ ${faces === undefined ? `
   }
   workgroupBarrier();
   if(lid<6u){atomicMax(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*slot+lid],atomicLoad(&wBound[lid]));}${live === undefined ? "" : `
-  if(lid==0u){pmgF[PO_DRY+slot]=f32(atomicLoad(&wDry));}`}
-}`, projectEntry, projectB, true, cuts);
+  if(lid==0u){
+    let nd=atomicLoad(&wDry);pmgF[PO_DRY+slot]=f32(nd);
+    if(nd!=0u){pmgF[PO_DRYL+atomicAdd(&pmgTop[PO_DRYN],1u)]=f32(slot);}
+  }`}
+}`, projectEntry, projectLiveB, true, cuts);
 
   // projectDry (opt.live: right after projectF, over HP): the dry seam faces projectF left, a dry h side facing a
   // resident wet 4h tile (poProjectDry's formula case). Rare, and poProjectFace's npBandFace held projectF to Metal's
   // 448-thread register cap (one 256-lane workgroup a core; 768 without it): projectF 3.00 -> 1.55 ms on the pour
   // (go/no-go, 2026-11-21). Their U, bound and release bits as projectF's: its FLAGS write keeps a cell's other bits,
   // and a dry face's projection and release do not read the wall state it clears (separated: a liquid side's only).
-  // 64 lanes, so a brick without one (the flag) leaves at once.
+  // A workgroup a z plane of a brick on DRYL (projectF's list of the flagged ones), a cell a lane: the dispatch is HP's,
+  // workgroup g items g, g + G, ... of 8 DRYN, so a flagged brick's 512 cells are 8 workgroups' and the rest exit on
+  // one count. Over HP with a workgroup a brick, 8 cells a lane, the flagged bricks' face projections (poProjectFace)
+  // were the pass's tail (1-5 workgroups of 80-170 us, GPU-shape M6). A cell is one lane's either way: the same words.
   const projectDry = live === undefined ? undefined : k(`${projectLabel}Dry`, FC + LIVE + PROJECT_WGSL + DRY + BRICK_SOURCE_RING_WGSL + /* wgsl */`
 var<workgroup> poGo:u32;
-@compute @workgroup_size(64) fn ${projectEntry}Dry(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  let g=nbGroup(wid);let slot=u32(pmgF[PO_HPL+g]);
-  if(lid==0u){poGo=u32(pmgF[PO_DRY+slot]);}
-  if(workgroupUniformLoad(&poGo)==0u){return;}
+@compute @workgroup_size(64) fn ${projectEntry}Dry(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nw:vec3u,@builtin(local_invocation_index) lid:u32){
+  let g=nbGroup(wid);
+  if(lid==0u){poGo=8u*atomicLoad(&pmgTop[PO_DRYN]);}
+  let items=workgroupUniformLoad(&poGo);
+  let h=nbRingF(cfg.x,NB_RING_H);
+  for(var item=g;item<items;item+=nw.x*nw.y){
+  let slot=u32(pmgF[PO_DRYL+(item>>3u)]);let j=item&7u;
   let o=nbFOrigin(slot);
   poStageLight(o,lid);
-  let h=nbRingF(cfg.x,NB_RING_H);
   var bound=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
-  for(var j=0u;j<8u;j++){
+  loop{
     let l=lid+64u*j;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
     let hc=nbInWallBox(c)&&poOwnerH(c);
     var pc=NB_PHI_AIR;if(hc){pc=pres[NB_PRES_F_PPHI+at];}
-    if(hc&&poWet(pc,1.0)){continue;}
+    if(hc&&poWet(pc,1.0)){break;}
     var release=0u;
     for(var a=0u;a<3u;a++){
       if(!nbFaceInLattice(c,a)){continue;}
@@ -1051,9 +1062,13 @@ var<workgroup> poGo:u32;
       }` : ""}
     }
     if(release!=0u){phi[NB_PHI_F_FLAGS+at]|=release;}
+    break;
   }
   for(var k=0u;k<6u;k++){let w=bitcast<u32>(bound[k]);if(w!=0u){atomicMax(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*slot+k],w);}}
-}`, `${projectEntry}Dry`, projectB, true, cuts);
+  // The next item restages the workgroup's window.
+  workgroupBarrier();
+  }
+}`, `${projectEntry}Dry`, projectLiveB, true, cuts);
 
   // projectC: a workgroup a page of C_ALL (G1), a lane two tiles, after the solve's finish.
   // - An h tile's C X becomes the mean X of its liquid h rows (083's band-tile mean): the tile's start next step.

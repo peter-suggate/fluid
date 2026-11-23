@@ -32,7 +32,7 @@ export function pressureOperatorKernels(L: BrickLayout, options: { readonly tier
   const opt = { ...options, cuts: options.cuts ?? (options.faces === true && L.cap.k > 0) };
   if (opt.faces && mgLive(L)) {
     const M = mgLayout(L), live = poolMGPCG(L, { cuts: opt.cuts }).live!;
-    const K = pressureCompositeKernels(L, {}, { tiered: opt.tiered, faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN, dry: M.DRY }, cuts: opt.cuts });
+    const K = pressureCompositeKernels(L, {}, { tiered: opt.tiered, faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN, dry: M.DRY, dryl: M.DRYL, dryn: M.top.DRYN }, cuts: opt.cuts });
     return { operator: live.rowsList, project: K.projectRest! };
   }
   const K = pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { tiered: opt.tiered, faces: opt.faces ? mgLayout(L).FC : undefined, cuts: opt.cuts });

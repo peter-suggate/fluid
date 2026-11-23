@@ -175,6 +175,8 @@ export function mgTopLayout(C: number, F: number) {
     ZK: take(F), ZC: take(F), ZS: take(F), FS: take(F),
     /** pmgPressureDelta's history, a C slot each step parity: the page key and step + 1 of its last publish. */
     PHW: take(4 * C),
+    /** DRYL's count (projectF appends, projectDry reads, pmgListArgs zeroes it for the step's projection). */
+    DRYN: take(1),
   };
   return { ...t, words: at };
 }
@@ -203,10 +205,11 @@ export function mgLayout(L: BrickLayout) {
   // finish run over it), HPL those with an h-owned tile in the brick or across its lower faces (an h face stored
   // there: projectF runs over it), ZLL the bricks off HB whose zero rows are not certified (pressureRowsZero), RLL
   // those off HP whose FLAGS bits are not (pressureProjectRest), and RLN RL's count. DRY, a word an F slot:
-  // projectF's flag of an HP brick with a dry seam face (projectDry's work, pressure-composite.wgsl.ts).
+  // projectF's flag of an HP brick with a dry seam face (projectDry's work, pressure-composite.wgsl.ts); DRYL those
+  // bricks, F slots in append order (top DRYN their count): projectDry's list.
   const STG = L1 + CH.N * 64 * F, RKU = STG + 81 * F, FC = RKU + 3 * BRICK_STRIDE * F, QSTG = SEAMN + C;
-  const HBL = FC + 7 * BRICK_STRIDE * F, HPL = HBL + F, ZLL = HPL + F, RLL = ZLL + F, RLN = RLL + F, DRY = RLN + 1;
-  return { W0, W1, L1, STG, RKU, FC, HBL, HPL, ZLL, RLL, RLN, DRY, fWords: DRY + F, L2, L3, L4, L5, PDELTA, PH, SEAMT, SEAML, SEAMF, SEAMN, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
+  const HBL = FC + 7 * BRICK_STRIDE * F, HPL = HBL + F, ZLL = HPL + F, RLL = ZLL + F, RLN = RLL + F, DRY = RLN + 1, DRYL = DRY + F;
+  return { W0, W1, L1, STG, RKU, FC, HBL, HPL, ZLL, RLL, RLN, DRY, DRYL, fWords: DRYL + F, L2, L3, L4, L5, PDELTA, PH, SEAMT, SEAML, SEAMF, SEAMN, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
 }
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
@@ -1041,6 +1044,7 @@ var<workgroup> wLive:u32;
     if(k==3u){pmgF[P_RLN]=f32(n);continue;}
     let a=P_GATE_HB+3u*k;args[a]=min(n,NB_FOLD);args[a+1u]=max(1u,(n+NB_FOLD-1u)/NB_FOLD);args[a+2u]=1u;
   }
+  atomicStore(&pmgTop[T_DRYN],0u);
 }`);
   const rowsList = kernel("pressureRowsList", [CFG, setRW, dirRO, fRW, topA], [], /* wgsl */`
 var<workgroup> wCount:u32;var<workgroup> wN:array<atomic<u32>,4>;var<workgroup> wB:array<u32,4>;
@@ -1104,7 +1108,7 @@ fn pOwnerT(t:vec3i)->bool{
 }`);
   // The h rows' kernels over the lists (labels "operator" and "project", the F_ALL path's areas): rowsF and
   // tileRoots on HB, projectF on HP.
-  const KL = live ? pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN, dry: M.DRY }, cuts }) : undefined;
+  const KL = live ? pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN, dry: M.DRY, dryl: M.DRYL, dryn: M.top.DRYN }, cuts }) : undefined;
 
   // A live F slot holds the brick of tile T (seen from page p), so setupF (over F_ALL) wrote T's L2 row.
   const LIQUID_TILE = /* wgsl */`
