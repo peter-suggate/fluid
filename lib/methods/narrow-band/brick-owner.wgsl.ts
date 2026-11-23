@@ -7,9 +7,10 @@
  *
  * - Tiles are 4^3 h, in global tile coordinates t (cell >> 2). A tile in no
  *   resident page, or outside the lattice, is not h-owned.
- * - Vertices: NB-FLIP's authority rule, verbatim. A coarse incident tile of a resident page wins
- *   (umVertexAuthority, uniform-mixed-vertex-sampling.wgsl.ts l.78). A vertex
- *   with no 4h-owned incident tile is F's. Every other vertex is its 4h
+ * - Vertices: NB-FLIP's authority rule (umVertexAuthority, uniform-mixed-vertex-sampling.wgsl.ts l.78) but
+ *   at tile corners: a corner an h-owned tile touches is F's where an F slot stores it (the finest incident
+ *   tier, nbVertexCoarse; its C word is F's copy, lcMirror). Elsewhere a coarse incident tile of a resident
+ *   page wins (nbVertexRead4). A vertex with no 4h-owned incident tile is F's. Every other vertex is its 4h
  *   tile's interpolant, umVertexFrom4's arithmetic (l.95: the weight
  *   w.x*w.y*w.z times the corner, zero weights skipped, umVertexSum8's order),
  *   which at a corner is the C vertex itself. φ is in h units in F and C alike. A vertex outside the lattice reads
@@ -47,7 +48,7 @@ export interface BrickOwnerNames {
   readonly view?: boolean;
 }
 
-const OWNER_FUNCTIONS = /\bnb(TileInLattice|TileIndex|TileOwnerH|CellOwnerH|VertexCoarse|VertexOwnerH|CVertex|FVertex|FPhiBase|VertexPhi|CFace|FFace|OnWall|FaceInLattice|FacePlane|FaceU)\b/g;
+const OWNER_FUNCTIONS = /\bnb(TileInLattice|TileIndex|TileOwnerH|CellOwnerH|VertexRead4|VertexCoarse|VertexOwnerH|CVertex|FVertex|FPhiBase|VertexPhi|CFace|FFace|OnWall|FaceInLattice|FacePlane|FaceU)\b/g;
 
 export const brickOwnerWGSL = (n: BrickOwnerNames = { phi: "phi", vel: "vel" }) => {
   let code = ownerCode(n).replaceAll("NB_WALL_BOX", n.box ?? "NB_LATTICE").replaceAll("NB_VEL_F_U0", n.faceF ?? "NB_VEL_F_U0").replaceAll("NB_VEL_C_U0", n.faceC ?? "NB_VEL_C_U0");
@@ -65,15 +66,15 @@ fn nbTileOwnerH(t:vec3i)->bool{
   return nbTileH(cs,nbTileIndex(t));
 }
 fn nbCellOwnerH(c:vec3i)->bool{return nbTileOwnerH(c>>vec3u(2u));}
-// The 4h-owned tile that holds vertex v's authority, in umVertexAuthority's order, or (-1,-1,-1) when no incident
-// tile is 4h-owned. Candidate k is tile tA + corner(k) - 1 (umCoarseIncident, the lowest k first: tA the tile
+// The 4h-owned tile whose interpolant holds vertex v (umVertexAuthority's authority), in its order, or (-1,-1,-1) when
+// no incident tile is 4h-owned. Candidate k is tile tA + corner(k) - 1 (umCoarseIncident, the lowest k first: tA the tile
 // of v's cell above); an axis on which v lies inside tA (local != 0) admits only corner 1. A tile outside the
 // lattice is no candidate (the old cell-above walk steps off the solid shell, which gives the same tiles). Nor is a
 // tile of a non-resident page: no slot stores its corners, so it is air (NB_PHI_AIR_C), never an authority. Taking it
 // as 4h made a vertex on an absent page's upper face the interpolant of the next page's C corners, which all-h hold
 // bootPhi's stale analytic φ: lane P's absent-page guard hits on the all-h dam (2026-11-15, a cell at (63,63,62)
 // read -1.58 against F's 67).
-fn nbVertexCoarse(v:vec3i)->vec3i{
+fn nbVertexRead4(v:vec3i)->vec3i{
   let tA=v>>vec3u(2u);let inside=(v-4*tA)!=vec3i(0);
   for(var k=0u;k<8u;k++){
     let corner=vec3u(k&1u,(k>>1u)&1u,k>>2u);
@@ -82,6 +83,21 @@ fn nbVertexCoarse(v:vec3i)->vec3i{
     if(nbTileInLattice(t)&&nbCSlotOfPage(t>>vec3u(3u))!=NB_NONE&&!nbTileOwnerH(t)){return t;}
   }
   return vec3i(-1);
+}
+// The authority (deviation from umVertexAuthority, 2026-11-23): a tile corner (v on the 4h lattice) that an h-owned tile
+// touches is F's where an F slot stores it, as an octree level set's shared node takes its finest incident cell's
+// update (Losasso et al. 2004); the vertices inside a 4h tile's faces stay its interpolant (no crack). Coarse-wins
+// left the h region's boundary corners to C's update, which never sees the h surface: on the dam at step 300 those
+// corners sat 0.8 h shallow below the surface (rms 1.3 h, the F-owned ones 0.09), so a demotion's trilinear dropped
+// the surface 0.23 h and a promotion's particles raised it back. Such a corner is still a 4h tile's corner
+// (nbVertexRead4): the C kernels keep its C word F's copy (levelset-coarse.wgsl.ts lcMirror), so the interpolant
+// reads it unchanged.
+fn nbVertexCoarse(v:vec3i)->vec3i{
+  let tA=v>>vec3u(2u);
+  if(all(v==4*tA)&&nbFSlotOfBrick(v>>vec3u(3u))<NB_SEAM){
+    for(var k=0u;k<8u;k++){if(nbTileOwnerH(tA-vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u)))){return vec3i(-1);}}
+  }
+  return nbVertexRead4(v);
 }
 fn nbVertexOwnerH(v:vec3i)->bool{return nbVertexCoarse(v).x<0;}
 // The C vertex at tile coordinate T (h vertex 4T): NB_PHI_FAR outside the lattice; NB_PHI_AIR_C (16 h, the old stored

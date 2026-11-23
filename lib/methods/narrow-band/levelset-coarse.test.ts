@@ -91,7 +91,17 @@ class World {
     const cs = this.cslotOfPage(shr(t, 3)); if (cs === NONE) return false;
     const i = this.tileIndex(t); return ((this.set[this.L.set.airGate + CMASK_WORDS * cs + (i >> 5)]! >>> (i & 31)) & 1) === 1;
   }
-  vertexCoarse(v: V): V | undefined {
+  /** nbVertexCoarse: a tile corner an h tile touches is F's where an F slot stores it (the fine corner); else the 4h
+   * tile whose interpolant holds it (vertexRead4). */
+  vertexCoarse(v: V): V | undefined { return this.fineCorner(v) ? undefined : this.vertexRead4(v); }
+  fineCorner(v: V) {
+    if (!v.every(x => x % 4 === 0) || this.fslotOfBrick(shr(v, 3)) >= SEAM) return false;
+    for (let k = 0; k < 8; k++) if (this.tileOwnerH(sub(shr(v, 2), corner(k)))) return true;
+    return false;
+  }
+  /** lcMirror's vertices: F's, and a 4h tile's interpolant reads them (each C writer copies F's word). */
+  mirrored(v: V) { return v.every((x, a) => x >= 0 && x <= NL[a]!) && this.fineCorner(v) && this.vertexRead4(v) !== undefined; }
+  vertexRead4(v: V): V | undefined {
     const tA = shr(v, 2), inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
     for (let k = 0; k < 8; k++) {
       const b = corner(k);
@@ -598,7 +608,8 @@ function retireOracle(W: World, slots: number[], tally: Tally): Map<string, numb
   };
   const closed = (q: V) => { for (let k = 0; k < 8; k++) if (inLattice(sub(q, corner(k)))) return false; return true; };
   const zeroOpen = (p: V) => { const lo = sub(p.map(Math.ceil) as V, [1, 1, 1]), hi = flo(p); for (let k = 0; k < 8; k++) if (inLattice(corner(k).map((b, a) => b ? hi[a]! : lo[a]!) as V)) return true; return false; };
-  const bound = (v: V, d: number) => {
+  // coarse (deviation 11): also a distance's bound on each edge, no farther than a same-sign neighbour's |φ| plus 4.
+  const bound = (v: V, d: number, coarse: boolean) => {
     let at = 0, b = Math.abs(d);
     for (let a = 0; a < 7; a++) {
       const q: V = [...v]; if (a > 0) q[(a - 1) >> 1] += ((a - 1) & 1) ? -4 : 4;
@@ -609,7 +620,7 @@ function retireOracle(W: World, slots: number[], tally: Tally): Map<string, numb
       else if (at * n < 0) {
         const t = Math.abs(at) / (Math.abs(at) + Math.abs(n)), axis = (a - 1) >> 1, zero: V = [...v]; zero[axis] = mix(v[axis]!, q[axis]!, t);
         if (zeroOpen(zero)) b = Math.min(b, 4 * t);
-      }
+      } else if (coarse && n * d > 0) b = Math.min(b, Math.abs(n) + 4);
     }
     return d >= 0 ? b : -b;
   };
@@ -620,8 +631,9 @@ function retireOracle(W: World, slots: number[], tally: Tally): Map<string, numb
     let fine = false; for (let k = 0; k < 27; k++) if (W.tileOwnerH(sub(add(t, [k % 3, Math.floor(k / 3) % 3, Math.floor(k / 9)]), [1, 1, 1]))) fine = true;
     let hot = false; const base = sub(shr(v, 2), [1, 1, 1]);
     for (let k = 0; k < 8; k++) if (bitsf(W.tileLoad(mul(clampV(add(base, corner(k)), 0, N / 4 - 1), 4), FT.SURF, 0)) > 1) hot = true;
-    if (!fine || hot) { out.set(key, cur); bump(tally, fine ? "hot" : "no h stencil"); continue; }
-    if (W.reach2(c)) { out.set(key, bound(v, build(v, c))); bump(tally, "rebuilt"); continue; }
+    if (hot) { out.set(key, cur); bump(tally, "hot"); continue; }
+    if (!fine) { out.set(key, bound(v, build(v, c), true)); bump(tally, "no h stencil"); continue; }
+    if (W.reach2(c)) { out.set(key, bound(v, build(v, c), false)); bump(tally, "rebuilt"); continue; }
     const x = farSentinel(cur, 1); out.set(key, x); bump(tally, x !== cur ? "sentinel" : "far kept");
   }
   return out;
@@ -699,7 +711,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     const phiWords = new Uint32Array(await e.read("phi")), W = new World(L, dir, set, fcell);
     W.phi = new Float32Array(phiWords.buffer);
     const put = (kind: "F" | "C", ch: string, slot: number, l: number, x: number | undefined) => { const i = L.base("phi", kind, ch) + BRICK_STRIDE * slot + l; if (x === undefined) phiWords[i] = POISON; else W.phi[i] = x; };
-    let poisonF = 0, poisonC = 0, poisonCIn = 0;
+    let poisonF = 0, poisonC = 0, poisonCIn = 0, mirrors = 0;
     for (const [bk, fs] of s0.bricks) {
       const b = brickKeyCoord(bk) as V;
       for (let l = 0; l < 512; l++) {
@@ -712,6 +724,9 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
       const P = brickKeyCoord(pk) as V;
       for (let l = 0; l < 512; l++) {
         const v = add(mul(P, 32), mul([l & 7, (l >> 3) & 7, l >> 6], 4)), own = W.cOwned(v);
+        // A mirrored corner's copy starts off F's word by 0.5, so each channel's first writer (lcClear PHI, lcAdvect
+        // PHI1) must copy it.
+        if (W.mirrored(v)) { mirrors++; put("C", "PHI", cs, l, phi0(v) + 0.5); put("C", "PHI1", cs, l, phi1(v) + 0.5); continue; }
         if (!own) { poisonC++; if (v.every((x, a) => x <= NL[a]!)) poisonCIn++; }
         put("C", "PHI", cs, l, own ? phi0(v) : undefined); put("C", "PHI1", cs, l, own ? phi1(v) : undefined);
       }
@@ -751,6 +766,17 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
       assert.equal(setBad, 0, `${name}: set words off the oracle\n${setReport.join("\n")}`);
       const expected = new Map<number, number>();
       for (const [k, x] of want) { const [cs, l] = k.split(":").map(Number) as [number, number]; expected.set(L.base("phi", "C", ch) + BRICK_STRIDE * cs + l, x); }
+      // lcMirror: each writer copies F's word of its channel to a mirrored corner's C word that differs.
+      let copied = 0;
+      for (const cs of slots) {
+        const o = mul(brickKeyCoord(W.dir[W.L.dir.crec + 32 * cs + REC.KEY]!) as V, 32);
+        for (let l = 0; l < 512; l++) {
+          const v = add(o, mul([l & 7, (l >> 3) & 7, l >> 6], 4)); if (!W.mirrored(v)) continue;
+          const fi = L.base("phi", "F", ch) + BRICK_STRIDE * W.fslotOfBrick(shr(v, 3)) + cellLocal(v[0], v[1], v[2]), ci = L.base("phi", "C", ch) + BRICK_STRIDE * cs + l;
+          if (before[fi] !== before[ci]) { expected.set(ci, W.phi[fi]!); copied++; }
+        }
+      }
+      tally["mirror copied"] = copied;
       let stray = 0, bad = 0, worst = 0; const report: string[] = [];
       for (let i = 0; i < after.length; i++) {
         const x = expected.get(i);
@@ -770,6 +796,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     // The chain: the gate is clear until the first lcClear (zeroed at setClaimPages), which writes it for advect.
     const tL0 = await step("lcClear", "PHI", (W, t, sw) => clearOracle(W, slots, t, sw), rel(0));
     const tA = await step("lcAdvect", "PHI1", (W, t) => advectOracle(W, slots, t, fatal), rel(2e-4));
+    assert.ok(mirrors === 0 || ((tL0["mirror copied"] ?? 0) === mirrors && (tA["mirror copied"] ?? 0) === mirrors), `mirrored corners ${mirrors}: lcClear copied ${tL0["mirror copied"]}, lcAdvect ${tA["mirror copied"]}`);
     const tC = await step("lcCouple", "PHI", (W, t) => coupleOracle(W, slots, t), rel(2e-4));
     const tL = await step("lcClear", "PHI", (W, t, sw) => clearOracle(W, slots, t, sw), rel(0));
     const tR = await step("lcRetire", "PHI1", (W, t) => retireOracle(W, slots, t), rel(2e-4));
@@ -793,7 +820,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
       for (let cs = 0; cs < L.cap.c; cs++) if (fc[RES + cs] !== fcellCached[RES + cs]) { assert.ok(slots.includes(cs), `stamp on C slot ${cs}, no fixture page`); fc[RES + cs] = fcellCached[RES + cs]!; }
       assert.equal(words(fc, fcellCached), 0, "fcell untouched"); }
     assert.equal(words(await e.read("dir"), dir), 0, "dir untouched");
-    if (!fx.full) return { poisonCIn };
+    if (!fx.full) return { poisonCIn, mirrors };
     // ---- the BULK16 latch (deviation 2): a BULK16 page word beside the pages (the skirt page (2, 0, 0)) fails lcAdvect.
     const skirt = L.dir.page + L.pageIndex(2, 0, 0);
     assert.equal(dir[skirt], NONE, "the skirt page is absent");
@@ -803,7 +830,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     assert.equal(header[H.FAIL]! & FAIL.UNSUPPORTED, FAIL.UNSUPPORTED, `the BULK16 latch: FAIL ${header[H.FAIL]}`);
     assert.equal(header[H.FAIL_INFO], 0x4c430003, "the BULK16 latch's info");
     console.log(`levelset-coarse: BULK16 latch FAIL ${header[H.FAIL]} info 0x${header[H.FAIL_INFO]!.toString(16)}`);
-    return { poisonCIn };
+    return { poisonCIn, mirrors };
 }
 
 test("levelset-coarse (GPU): advect, couple, clear, retire and publish of the 4h corners match the CPU oracle", GPU, async () => {
@@ -819,8 +846,10 @@ const blockA = (T: V) => T[0] <= 5 && T[1] >= 4 && T[1] <= 5 && T[2] <= 5;
 test("levelset-coarse (GPU): mixed ownership (h tiles inside 4h pages): F-owned C copies are never read or written", GPU, async () => {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   await withUniformDevice("levelset coarse mixed", async device => {
-    const { poisonCIn } = await runFixture(device, { hi: [N + 1, 20.3, N + 1], want: blockA, cold: [brickKey(1, 0, 1)], full: false });
+    const { poisonCIn, mirrors } = await runFixture(device, { hi: [N + 1, 20.3, N + 1], want: blockA, cold: [brickKey(1, 0, 1)], full: false });
     // CMASK = WANT: block A's 6 x 6 corners at y = 20 (tile corners x, z 0..5) have no incident 4h tile.
-    assert.equal(poisonCIn, 36, "the F-owned C positions are block A's corners");
+    assert.equal(poisonCIn, 36, "the F-owned C positions no 4h tile reads are block A's interior corners");
+    // Its corners on the y = 16 and 24 planes and the x, z = 24 faces touch both tiers: F's, mirrored in C.
+    assert.ok(mirrors > 0, `block A's boundary corners are mirrored (${mirrors})`);
   });
 });

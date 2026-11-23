@@ -438,6 +438,9 @@ fn xCorner(p:vec3i,T:vec3i)->bool{return all((p-4*T)%vec3i(4)==vec3i(0));}
     // A refining tile's corner that becomes an h vertex moves its C value to F itself: its new authority tile
     // may be listed for nothing (the old remap kept the texel in place). Tiles sharing the corner write one value.
     if(refine&&!newC&&xCorner(p,t)){xWriteF(p,nbCVertex(p>>vec3u(2u)));continue;}
+    // A corner F keeps (an h tile still touches it: nbVertexCoarse's fine corner) that coarsening tile t now reads: its
+    // C word takes F's value (levelset-coarse.wgsl.ts lcMirror's copy). Where an old 4h tile read it the copy holds.
+    if(!newC&&!refine&&xCorner(p,t)&&all(nbNewVertexRead4(p)==t)&&nbVertexRead4(p).x<0){xWriteC(p>>vec3u(2u),nbFVertex(p));continue;}
     if(!own){continue;}
     // The old layout's storage of p: F (no coarse incident tile), C (a coarse corner), or none (hanging).
     let To=nbVertexCoarse(p);let oldF=To.x<0;let oldC=!oldF&&xCorner(p,To);

@@ -91,7 +91,11 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
     const cRead = (name: string, T: V3) => { const pc = cSlot(T); return pc === undefined ? undefined : cBefore.get(name)!.get(pc)![tileIndex(T)]!; };
     const fVertex = (v: V3) => fRead("PHI", v) ?? FAR;
     const cVertex = (T: V3) => (T.some(x => x < 0) || T.some(x => 4 * x > N)) ? FAR : cRead("PHI", T) ?? FAR;
-    const vertexCoarse = (m: Uint32Array, v: V3): V3 | undefined => {
+    // nbVertexCoarse: a tile corner an h tile touches is F's where an F slot stores it; else vertexRead4's 4h tile.
+    const fineCorner = (m: Uint32Array, v: V3) => v.every(x => x % 4 === 0) && fSlot(v) !== undefined
+      && [0, 1, 2, 3, 4, 5, 6, 7].some(k => { const t = shr(v, 2).map((x, a) => x - ((k >> a) & 1)) as V3; return tileH(m, t) && cSlot(t) !== undefined; });
+    const vertexCoarse = (m: Uint32Array, v: V3): V3 | undefined => fineCorner(m, v) ? undefined : vertexRead4(m, v);
+    const vertexRead4 = (m: Uint32Array, v: V3): V3 | undefined => {
       const tA = shr(v, 2), inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
       for (let k = 0; k < 8; k++) {
         const corner = [k & 1, (k >> 1) & 1, k >> 2];
@@ -157,7 +161,7 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
       return l[(a + 1) % 3] === 0 && l[(a + 2) % 3] === 0 ? 4 : 0;
     };
     const fWrites = new Map<string, number>(), cWrites = new Map<string, number>();
-    let tilted = 0, walls = 0;
+    let tilted = 0, walls = 0, mirrored = 0;
     const writeF = (name: string, c: V3, v: number) => { const sl = fSlot(c); assert.ok(sl !== undefined, `F storage for ${c}`); fWrites.set(`${name}|${sl}|${local8(c)}`, v); };
     const writeC = (name: string, T: V3, v: number) => { const pc = cSlot(T); assert.ok(pc !== undefined, `C storage for ${T}`); cWrites.set(`${name}|${pc}|${tileIndex(T)}`, v); };
     for (const { t, flags } of entries) {
@@ -264,6 +268,11 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
         const T = vertexCoarse(newMask, p), newC = T !== undefined;
         const own = newC ? T.every((x, a) => x === t[a]) && isCorner(p, T) : shr(p.map(x => Math.max(x - 1, 0)) as V3, 2).every((x, a) => x === t[a]);
         if (refine && !newC && isCorner(p, t)) { writeF("PHI", p, cVertex(shr(p, 2))); continue; }
+        // A corner F keeps that coarsening tile t now reads first: its C word takes F's value (lcMirror's copy).
+        if (!newC && !refine && isCorner(p, t)) {
+          const R = vertexRead4(newMask, p);
+          if (R && R.every((x, a) => x === t[a]) && vertexRead4(oldMask, p) === undefined) { writeC("PHI", shr(p, 2), fVertex(p)); mirrored++; continue; }
+        }
         if (!own) continue;
         const To = vertexCoarse(oldMask, p), oldF = To === undefined, oldC = !oldF && isCorner(p, To);
         if ((newC && oldC) || (!newC && oldF)) continue;
@@ -309,7 +318,7 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
     assert.deepEqual([...await e.read("dir", L.dir.cmask + CMASK_WORDS * cs, CMASK_WORDS)], [...newMask], "CMASK = WANT");
     const cPhiWrites = [...cWrites.keys()].filter(k => k.startsWith("PHI")).length, c4h = [...cWrites.keys()].filter(k => k.startsWith("U")).length;
     assert.ok(written > 1000 && kept > 0 && tilted > 0 && cPhiWrites > 0 && c4h > 0 && walls > 0, `written ${written}, kept ${kept}, tilted slopes ${tilted}, C corners ${cPhiWrites}, C faces ${c4h}, wall faces ${walls}`);
-    console.log(`setTransfer: ${entries.length} listed, ${written} written, ${kept} kept, ${tilted} tilted slopes, ${cPhiWrites} C corners, ${c4h} C faces, ${walls} wall faces`);
+    console.log(`setTransfer: ${entries.length} listed, ${written} written, ${kept} kept, ${tilted} tilted slopes, ${cPhiWrites} C corners, ${c4h} C faces, ${walls} wall faces, ${mirrored} mirrored corners`);
     e.destroy();
   });
 });

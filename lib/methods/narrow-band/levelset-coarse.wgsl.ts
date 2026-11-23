@@ -26,8 +26,9 @@
  * (umCoarseCornerMask), a regular owner its positive corner plus its low-wall corners, couple's seam owners the
  * corners they hold the authority of (umVertexAuthority). The union of those writers is every corner of a 4h-owned
  * tile, each written with one value. Here a lane is a C vertex of a C_ALL page: it writes when some in-lattice tile
- * incident to it is 4h-owned (nbVertexCoarse), so every C vertex has exactly one writer. Vertices of a page no tile
- * of which is 4h-owned are F's and are never written (nor read as C).
+ * incident to it is 4h-owned (nbVertexCoarse), so every C vertex has exactly one writer. A corner an h tile also
+ * touches is F's (nbVertexCoarse's fine corner): each writer copies F's word of its channel there (lcMirror), the
+ * corner's one value. Vertices of a page no tile of which is 4h-owned are F's and are never written (nor read as C).
  *
  * Exits of lcAdvect, in umAdvectStore/advectWalls/advectDeferred's order:
  * 1. a wall-plane vertex (dt > 0, on box plane 0 or N) takes advectWalls: COLD hold, then far air, then the full
@@ -103,6 +104,15 @@
  *    |band|), lcBuildDistance takes no F candidate (the projection onto the C zero and lcBoundMetric bound it), and an
  *    in-lattice bin cell no F slot holds is open with no particles (particles bin only into F slots). Unknown is never
  *    read as far.
+ * 11. Retirement without an h tile in the stencil (2026-11-23). The old engine redistances a 4h corner only beside an
+ *    h tile (umTileMinimumWidth == 1), since its surface tiles were h. R2 makes calm surfaces 4h, and a 4h surface
+ *    advected with no redistance stops being a distance: on the long dam's draining reservoir |∇φ| fell to 0.45-0.77
+ *    under the surface, and its floor corners kept their initial -30 while the water above them drained to 8 cells.
+ *    The foot's gradient and the cubic read those taps, so the 4h surface fell 2-3 times as fast as the all-h one
+ *    and roughened, and the census refined the damaged layer. Such a corner takes lcBuildDistance (the C zero's
+ *    projection; no F candidate reaches it) under lcBoundMetric's coarse bound: the crossings, and a distance's bound on each edge,
+ *    which retires a stale far value. The long dam's 4h reservoir then drains with the all-h one (its left 0.4 m
+ *    within 0.15 cells to step 90) and stays 4h.
  *
  * Unknown features fail: a lattice that is not whole pages latches FAIL.UNSUPPORTED (0x4c430001; brick-scene refuses
  * it), BULK16 state in lcAdvect latches FAIL.UNSUPPORTED (0x4c430003, deviation 2), and a trace over 128 cells
@@ -150,8 +160,19 @@ fn lcHeld(p:vec3f)->vec3f{return clamp(p,vec3f(0.0),vec3f(NB_WALL_BOX));}
 // A vertex's cell held off the upper wall (umPointCell, umCellNearFromPage, umOpenPointCell in the box).
 fn lcCellOf(v:vec3i)->vec3i{return clamp(v,vec3i(0),NB_WALL_BOX-vec3i(1));}
 fn lcTileHeld(t:vec3i)->vec3i{return clamp(t,vec3i(0),(NB_WALL_BOX>>vec3u(2u))-vec3i(1));}
-// A C vertex: some in-lattice tile incident to it is 4h-owned (its writer).
+// A C vertex: C writes it (nbVertexCoarse: a 4h tile holds it, and no h tile touches it where it is a tile corner).
 fn lcCOwned(v:vec3i)->bool{return lcVertexIn(v)&&nbVertexCoarse(v).x>=0;}
+// A C vertex F owns that a 4h tile's interpolant reads (brick-owner.wgsl.ts nbVertexCoarse's fine corner): its C word
+// is F's copy. Each C writer, after its F pair (lAdvect, lUnion, lClear, lDistance, lPublish), copies the buffer that pair
+// wrote, so every reader of the corner (the 4h interpolant, the C stencils, lResolve) sees F's value. Its page holds
+// the corner's F brick, so it is never STILL (off C_ACT). True when the copy changed the word.
+fn lcMirror(f:u32,c:u32,slot:u32,l:u32,v:vec3i)->bool{
+ if(!lcVertexIn(v)||nbVertexRead4(v).x<0){return false;}
+ let s=nbFSlotOfBrick(v>>vec3u(3u));if(s>=NB_SEAM){return false;}
+ let x=bitcast<f32>(phi[f+NB_STRIDE*s+nbLocal(v)]);
+ if(x==lcPhiC(c,slot,l)){return false;}
+ lcSetC(c,slot,l,x);return true;
+}
 // Deviation 5: tile t's page is resident and still (still-tank A: setLists' STILL, regionStill's COLD page).
 fn lcTileCold(t:vec3i)->bool{let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}return (nbCRec(cs,NB_REC_CLASS)&NB_CLASS_STILL)!=0u;}
 fn lcCellStored(c:vec3i)->bool{return nbInWallC(c)&&nbCSlotOfPage(c>>vec3u(5u))!=NB_NONE;}
@@ -411,7 +432,7 @@ fn lcAdvectPage(slot:u32,live:bool,lid:u32){
  let l=lid+64u*lcPart;let v=o+4*nbLocalCoord(l);
  var full=false;var c=0.0;
  for(var r=0u;r<1u;r++){
-  if(!lcCOwned(v)){continue;}
+  if(!lcCOwned(v)){lcMirror(NB_PHI_F_PHI1,NB_PHI_C_PHI1,slot,l,v);continue;}
   c=lcPhiC(NB_PHI_C_PHI,slot,l);
   // Exits 1 and 2: the COLD hold (umHoldCold → umStoreCold: the vertex's own φ).
   if(lcTierCold(v)){lcSetC(NB_PHI_C_PHI1,slot,l,c);continue;}
@@ -542,7 +563,8 @@ fn lcCouplePage(slot:u32,live:bool,lid:u32){
  let dt=lcDt();let hm=nbRingF(cfg.x,NB_RING_H);let o=nbCOrigin(slot);
  for(var r=0u;r<1u;r++){
   let l=lid+64u*lcPart;let v=o+4*nbLocalCoord(l);
-  if(!lcCOwned(v)||lcVertexCold(v)){continue;}
+  if(!lcCOwned(v)){lcMirror(NB_PHI_F_PHI,NB_PHI_C_PHI,slot,l,v);continue;}
+  if(lcVertexCold(v)){continue;}
   lcSetC(NB_PHI_C_PHI,slot,l,lcCoupled(v,dt,hm));
  }
 }
@@ -567,7 +589,7 @@ fn lcClearPage(slot:u32,live:bool,lid:u32){
  let o=nbCOrigin(slot);
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let v=o+4*nbLocalCoord(l);
-  if(!lcCOwned(v)){continue;}
+  if(!lcCOwned(v)){if(lcMirror(NB_PHI_F_PHI,NB_PHI_C_PHI,slot,l,v)){fcStore(FC_RES+slot,nbRing(cfg.x,NB_RING_STEP)+1u);}continue;}
   let value=lcPhiC(NB_PHI_C_PHI,slot,l);
   if(value>=16.0||lcProtected(v,value<=0.0)||lcVertexCold(v)){continue;}
   lcSetC(NB_PHI_C_PHI,slot,l,max(value,16.0));
@@ -577,7 +599,11 @@ fn lcClearPage(slot:u32,live:bool,lid:u32){
 }
 `;
 
-const LC_RETIRE_WGSL = /* wgsl */`
+/** walls (BrickLayout.staticTiles): F's rule that a closed cell is no crossing (lDistance's arenaCross), in the
+ * projection onto the C zero. A buried C vertex holds what it last held (no redistance sample), so a zero read from a
+ * closed cell's corners is a stale one: at the seep's dividing wall the projection walked into the wall and the
+ * surface beside it took that zero's distances, curved, and refined (2026-11-23). */
+const lcRetireWGSL = (walls: boolean) => /* wgsl */`
 // nbPhiGradient: the represented field's trilinear value (xyz: its gradient, per cell) in cell c at q.
 fn lcGradient(c:vec3i,q:vec3f)->vec4f{
  let width=lcWidthAt(c);let origin=(c/width)*width;let f=(q-vec3f(origin))/f32(width);
@@ -604,8 +630,10 @@ fn lcBuildDistance(v:vec3i,c:vec3i)->f32{
    let candidate=nbfCellDistance(vec3f(v-base),cv);if(candidate>=0.0){distance=candidate;}
   }
   if(abs(value)<4.5){
-   var q=vec3f(v);var cell=lcCellOf(vec3i(floor(q)));
-   for(var it=0u;it<5u;it++){
+   var q=vec3f(v);var cell=lcCellOf(vec3i(floor(q)));${walls ? `
+   // A shut cell is no zero: the projection starts in an open cell incident to v and stops at a shut one.
+   for(var k=1u;k<8u&&!nbInWallC(cell);k++){cell=lcCellOf(v-lcCorner(k));}` : ""}
+   for(var it=0u;it<5u;it++){${walls ? "\n    if(!nbInWallC(cell)){break;}" : ""}
     let s=lcGradient(cell,q);let f=s.w;if(abs(f)<1e-5){distance=min(distance,length(q-vec3f(v)));break;}
     let g=s.xyz;let g2=dot(g,g);if(g2<1e-8){break;}
     q=lcHeld(q-clamp(f/sqrt(g2),-1.5,1.5)*g*inverseSqrt(g2));cell=lcCellOf(vec3i(floor(q)));
@@ -623,7 +651,9 @@ fn lcZeroOpen(p:vec3f)->bool{
  return false;
 }
 // nbBoundCoarseMetric: |d| no farther than the represented zero on each of the six 4h lattice edges.
-fn lcBoundMetric(v:vec3i,d:f32)->f32{
+// coarse (deviation 11, no h tile in the stencil): also a distance's bound on each edge, no farther than a same-sign
+// neighbour's |φ| plus the edge (4).
+fn lcBoundMetric(v:vec3i,d:f32,coarse:bool)->f32{
  var at=0.0;var bound=abs(d);
  for(var a=0u;a<7u;a++){
   var q=v;if(a>0u){q[(a-1u)>>1u]+=select(4,-4,((a-1u)&1u)!=0u);}
@@ -634,7 +664,7 @@ fn lcBoundMetric(v:vec3i,d:f32)->f32{
    let t=abs(at)/(abs(at)+abs(n));
    let axis=(a-1u)>>1u;var zero=vec3f(v);zero[axis]=mix(f32(v[axis]),f32(q[axis]),t);
    if(lcZeroOpen(zero)){bound=min(bound,4.0*t);}
-  }
+  }else if(coarse&&n*d>0.0){bound=min(bound,abs(n)+4.0);}
  }
  return select(-bound,bound,d>=0.0);
 }
@@ -649,12 +679,13 @@ fn lcHotCorner(v:vec3i)->bool{
  for(var k=0u;k<8u;k++){let t=lcTileHeld(base+lcCorner(k));if(bitcast<f32>(fgTileLoad(4*t,FT_SURF,0u))>1.0){return true;}}
  return false;
 }
-// nbRedistanceVertex at C vertex v (cur: its current φ), with nbCoarseBuild's build where it applies.
+// nbRedistanceVertex at C vertex v (cur: its current φ), with nbCoarseBuild's build where it applies; deviation 11
+// where no h tile is in the stencil.
 fn lcRetired(v:vec3i,cur:f32)->f32{
- if(lcVertexCold(v)){return cur;}
+ if(lcVertexCold(v)||lcHotCorner(v)){return cur;}
  let c=lcCellOf(v);
- if(!lcStencilFine(c>>vec3u(2u))||lcHotCorner(v)){return cur;}
- if(fgReach2(c)){return lcBoundMetric(v,lcBuildDistance(v,c));}
+ if(!lcStencilFine(c>>vec3u(2u))){return lcBoundMetric(v,lcBuildDistance(v,c),true);}
+ if(fgReach2(c)){return lcBoundMetric(v,lcBuildDistance(v,c),false);}
  return nbfFarSentinel(cur,1.0);
 }
 // One C vertex a lane: the page's z plane lcPart (X8), as lcAdvect.
@@ -664,7 +695,7 @@ fn lcRetirePage(slot:u32,live:bool,lid:u32){
  let o=nbCOrigin(slot);
  for(var r=0u;r<1u;r++){
   let l=lid+64u*lcPart;let v=o+4*nbLocalCoord(l);
-  if(!lcCOwned(v)){continue;}
+  if(!lcCOwned(v)){lcMirror(NB_PHI_F_PHI1,NB_PHI_C_PHI1,slot,l,v);continue;}
   lcSetC(NB_PHI_C_PHI1,slot,l,lcRetired(v,lcPhiC(NB_PHI_C_PHI,slot,l)));
  }
 }
@@ -674,7 +705,7 @@ fn lcPublishPage(slot:u32,live:bool,lid:u32){
  let o=nbCOrigin(slot);
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let v=o+4*nbLocalCoord(l);
-  if(!lcCOwned(v)){continue;}
+  if(!lcCOwned(v)){lcMirror(NB_PHI_F_PHI,NB_PHI_C_PHI,slot,l,v);continue;}
   let x=lcPhiC(NB_PHI_C_PHI1,slot,l);
   if(x!=lcPhiC(NB_PHI_C_PHI,slot,l)){lcSetC(NB_PHI_C_PHI,slot,l,x);}
  }
@@ -687,7 +718,7 @@ export const levelSetCoarseWGSL = {
   advect: () => [LC_VELOCITY_WGSL, nbfLevelSetConstantsWGSL, LC_PHI_ADVECT_REST_WGSL, levelSetReleaseWGSL(), LC_ADVECT_WGSL].join("\n"),
   couple: () => [FG_RUN_WGSL, nbfLevelSetConstantsWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL, LC_NEAR_KNOWN_WGSL, LC_COUPLE_WGSL].join("\n"),
   clear: () => [LC_SEEDS_WGSL, LC_CLEAR_WGSL].join("\n"),
-  retire: () => [nbfRedistanceWGSL, LC_NEAR_KNOWN_WGSL, LC_RETIRE_WGSL].join("\n"),
+  retire: (L: BrickLayout) => [nbfRedistanceWGSL, LC_NEAR_KNOWN_WGSL, lcRetireWGSL(L.staticTiles)].join("\n"),
 };
 
 /** lcAdvect's dispatch over C_ALL: eight workgroups an entry (the brick set's X8 arguments). */
@@ -732,7 +763,7 @@ export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayo
 }`].join("\n")),
     lcCouple: k8("lcCouple", levelSetCoarseWGSL.couple(), "lcCouplePage"),
     lcClear: k("lcClear", levelSetCoarseWGSL.clear(), "lcClearPage"),
-    lcRetire: k8("lcRetire", levelSetCoarseWGSL.retire(), "lcRetirePage"),
-    lcPublish: k("lcPublish", levelSetCoarseWGSL.retire(), "lcPublishPage"),
+    lcRetire: k8("lcRetire", levelSetCoarseWGSL.retire(L), "lcRetirePage"),
+    lcPublish: k("lcPublish", levelSetCoarseWGSL.retire(L), "lcPublishPage"),
   };
 }

@@ -225,11 +225,14 @@ const cutFunction = (code: string, name: string) => {
   if (!m) throw new Error(`fluid-grid: brickOwnerWGSL has no ${name}`);
   return m[0];
 };
+const FO_WIN_READ4 = cutFunction(FO_TILE_RAW, "foVertexRead4");
+if (!FO_WIN_READ4.includes(FO_COARSE_RULE)) throw new Error("fluid-grid: brickOwnerWGSL's foVertexRead4 tile rule changed shape");
 const FO_WIN_COARSE = cutFunction(FO_TILE_RAW, "foVertexCoarse");
-if (!FO_WIN_COARSE.includes(FO_COARSE_RULE)) throw new Error("fluid-grid: brickOwnerWGSL's foVertexCoarse tile rule changed shape");
+if (!FO_WIN_COARSE.includes("return foVertexRead4(v);") || !FO_WIN_COARSE.includes("fgBrickSlot(v>>vec3u(3u))")) throw new Error("fluid-grid: brickOwnerWGSL's foVertexCoarse changed shape");
 const FO_WIN_PHI = cutFunction(FO_PHI_PART, "foVertexPhi");
 if (!FO_WIN_PHI.includes("fn foVertexPhi(v:vec3i)") || !FO_WIN_PHI.includes("let T=foVertexCoarse(v);")) throw new Error("fluid-grid: brickOwnerWGSL's foVertexPhi changed shape");
-const FG_WIN_VERTEX_WGSL = FO_WIN_COARSE.replace("fn foVertexCoarse", "fn fgWinVertexCoarse").replace(FO_COARSE_RULE, "if(fgWinCoarseBit(fgWinTileAt(t))!=0u){return t;}")
+const FG_WIN_VERTEX_WGSL = FO_WIN_READ4.replace("fn foVertexRead4", "fn fgWinVertexRead4").replace(FO_COARSE_RULE, "if(fgWinCoarseBit(fgWinTileAt(t))!=0u){return t;}")
+  + FO_WIN_COARSE.replace("fn foVertexCoarse", "fn fgWinVertexCoarse").replace("return foVertexRead4(v);", "return fgWinVertexRead4(v);")
   + FO_WIN_PHI.replace("fn foVertexPhi", "fn fgWinVertexPhi").replace("foVertexCoarse(v)", "fgWinVertexCoarse(v)")
   + FO_WIN_PHI.replace("fn foVertexPhi", "fn fgWin1VertexPhi").replace("foVertexCoarse(v)", "fgWinVertexCoarse(v)").replace(/\bfo(CVertex|FVertex)\b/g, "fo1$1");
 /** fgWinVertexPhi with its authority T given (the caller's fgWinVertexCoarse: one walk serves the owner test and the
@@ -276,7 +279,8 @@ fn fgPack(c:vec3i)->u32{let b=NB_WINDOW_BITS+vec3u(5u);return u32(c.x)|(u32(c.y)
 fn fgUnpack(k:u32)->vec3i{let b=NB_WINDOW_BITS+vec3u(5u);return vec3i(i32(k&((1u<<b.x)-1u)),i32((k>>b.x)&((1u<<b.y)-1u)),i32(k>>(b.x+b.y)));}
 ${FO_TILE_WGSL}
 // Owned storage (brick-abi.md §2.5): what an F kernel may write. All h (FG_TIERED false) every F word is owned. A
-// vertex is F's where no incident tile is 4h-owned (the authority rule); a lower face where either cell beside it
+// vertex is F's where no incident tile is 4h-owned, or it is a tile corner an h tile touches (the authority rule,
+// foVertexCoarse); a lower face where either cell beside it
 // is h-owned; a cell where its tile is.
 fn fgVertexOwned(v:vec3i)->bool{return !FG_TIERED||foVertexOwnerH(v);}
 fn fgFaceOwned(c:vec3i,a:u32)->bool{return !FG_TIERED||foCellOwnerH(c)||foCellOwnerH(c-fgUnit(a));}

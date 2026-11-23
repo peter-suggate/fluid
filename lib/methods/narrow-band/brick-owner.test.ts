@@ -56,7 +56,7 @@ test("brick owner (GPU): vertex authority, hanging vertices and faces resolve as
     // A vertex no slot stores reads PHI_AIR_C (16 h, the old stored far air); outside the lattice, FAR.
     const fVertex = (v: Vec3) => { const at = cellSlot(s, v); return at ? fphi(at.slot)[at.local]! : PHI_AIR_C; };
     const cVertex = (T: Vec3) => T.some(v => v < 0 || 4 * v > N) ? FAR : T.some(v => v >= 8) ? PHI_AIR_C : Math.fround(cPhi(T));
-    const vertexCoarse = (v: Vec3): Vec3 | undefined => {
+    const vertexRead4 = (v: Vec3): Vec3 | undefined => {
       const tA = v.map(x => x >> 2) as Vec3, inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
       for (let k = 0; k < 8; k++) {
         const corner = [k & 1, (k >> 1) & 1, k >> 2];
@@ -67,6 +67,10 @@ test("brick owner (GPU): vertex authority, hanging vertices and faces resolve as
       }
       return undefined;
     };
+    // A tile corner an h tile touches is F's where an F slot stores it (nbVertexCoarse's fine corner).
+    const fineCorner = (v: Vec3) => v.every(x => x % 4 === 0) && !!cellSlot(s, v)
+      && Array.from({ length: 8 }, (_, k) => v.map((x, a) => (x >> 2) - ((k >> a) & 1)) as Vec3).some(tileH);
+    const vertexCoarse = (v: Vec3): Vec3 | undefined => fineCorner(v) ? undefined : vertexRead4(v);
     const vertexPhi = (v: Vec3) => {
       if (v.some(x => x < 0 || x > N)) return FAR;
       const T = vertexCoarse(v);
@@ -128,9 +132,10 @@ ${brickOwnerWGSL()}
     const enc = device.createCommandEncoder(); const pass = enc.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(Math.ceil(probes.length / 64)); pass.end();
     enc.copyBufferToBuffer(out, 0, rd, 0, 20 * probes.length); device.queue.submit([enc.finish()]);
     await rd.mapAsync(GPUMapMode.READ); const got = new Float32Array(rd.getMappedRange().slice(0)); rd.unmap();
-    let hanging = 0, corners = 0, hPlane = 0, walls = 0;
+    let hanging = 0, corners = 0, hPlane = 0, walls = 0, fine = 0;
     probes.forEach((v, i) => {
       const T = vertexCoarse(v);
+      if (!T && vertexRead4(v)) fine++;
       assert.equal(got[5 * i + 1], T ? 0 : 1, `owner at ${v}`);
       assert.equal(got[5 * i], vertexPhi(v), `phi at ${v} (coarse ${T})`);
       if (T && v.some((x, a) => x !== 4 * T[a]! && x !== 4 * T[a]! + 4)) hanging++; else if (T) corners++;
@@ -146,7 +151,7 @@ ${brickOwnerWGSL()}
         if (v[a] === 0 && got[5 * i + 2 + a] !== 0) walls++;
       }
     });
-    assert.ok(hanging > 0 && corners > 0 && hPlane > 0 && walls > 0, `hanging ${hanging}, corners ${corners}, interface faces ${hPlane}, wall faces ${walls}`);
+    assert.ok(hanging > 0 && corners > 0 && hPlane > 0 && walls > 0 && fine > 0, `hanging ${hanging}, corners ${corners}, interface faces ${hPlane}, wall faces ${walls}, fine corners ${fine}`);
     for (const b of [pb, out, rd]) b.destroy();
     e.destroy();
   });

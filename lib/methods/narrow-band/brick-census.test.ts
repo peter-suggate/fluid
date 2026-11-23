@@ -108,7 +108,12 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   const fSlot = (b: V3) => { if (b.some(v => v < 0)) return undefined; const cs = s.pages.get(pageKey(shr(b, 2))); if (cs === undefined) return undefined; const fs = s.bricks.get(key(b)); return fs; };
   const fVertex = (v: V3) => { const fs = fSlot(shr(v, 3)); return fs === undefined ? FAR : s.fPhi(fs)[local8(v)]!; };
   const cVertex = (T: V3) => { if (T.some((x, a) => x < 0 || 4 * x > N[a]!)) return FAR; const cs = anySlot(shr(T, 3)); return cs === undefined ? FAR : s.cPhi(cs)[tileIndex(T)]!; };
+  // brick-owner's nbVertexCoarse: a tile corner an h tile touches is F's where an F slot stores it (lcMirror keeps
+  // its C word F's copy); elsewhere nbVertexRead4, coarse wins.
+  const fineCorner = (v: V3) => v.every(x => x % 4 === 0) && fSlot(shr(v, 3)) !== undefined
+    && Array.from({ length: 8 }, (_, k) => v.map((x, a) => (x >> 2) - ((k >> a) & 1)) as V3).some(tileH);
   const vertexCoarse = (v: V3): V3 | undefined => {
+    if (fineCorner(v)) return undefined;
     const tA = shr(v, 2), inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
     for (let k = 0; k < 8; k++) {
       const c = [k & 1, (k >> 1) & 1, k >> 2];
