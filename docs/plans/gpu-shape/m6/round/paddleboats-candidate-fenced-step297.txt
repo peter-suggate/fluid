@@ -1,0 +1,3 @@
+failed at step 297: Step 297 refused with no frame pending
+{"kind":"summary","name":"paddleboats-timing-fenced","method":"uniform-narrow-band-flip","scene":"paddleboats","mode":"fenced","steps":297,"requestedSteps":300,"failure":"Step 297 refused with no frame pending","construction":{"construction_ms":6066.473042,"compileIdle_ms":6066.545459,"allocatedBytes":1730294528,"peakBytes":1730294528},"peakGPUBytes":1730297976,"step_ms":{"n":266,"median":34.87047…
+fluid-gpu-run: GPU memory in use 0.42 GB at start, peak 2.83 GB; 1 process(es) in the tree

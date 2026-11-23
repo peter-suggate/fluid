@@ -1,0 +1,8 @@
+seep fenced base
+seep pipelined candidate
+dam fenced candidate
+dam pipelined base
+letters fenced base
+letters pipelined candidate
+paddleboats fenced candidate
+paddleboats pipelined base

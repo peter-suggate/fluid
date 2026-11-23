@@ -1,0 +1,23 @@
+letters step 100: 283 placements, 2 with the candidate's text (pDeposit, uTransfer); base /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/sab-base-8a50eb74, candidate /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/sab-cand-pdeposit2
+fail/info words at the frozen state: 0x0/0x0
+exact #84 pDeposit z0: ok: set identical, parts identical, fdep identical
+exact #85 uTransfer z0: ok: set identical, vel identical, phi identical, fcell identical, fdep identical
+exactness: 2 of 2 changed placements identical
+base: Σ placements min 42.481 ms, median 42.681; Σ of family minima 42.070 ms; GPU wall min 42.085 ms, median 42.192; clock probe 76.0 76.0 76.3 76.2 76.2 76.1 76.1 76.1 76.2 us (top 75.5)
+candidate: Σ placements min 42.343 ms, median 42.511; Σ of family minima 41.818 ms; GPU wall min 41.797 ms, median 42.141; clock probe 76.0 76.6 76.1 76.2 76.1 76.2 76.1 76.5 76.5 us (top 75.5)
+base again: Σ placements min 42.447 ms, median 42.581; Σ of family minima 41.904 ms; GPU wall min 42.164 ms, median 42.235; clock probe 76.1 76.5 76.1 76.1 76.5 76.2 76.0 76.1 76.0 us (top 75.5)
+families (min of samples; A/A = base again - base), the changed ones and the 8 largest other |Δ|:
+  * pDeposit               1.203 -> 1.077 ms  -0.127 (-10.5%)  A/A -0.017
+  * uTransfer              2.217 -> 2.208 ms  -0.009 (-0.4%)  A/A -0.002
+    pSeed                  2.118 -> 2.074 ms  -0.044 (-2.1%)  A/A -0.039
+    lcRetire               1.425 -> 1.392 ms  -0.033 (-2.3%)  A/A -0.020
+    censusDecide           1.850 -> 1.868 ms  +0.018 (1.0%)  A/A -0.024
+    lcAdvect               0.623 -> 0.608 ms  -0.016 (-2.5%)  A/A -0.004
+    uExt4                  0.438 -> 0.426 ms  -0.012 (-2.8%)  A/A -0.011
+    uExtend                1.761 -> 1.751 ms  -0.010 (-0.6%)  A/A -0.012
+    uExt4Seed              0.368 -> 0.377 ms  +0.010 (2.6%)  A/A +0.001
+    projectDry             0.354 -> 0.345 ms  -0.008 (-2.3%)  A/A -0.007
+GATE letters: changed families Σ Δ -0.135 ms (-0.32% of the step's 42.070 ms Σ), their A/A -0.018 ms; unchanged families Σ Δ -0.117 ms, A/A -0.147 ms; Σ placements min -0.138 ms (A/A -0.033); GPU wall min -0.288 ms (-0.68%; A/A +0.079)
+ok
+fluid-gpu-run: GPU memory in use 0.30 GB at start, peak 5.51 GB; 2 process(es) in the tree
+rc 0

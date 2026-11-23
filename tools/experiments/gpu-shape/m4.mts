@@ -15,6 +15,9 @@
 //         interleaved with base, the clock probe after each round.
 //  clock  per-workgroup start / end on a GPU tick counter (cpages.mts's clock): duration p50 / p90 / max, in flight.
 //  step   the whole step (both parts) with the named variants swapped in, walls interleaved with base.
+// AUDIT=<us> (M6, the residency audit): every indirect placement is a base target; MODE=time,clock times them all and
+//  clocks those whose min is over <us>; each audited kernel's lowered module goes to <out>/wgsl/<label>.base.wgsl
+//  (for regcap.sh), the clock line adds avg (sum of group durations / span) and peak (sweep) groups in flight.
 import { resolve, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -60,7 +63,7 @@ function atEntryStart(code: string, entry: string, text: string, decl = ""): str
 }
 
 // ---- the clock ----
-const CLK_HEAD = 8, CLK_REC = 4, CLK_MAX_GROUPS = 1 << 16, CLK_MAX_TICKS = 1 << 26;
+const CLK_HEAD = 8, CLK_REC = 4, CLK_MAX_GROUPS = 1 << 16, CLK_MAX_TICKS = 1 << 16; // ticks: 1-5 a us, so the ticker gives up after 13-53 ms (a group queued behind the ticker on its core deadlocks it: operator on paddleboats)
 // Diagnostic variants (name ending in "diag"): 4 words a lane (64-lane kernels) after the group records.
 const CLK_LANE_BASE = CLK_HEAD + CLK_REC * CLK_MAX_GROUPS, CLK_LANE_GROUPS = 8192, CLK_LANE_WORDS = 4;
 // header: 0 the clock, 1 groups completed, 2 payload groups (the args kernel), 3 ticker state (1 capped, 2 done), 4 tickets
@@ -317,6 +320,60 @@ const CE_PACK: [string, string][] = [
   ["  for(var k=lane;k<160u;k+=64u){\n    let c=(k%4u)+4u*(3u+((k/4u)%4u)+10u*(k/16u));var f=0u;\n    if((sX[c]&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(sX[u32(i32(c)+4*d)],d);}}\n    sY[k]=f;\n  }", "  for(var m=lane;m<40u;m+=64u){var word=0u;for(var b=0u;b<4u;b++){let k=4u*m+b;\n    let c=(k%4u)+4u*(3u+((k/4u)%4u)+10u*(k/16u));var f=0u;\n    if((ceX(c)&4u)!=0u){f=4u;for(var d=-3;d<=3;d++){f|=ceDilate(ceX(u32(i32(c)+4*d)),d);}}\n    word|=f<<(8u*b);}\n    sY[m]=word;\n  }"],
   ["support|=ceDilate(sY[u32(i32(c)+16*d)],d);", "support|=ceDilate(ceY(u32(i32(c)+16*d)),d);"]
 ];
+// ---- M6 (the residency audit's wgmem-bound passes) ----
+const all1 = (s: string, from: string, to: string, what: string) => { if (!s.includes(from)) throw new Error(`${what}: "${from.slice(0, 80)}" absent`); return s.split(from).join(to); };
+/** pDeposit 27.5 -> ~9.9 KB: three workgroups a brick, one a face axis (its 11 x 10 x 10 window, momentum then
+ * weight in one 2200-word array; the 11^3 vertex ring fits in it), each reads the brick's records, only axis 0
+ * restates them. The fdep sums are integer atomics, so the order is free. */
+const PD_AXIS3: [string, string][] = [
+  ["var<workgroup> wMom:array<atomic<u32>,3300>;\nvar<workgroup> wWeight:array<atomic<u32>,3300>;", "var<workgroup> wMom:array<atomic<u32>,2200>;\nvar<private> pdAxis:u32;"],
+  [" return a*PD_WINDOW+u32((r.z*d.y+r.y)*d.x+r.x);", " return u32((r.z*d.y+r.y)*d.x+r.x);"],
+  ["fn pdFace(s:u32)->vec3i{let a=s/PD_WINDOW;let r=i32(s%PD_WINDOW);", "fn pdFace(s:u32)->vec3i{let a=pdAxis;let r=i32(s);"],
+  ["atomicAdd(&wMom[s],bitcast<u32>(momentum));atomicAdd(&wWeight[s],weight);", "atomicAdd(&wMom[s],bitcast<u32>(momentum));atomicAdd(&wMom[1100u+s],weight);"],
+  ["let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);", "let g=nbGroup(wid)/3u;pdAxis=nbGroup(wid)%3u;let live=g<nbListCount(NB_LIST_F_ALL);"],
+  ["for(var j=lid;j<3300u;j+=256u){atomicStore(&wMom[j],0u);atomicStore(&wWeight[j],0u);}", "for(var j=lid;j<2200u;j+=256u){atomicStore(&wMom[j],0u);}"],
+  ["  parts[i].before.w=nbParticleRestate(s,nbParticleAge(s),select(1.0,0.0,supported));", "  if(pdAxis==0u){parts[i].before.w=nbParticleRestate(s,nbParticleAge(s),select(1.0,0.0,supported));}"],
+  ["for(var j=lid;j<3300u;j+=256u){\n  let w=atomicLoad(&wWeight[j]);", "for(var j=lid;j<1100u;j+=256u){\n  let w=atomicLoad(&wMom[1100u+j]);"],
+  ["let f=pdFace(j);let a=j/PD_WINDOW;let fs=fgSlot(f);", "let f=pdFace(j);let a=pdAxis;let fs=fgSlot(f);"],
+];
+const pdAxis3 = (c0: string) => {
+  const c = PD_AXIS3.reduce((c, [a, b]) => sub1(c, a, b, `pd axis3 ${a.slice(0, 30)}`), c0);
+  const d = all1(c, "for(var axis=0u;axis<3u;axis++){\n  let base=nbfP2GBase(p,axis);", "for(var axis=pdAxis;axis<=pdAxis;axis++){\n  let base=nbfP2GBase(p,axis);", "pd axis3 scatter");
+  if (d.includes("wWeight")) throw new Error("pd axis3: wWeight left");
+  return d;
+};
+/** pDeposit with two face axes resident at a time (4400 words, 17.6 KB + the window: 3 a core): "axis2" two
+ * workgroups a brick (axes 0-1, axis 2), "seq2" one workgroup a brick, the records read twice (axes 0-1, then 2). */
+const PD_TWO = (split: boolean): [string, string][] => [
+  ["var<workgroup> wMom:array<atomic<u32>,3300>;\nvar<workgroup> wWeight:array<atomic<u32>,3300>;", "var<workgroup> wMom:array<atomic<u32>,4400>;\nvar<private> pdA0:u32;var<private> pdA1:u32;"],
+  [" return a*PD_WINDOW+u32((r.z*d.y+r.y)*d.x+r.x);", " return (a-pdA0)*PD_WINDOW+u32((r.z*d.y+r.y)*d.x+r.x);"],
+  ["fn pdFace(s:u32)->vec3i{let a=s/PD_WINDOW;", "fn pdFace(s:u32)->vec3i{let a=pdA0+s/PD_WINDOW;"],
+  ["atomicAdd(&wMom[s],bitcast<u32>(momentum));atomicAdd(&wWeight[s],weight);", "atomicAdd(&wMom[s],bitcast<u32>(momentum));atomicAdd(&wMom[2200u+s],weight);"],
+  ...(split ? [["let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);", "let g=nbGroup(wid)/2u;pdA0=2u*(nbGroup(wid)%2u);pdA1=select(2u,3u,pdA0==2u);let live=g<nbListCount(NB_LIST_F_ALL);"],
+    ["for(var j=lid;j<3300u;j+=256u){atomicStore(&wMom[j],0u);atomicStore(&wWeight[j],0u);}", "for(var j=lid;j<4400u;j+=256u){atomicStore(&wMom[j],0u);}"]] as [string, string][]
+    : [["for(var j=lid;j<3300u;j+=256u){atomicStore(&wMom[j],0u);atomicStore(&wWeight[j],0u);}", "for(var pdRound=0u;pdRound<2u;pdRound++){pdA0=2u*pdRound;pdA1=select(2u,3u,pdRound==1u);\n for(var j=lid;j<4400u;j+=256u){atomicStore(&wMom[j],0u);}"],
+      ["  atomicAdd(&fdep[at],atomicLoad(&wMom[j]));atomicAdd(&fdep[at+1u],w);\n }\n}", "  atomicAdd(&fdep[at],atomicLoad(&wMom[j]));atomicAdd(&fdep[at+1u],w);\n }\n workgroupBarrier();}\n}"]] as [string, string][]),
+  ["  parts[i].before.w=nbParticleRestate(s,nbParticleAge(s),select(1.0,0.0,supported));", "  if(pdA0==0u){parts[i].before.w=nbParticleRestate(s,nbParticleAge(s),select(1.0,0.0,supported));}"],
+  ["for(var j=lid;j<3300u;j+=256u){\n  let w=atomicLoad(&wWeight[j]);", "for(var j=lid;j<1100u*(pdA1-pdA0);j+=256u){\n  let w=atomicLoad(&wMom[2200u+j]);"],
+  ["let f=pdFace(j);let a=j/PD_WINDOW;let fs=fgSlot(f);", "let f=pdFace(j);let a=pdA0+j/PD_WINDOW;let fs=fgSlot(f);"],
+];
+const pdTwo = (split: boolean) => (c0: string) => {
+  const c = PD_TWO(split).reduce((c, [a, b]) => sub1(c, a, b, `pd two ${a.slice(0, 30)}`), c0);
+  const d = all1(c, "for(var axis=0u;axis<3u;axis++){\n  let base=nbfP2GBase(p,axis);", "for(var axis=pdA0;axis<pdA1;axis++){\n  let base=nbfP2GBase(p,axis);", "pd two scatter");
+  if (d.includes("wWeight")) throw new Error("pd two: wWeight left");
+  return d;
+};
+/** The vec3f workgroup arrays (16-byte stride) as planes of f32: pmgSetupF 25.1 -> 20.5 KB, pmgCoarsenC 18.2 -> 15.6. */
+const planes = (decls: [string, number][]) => (c0: string) => {
+  let c = c0;
+  for (const [n, len] of decls) {
+    c = sub1(c, `var<workgroup> ${n}:array<vec3f,${len}>;`, `var<workgroup> ${n}:array<f32,${3 * len}>;`, `planes ${n}`);
+    c = c.replace(new RegExp(`\\b${n}\\[([^\\]]+)\\]\\[a\\]`, "g"), (_, i) => `${n}[${len}u*a+${i}]`);
+    c = c.replace(new RegExp(`\\b${n}\\[([^\\]]+)\\]=([A-Za-z0-9_]+);`, "g"), (_, i, v) => `${n}[${i}]=${v}.x;${n}[${len}u+${i}]=${v}.y;${n}[${2 * len}u+${i}]=${v}.z;`);
+    if (new RegExp(`\\b${n}\\[[^\\]]+\\](?!=)(?!\\[)`).test(c.replace(new RegExp(`\\b${n}\\[\\d+u\\*a\\+[^\\]]+\\]|\\b${n}\\[(\\d+u\\+)?[^\\]]+\\]=[^;]+;`, "g"), ""))) throw new Error(`planes ${n}: a use left`);
+  }
+  return c;
+};
 const cePack = (c0: string) => CE_PACK.reduce((c, [a, b]) => sub1(c, a, b, `ce pack ${a.slice(0, 30)}`), c0);
 const VARIANTS: Variant[] = [
   { label: "censusDecide", name: "count", k: 1, make: cdCount },
@@ -341,6 +398,12 @@ const VARIANTS: Variant[] = [
   { label: "censusCoarse", name: "noerr", k: 1, make: ccDrop("for(var j=lane;j<8u*errors;j+=64u){", "for(var j=lane;j<0u*errors;j+=64u){") },
   { label: "censusCoarse", name: "nodepth", k: 1, make: ccDrop("for(var j=lane;j<vertices;j+=64u){", "for(var j=lane;j<0u*vertices;j+=64u){") },
   { label: "censusCoarse", name: "noparts", k: 1, make: ccDrop("for(var j=lane;j<16u*parts;j+=64u){", "for(var j=lane;j<0u*parts;j+=64u){") },
+  { label: "pDeposit", name: "id", k: 1, make: c => c },
+  { label: "pDeposit", name: "axis3", k: 3, make: pdAxis3 },
+  { label: "pDeposit", name: "axis2", k: 2, make: pdTwo(true) },
+  { label: "pDeposit", name: "seq2", k: 1, make: pdTwo(false) },
+  { label: "pmgSetupF", name: "planes", k: 1, make: planes([["wK", 512], ["wKU", 512], ["w1K", 64], ["w1KU", 64]]) },
+  { label: "pmgCoarsenC", name: "planes", k: 1, make: planes([["w2K", 512], ["w3K", 64], ["w4K", 8]]) },
   { label: "lcAdvect", name: "id", k: 1, make: c => c },
   { label: "censusCoarse", name: "id", k: 1, make: c => c },
   { label: "uExt4", name: "id", k: 1, make: c => c },
@@ -528,7 +591,14 @@ async function main() {
       targets.push({ i, key: `${k0.label}.ref`, name: "ref", code: () => text, a: w => argsRec(d.indirect, d.indirect, 0, w) });
     }
   }
-  const placements = [...new Set(targets.map(t => t.i))].sort((a, b) => a - b);
+  const audit = process.env.AUDIT !== undefined ? Number(process.env.AUDIT) : undefined;
+  const auditSet = new Set<number>();
+  if (audit !== undefined) for (let i = 0; i < sch.length; i++) {
+    const k = sch[i].kernel; if (!("indirect" in sch[i].dispatch)) continue;
+    auditSet.add(i); const f = resolve(out, "wgsl", `${k.label}.base.wgsl`);
+    if (!existsSync(f)) writeFileSync(f, brickModuleCode(k.label, k.code, lower));
+  }
+  const placements = [...new Set([...targets.map(t => t.i), ...auditSet])].sort((a, b) => a - b);
   log(`targets: ${targets.map(t => `${t.i}:${t.key}`).join(" ")}`);
   const variants = new Map<string, { rec: any; pre: any[] }>();
   const V = async (t: Target, clockOn = false) => {
@@ -613,7 +683,15 @@ async function main() {
     const ct: Target[] = [];
     for (const i of placements) { const k = sch[i].kernel; ct.push({ i, key: `${k.label}.base`, name: "base", code: () => k.code, a: w => argsRec(sch[i].dispatch.indirect, 0, 0, w) }, ...targets.filter(t => t.i === i)); }
     for (const tg of ct) {
-      const v = await V(tg, true), e = result.placements[tg.i], runs: any[] = [];
+      const e = result.placements[tg.i], runs: any[] = [];
+      if (audit !== undefined && tg.name === "base" && auditSet.has(tg.i) && !targets.some(t => t.i === tg.i) && !((e.us?.base?.min ?? Infinity) > audit)) continue;
+      let v: { rec: any; pre: any[] };
+      try {
+        raw.pushErrorScope("validation"); let got: any, bad: unknown;
+        try { got = await V(tg, true); } catch (x) { bad = x; }
+        const err = await raw.popErrorScope(); if (bad) throw bad; if (err) throw new Error(err.message); v = got;
+      }
+      catch (x) { log(`  clock ${String(tg.i).padStart(3)} ${e.label.padEnd(14)} ${tg.name.padEnd(8)} skipped: ${String((x as Error).message).split("\n")[0]}`); e.clockSkipped = String(x); continue; }
       for (let r = 0; r < CR; r++) {
         const { us, w } = await sample(tg.i, v.rec, v.pre, true); fail(`clocking ${e.label}`);
         const n = w![2]!, ticks = w![0]!, state = w![3]!, done = w![1]!, recs: { s: number; e: number }[] = [];
@@ -623,7 +701,10 @@ async function main() {
         const d = recs.map(x => T(x.e - x.s)).sort((p, q) => p - q), ends = recs.map(x => T(x.e - start)).sort((p, q) => p - q);
         const q = (a: number[], f: number) => a[Math.min(a.length - 1, Math.floor(f * (a.length - 1)))]!;
         const bins = 16, inflight = Array.from({ length: bins }, (_, b) => { const tb = start + (b + 0.5) * (end - start) / bins; return recs.filter(x => x.s <= tb && x.e > tb).length; });
-        runs.push({ passUs: us, rate, state, done, n, spanUs: T(end - start), dur: { p50: q(d, 0.5), p90: q(d, 0.9), max: d[d.length - 1]!, sum: d.reduce((p, x) => p + x, 0) }, end95Us: q(ends, 0.95), tailUs: T(end - start) - q(ends, 0.95), inflight });
+        const ev = recs.flatMap(x => [[x.s, 1], [x.e, -1]] as [number, number][]).sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+        let cur = 0, peak = 0; for (const [, dlt] of ev) { cur += dlt; peak = Math.max(peak, cur); }
+        const avg = d.reduce((p, x) => p + x, 0) / Math.max(1e-9, T(end - start));
+        runs.push({ passUs: us, rate, state, done, n, spanUs: T(end - start), avgInflight: avg, peakInflight: peak, dur: { p50: q(d, 0.5), p90: q(d, 0.9), max: d[d.length - 1]!, sum: d.reduce((p, x) => p + x, 0) }, end95Us: q(ends, 0.95), tailUs: T(end - start) - q(ends, 0.95), inflight });
         if (r === 0 && isDiag(tg)) {
           const lanes: { g: number; l: number; d: number; a: number; b: number; c: number }[] = [];
           for (let g = 0; g < Math.min(n, CLK_LANE_GROUPS); g++) for (let l = 0; l < 64; l++) { const o = CLK_LANE_BASE + CLK_LANE_WORDS * (g * 64 + l); lanes.push({ g, l, d: T(w![o]!), a: w![o + 1]!, b: w![o + 2]!, c: w![o + 3]! }); }
@@ -640,7 +721,7 @@ async function main() {
       const best = runs.reduce((p, x) => (x.passUs < p.passUs ? x : p));
       (e.clock ??= {})[tg.name] = { runs };
       const f = (x: number) => x.toFixed(1);
-      log(`  clock ${String(tg.i).padStart(3)} ${e.label.padEnd(14)} ${tg.name.padEnd(8)} pass ${f(best.passUs)} us state ${best.state} ${best.done}/${best.n}; dur p50 ${f(best.dur.p50)} p90 ${f(best.dur.p90)} max ${f(best.dur.max)}; span ${f(best.spanUs)}, 95% ended ${f(best.end95Us)}, tail ${f(best.tailUs)} us; in flight ${best.inflight.join(" ")}`);
+      log(`  clock ${String(tg.i).padStart(3)} ${e.label.padEnd(14)} ${tg.name.padEnd(8)} pass ${f(best.passUs)} us state ${best.state} ${best.done}/${best.n}; dur p50 ${f(best.dur.p50)} p90 ${f(best.dur.p90)} max ${f(best.dur.max)}; span ${f(best.spanUs)}, 95% ended ${f(best.end95Us)}, tail ${f(best.tailUs)} us; avg ${f(best.avgInflight)} peak ${best.peakInflight}; in flight ${best.inflight.join(" ")}`);
       save();
     }
     log(`clock: probe ${(await clock()).toFixed(1)} us`);

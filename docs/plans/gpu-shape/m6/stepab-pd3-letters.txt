@@ -1,0 +1,21 @@
+letters step 100: 283 placements, 1 with the candidate's text (pDeposit); base /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/sab-base-57d75b95, candidate /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/sab-cand-pdeposit3
+fail/info words at the frozen state: 0x0/0x0
+exact #84 pDeposit z0: ok: set identical, parts identical, fdep identical
+exactness: 1 of 1 changed placements identical
+base: Σ placements min 42.145 ms, median 42.328; Σ of family minima 41.666 ms; GPU wall min 41.612 ms, median 41.800; clock probe 76.1 76.0 76.1 76.1 76.3 76.2 76.2 76.2 76.1 us (top 75.5)
+candidate: Σ placements min 42.131 ms, median 42.446; Σ of family minima 41.712 ms; GPU wall min 41.683 ms, median 42.002; clock probe 76.1 76.1 76.2 76.1 76.1 76.1 76.2 76.2 76.5 us (top 75.5)
+base again: Σ placements min 42.161 ms, median 42.356; Σ of family minima 41.602 ms; GPU wall min 41.766 ms, median 41.980; clock probe 76.0 76.2 76.0 76.2 76.7 76.1 76.2 76.2 76.2 us (top 75.5)
+families (min of samples; A/A = base again - base), the changed ones and the 8 largest other |Δ|:
+  * pDeposit               1.090 -> 1.067 ms  -0.023 (-2.1%)  A/A +0.003
+    uAdvect                1.305 -> 1.282 ms  -0.023 (-1.7%)  A/A -0.016
+    uExt4                  0.401 -> 0.422 ms  +0.021 (5.3%)  A/A +0.000
+    lSplat                 0.515 -> 0.535 ms  +0.020 (4.0%)  A/A +0.010
+    uExtend                1.747 -> 1.764 ms  +0.017 (0.9%)  A/A +0.015
+    censusDecide           1.895 -> 1.880 ms  -0.015 (-0.8%)  A/A -0.065
+    pressureRowsC          0.442 -> 0.454 ms  +0.012 (2.7%)  A/A +0.001
+    projectDry             0.341 -> 0.353 ms  +0.011 (3.3%)  A/A -0.001
+    pSeed                  2.133 -> 2.144 ms  +0.011 (0.5%)  A/A -0.016
+GATE letters: changed families Σ Δ -0.023 ms (-0.06% of the step's 41.666 ms Σ), their A/A +0.003 ms; unchanged families Σ Δ +0.069 ms, A/A -0.067 ms; Σ placements min -0.014 ms (A/A +0.016); GPU wall min +0.071 ms (+0.17%; A/A +0.154)
+ok
+fluid-gpu-run: GPU memory in use 0.30 GB at start, peak 5.50 GB; 2 process(es) in the tree
+rc 0

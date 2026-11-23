@@ -1,0 +1,37 @@
+base paddleboats fenced start 11:36:54 (quiet after 5s)
+base paddleboats fenced rc=0 end 11:37:14
+  fluid-gpu-run: GPU memory in use 0.38 GB at start, peak 3.97 GB; 1 process(es) in the tree
+candidate paddleboats fenced start 11:37:19 (quiet after 5s)
+candidate paddleboats fenced rc=0 end 11:37:41
+  fluid-gpu-run: GPU memory in use 0.42 GB at start, peak 3.53 GB; 1 process(es) in the tree
+candidate paddleboats pipelined start 11:37:46 (quiet after 5s)
+candidate paddleboats pipelined rc=0 end 11:38:07
+  fluid-gpu-run: GPU memory in use 0.30 GB at start, peak 4.06 GB; 2 process(es) in the tree
+base paddleboats pipelined start 11:38:12 (quiet after 5s)
+base paddleboats pipelined rc=0 end 11:38:33
+  fluid-gpu-run: GPU memory in use 0.31 GB at start, peak 3.30 GB; 1 process(es) in the tree
+Metal aborts / GPU restarts in the round's window: 0 (OUT/metal.log)
+round end 2026-11-24 11:38:34
+# NB-FLIP port timing round
+
+Generated 2026-11-23T22:38:34.223Z by tools/nbflip-gates.ts --timing-only. Baseline /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/round-pb2/base; candidate /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/round-pb2/candidate.
+
+## paddleboats (300 steps)
+
+| step time (timing slot) | baseline | candidate | change ms | change |
+|---|---|---|---|---|
+| fenced median ms | 37.09 | 35.56 | -1.53 | -4.1% |
+| fenced p95 ms | 38.83 | 37.87 | -0.96 | -2.5% |
+| fenced mean ms | 36.98 | 35.68 | -1.30 | -3.5% |
+| pipelined ms/step | 35.23 | 33.64 | -1.59 | -4.5% |
+| paired: fenced median (base first) | 37.09 | 35.56 | -1.53 | -4.1% |
+| paired: pipelined (candidate first) | 35.23 | 33.64 | -1.59 | -4.5% |
+| **order-balanced change** (mean of the two pairs) | | | | **-4.3%** |
+| fenced thirds ms (first) | 36.24 | 35.55 | -0.69 | -1.9% |
+| fenced thirds ms (middle) | 37.42 | 35.84 | -1.57 | -4.2% |
+| fenced thirds ms (last) | 37.26 | 35.64 | -1.62 | -4.3% |
+| construction ms (fenced run) | 6143.15 | 7422.18 | 1279.03 | 20.8% |
+| peak GPU MB requested | 1650.14 | 1650.14 | 0.00 | 0.0% |
+
+Timing runs: baseline paddleboats-timing-fenced, paddleboats-timing-pipelined; candidate paddleboats-timing-fenced, paddleboats-timing-pipelined.
+

@@ -1,0 +1,21 @@
+dam step 100: 283 placements, 1 with the candidate's text (pDeposit); base /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/sab-base-57d75b95, candidate /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/sab-cand-pdeposit3
+fail/info words at the frozen state: 0x0/0x0
+exact #84 pDeposit z0: ok: set identical, parts identical, fdep identical
+exactness: 1 of 1 changed placements identical
+base: Σ placements min 29.324 ms, median 29.601; Σ of family minima 28.994 ms; GPU wall min 28.775 ms, median 29.095; clock probe 76.1 76.2 76.2 76.5 76.6 76.1 76.2 76.2 76.2 us (top 75.5)
+candidate: Σ placements min 29.380 ms, median 29.498; Σ of family minima 29.060 ms; GPU wall min 28.895 ms, median 29.205; clock probe 76.1 76.3 76.2 76.1 76.2 76.2 76.2 76.3 76.1 us (top 75.5)
+base again: Σ placements min 29.288 ms, median 29.486; Σ of family minima 29.007 ms; GPU wall min 28.881 ms, median 29.038; clock probe 76.2 76.2 76.7 76.4 76.2 76.2 76.1 76.2 76.4 us (top 75.5)
+families (min of samples; A/A = base again - base), the changed ones and the 8 largest other |Δ|:
+  * pDeposit               0.652 -> 0.660 ms  +0.008 (1.2%)  A/A +0.010
+    censusDecide           0.939 -> 0.880 ms  -0.059 (-6.3%)  A/A -0.035
+    uAdvect                1.206 -> 1.260 ms  +0.054 (4.5%)  A/A +0.050
+    lAdvect                1.750 -> 1.773 ms  +0.023 (1.3%)  A/A -0.003
+    uExtend                1.208 -> 1.222 ms  +0.013 (1.1%)  A/A -0.007
+    pressureRowsC          0.281 -> 0.292 ms  +0.011 (3.8%)  A/A +0.014
+    pSeed                  1.017 -> 1.025 ms  +0.008 (0.8%)  A/A +0.010
+    pmgSetupF              0.197 -> 0.204 ms  +0.007 (3.4%)  A/A +0.000
+    lSplat                 0.342 -> 0.347 ms  +0.005 (1.5%)  A/A -0.001
+GATE dam: changed families Σ Δ +0.008 ms (+0.03% of the step's 28.994 ms Σ), their A/A +0.010 ms; unchanged families Σ Δ +0.058 ms, A/A +0.004 ms; Σ placements min +0.056 ms (A/A -0.037); GPU wall min +0.121 ms (+0.42%; A/A +0.107)
+ok
+fluid-gpu-run: GPU memory in use 0.42 GB at start, peak 4.31 GB; 2 process(es) in the tree
+rc 0

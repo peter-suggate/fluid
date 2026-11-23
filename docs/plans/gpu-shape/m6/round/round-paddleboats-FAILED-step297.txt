@@ -1,0 +1,34 @@
+base paddleboats fenced start 11:34:29 (quiet after 5s)
+base paddleboats fenced rc=0 end 11:34:49
+  fluid-gpu-run: GPU memory in use 0.42 GB at start, peak 3.18 GB; 2 process(es) in the tree
+candidate paddleboats fenced start 11:34:55 (quiet after 5s)
+candidate paddleboats fenced rc=1 end 11:35:14
+  fluid-gpu-run: GPU memory in use 0.42 GB at start, peak 2.83 GB; 1 process(es) in the tree
+candidate paddleboats pipelined start 11:35:19 (quiet after 5s)
+candidate paddleboats pipelined rc=0 end 11:35:38
+  fluid-gpu-run: GPU memory in use 0.69 GB at start, peak 3.72 GB; 1 process(es) in the tree
+base paddleboats pipelined start 11:35:44 (quiet after 5s)
+base paddleboats pipelined rc=0 end 11:36:03
+  fluid-gpu-run: GPU memory in use 0.42 GB at start, peak 3.71 GB; 1 process(es) in the tree
+Metal aborts / GPU restarts in the round's window: 0 (OUT/metal.log)
+round end 2026-11-24 11:36:04
+# NB-FLIP port timing round
+
+Generated 2026-11-23T22:36:04.837Z by tools/nbflip-gates.ts --timing-only. Baseline /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/round-pb/base; candidate /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/round-pb/candidate.
+
+## paddleboats (300 steps)
+
+| step time (timing slot) | baseline | candidate | change ms | change |
+|---|---|---|---|---|
+| fenced median ms | 36.95 | - | - | - |
+| fenced p95 ms | 38.68 | - | - | - |
+| fenced mean ms | 36.88 | - | - | - |
+| pipelined ms/step | 35.38 | 32.90 | -2.48 | -7.0% |
+| fenced thirds ms (first) | 36.20 | - | - | - |
+| fenced thirds ms (middle) | 36.99 | - | - | - |
+| fenced thirds ms (last) | 37.43 | - | - | - |
+| construction ms (fenced run) | 6146.34 | - | - | - |
+| peak GPU MB requested | 1650.14 | - | - | - |
+
+Timing runs: baseline paddleboats-timing-fenced, paddleboats-timing-pipelined; candidate -, paddleboats-timing-pipelined.
+

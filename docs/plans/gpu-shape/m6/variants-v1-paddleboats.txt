@@ -1,0 +1,22 @@
+m4 scene paddleboats (paddleboats) HEAD 8a50eb74 warm-up 100, R 7, CR 3, modes exact,time,clock, out /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/v1-paddleboats
+warm-up 25 30.6 ms/step
+warm-up 50 30.7 ms/step
+warm-up 75 31.1 ms/step
+warm-up 100 31.3 ms/step
+targets: 88:pDeposit.axis3 102:pmgSetupF.planes 103:pmgCoarsenC.planes
+  exact 88 pDeposit (set,parts,fdep): base 0, axis3 0 words differ
+  exact 102 pmgSetupF (set,pres,pmgF,pmgC,pmgTop,pmgB): base 0, planes 0 words differ
+  exact 103 pmgCoarsenC (set,pres,pmgC): base 0, planes 0 words differ
+  time  88 pDeposit       base 485.2 med 536.1  axis3 521.4 (36.2) med 536.4 us
+  time 102 pmgSetupF      base 317.9 med 321.5  planes 298.6 (-19.3) med 310.2 us
+  time 103 pmgCoarsenC    base 87.9 med 90.7  planes 92.7 (4.8) med 94.8 us
+time: clock probe 75.9 76.4 76.0 76.5 76.0 76.2 76.1
+  clock  88 pDeposit       base     pass 521.6 us state 2 1686/1686; dur p50 1.1 p90 45.5 max 125.6; span 504.8, 95% ended 354.7, tail 150.1 us; avg 40.3 peak 63; in flight 41 56 55 51 47 50 51 57 57 55 44 30 20 12 6 4
+  clock  88 pDeposit       axis3    pass 596.9 us state 2 5058/5058; dur p50 1.0 p90 29.3 max 84.5; span 565.0, 95% ended 454.9, tail 110.1 us; avg 67.2 peak 95; in flight 93 75 63 81 69 87 77 65 59 87 81 76 79 49 16 3
+  clock 102 pmgSetupF      base     pass 378.6 us state 2 1472/1472; dur p50 17.1 p90 22.2 max 27.5; span 361.5, 95% ended 298.5, tail 63.0 us; avg 48.6 peak 63; in flight 57 32 60 57 48 60 60 61 58 57 58 60 56 36 7 1
+  clock 102 pmgSetupF      planes   pass 361.2 us state 2 1472/1472; dur p50 16.9 p90 23.5 max 28.7; span 355.6, 95% ended 298.9, tail 56.7 us; avg 50.5 peak 64; in flight 57 35 48 53 61 59 60 62 59 50 57 55 50 43 28 2
+  clock 103 pmgCoarsenC    base     pass 172.5 us state 2 274/274; dur p50 11.9 p90 23.4 max 33.7; span 114.5, 95% ended 75.5, tail 39.1 us; avg 36.6 peak 63; in flight 63 63 51 62 61 63 59 54 53 36 13 5 1 0 1 1
+  clock 103 pmgCoarsenC    planes   pass 175.3 us state 2 274/274; dur p50 16.7 p90 21.9 max 31.5; span 118.0, 95% ended 80.4, tail 37.7 us; avg 36.3 peak 63; in flight 63 63 47 62 62 61 57 58 48 45 21 4 1 1 1 1
+clock: probe 80.1 us
+fluid-gpu-run: GPU memory in use 0.37 GB at start, peak 5.99 GB; 1 process(es) in the tree
+rc 0

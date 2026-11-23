@@ -1,0 +1,367 @@
+m4 scene high-resolution-dam-break (dam) HEAD 0f97d8af warm-up 100, R 3, CR 3, modes time,clock, out /Users/petersuggate/code/me/fluid-scratch/gpu-shape/m6/a1-dam
+warm-up 25 26.7 ms/step
+warm-up 50 38.1 ms/step
+warm-up 75 38.4 ms/step
+warm-up 100 36.5 ms/step
+targets: 
+  time   1 regionHeat     base 21.9 med 22.9   us
+  time   2 regionSpread   base 22.5 med 22.5   us
+  time   3 regionStill    base 15.7 med 15.8   us
+  time   4 regionDeep     base 86.2 med 86.9   us
+  time   5 censusFine     base 907.4 med 910.6   us
+  time   6 censusCoarse   base 251.2 med 253.3   us
+  time   7 censusCubes    base 17.9 med 18.3   us
+  time   8 censusImportance base 89.6 med 92.2   us
+  time   9 censusDecide   base 967.1 med 1005.0   us
+  time  10 resMark        base 85.5 med 86.0   us
+  time  13 resMark        base 56.0 med 56.7   us
+  time  16 setLeave       base 10.4 med 10.8   us
+  time  17 setLeavePages  base 9.2 med 10.0   us
+  time  22 censusWant     base 14.2 med 14.3   us
+  time  23 setTransferList base 31.4 med 31.6   us
+  time  25 setTransferFaces base 236.9 med 239.5   us
+  time  26 setTransferCells base 125.7 med 130.6   us
+  time  27 setTransferCommit base 36.4 med 36.8   us
+  time  28 setCommitMask  base 12.0 med 12.3   us
+  time  29 certCoarse     base 142.3 med 144.7   us
+  time  30 certFine       base 269.8 med 270.6   us
+  time  31 certError      base 101.9 med 103.7   us
+  time  33 nrReach        base 110.7 med 113.5   us
+  time  34 nrSpread       base 22.0 med 22.5   us
+  time  35 nrSpread       base 22.1 med 22.4   us
+  time  36 nrSpread       base 22.3 med 22.6   us
+  time  37 lResolve       base 238.5 med 238.7   us
+  time  38 uCache         base 453.7 med 458.3   us
+  time  39 uCache4        base 57.7 med 57.9   us
+  time  40 pLiquid        base 148.4 med 153.0   us
+  time  41 pSeed          base 272.8 med 295.3   us
+  time  43 pSeparate      base 981.7 med 995.4   us
+  time  44 pMove          base 1047.0 med 1058.7   us
+  time  45 pScan          base 130.9 med 131.4   us
+  time  46 pScatter       base 85.5 med 90.5   us
+  time  47 pTiles         base 69.6 med 71.9   us
+  time  48 setMark        base 108.7 med 112.3   us
+  time  49 setMarkPages   base 25.0 med 25.4   us
+  time  53 nrWallReach    base 39.3 med 39.4   us
+  time  54 vGauge         base 257.8 med 265.3   us
+  time  55 lInit          base 78.9 med 79.0   us
+  time  56 lAdvect        base 1652.3 med 1725.8   us
+  time  57 lcAdvect       base 488.4 med 498.8   us
+  time  58 lSplat         base 320.9 med 329.6   us
+  time  59 lUnion         base 399.0 med 415.6   us
+  time  60 lcCouple       base 166.1 med 168.3   us
+  time  61 lResolve       base 239.4 med 239.5   us
+  time  62 lTiles         base 175.3 med 175.5   us
+  time  63 lDilateC       base 48.0 med 48.5   us
+  time  64 lDilate        base 31.7 med 32.8   us
+  time  65 lDilate        base 31.6 med 31.8   us
+  time  66 lDilate        base 27.4 med 30.2   us
+  time  67 lClear         base 258.8 med 264.0   us
+  time  68 lcClear        base 81.7 med 83.5   us
+  time  69 lResolveD      base 139.3 med 140.0   us
+  time  70 lDilateC       base 46.1 med 46.6   us
+  time  71 lDilate        base 34.2 med 34.2   us
+  time  72 lDilate        base 32.6 med 33.2   us
+  time  73 lDilate        base 44.2 med 44.7   us
+  time  74 lNear          base 123.7 med 125.0   us
+  time  75 lNear          base 139.7 med 140.3   us
+  time  76 lNear          base 180.3 med 184.9   us
+  time  77 lDistance      base 901.6 med 908.9   us
+  time  78 lcRetire       base 684.7 med 747.9   us
+  time  79 lPublish       base 181.9 med 182.3   us
+  time  80 lcPublish      base 23.4 med 23.8   us
+  time  81 lResolve       base 238.4 med 239.5   us
+  time  82 pSeed          base 785.5 med 788.8   us
+  time  83 uAdvect        base 1080.1 med 1105.6   us
+  time  84 pDeposit       base 691.9 med 719.2   us
+  time  85 uTransfer      base 1295.9 med 1302.3   us
+  time  86 pressureRowsList base 23.0 med 23.2   us
+  time  88 pressureRowsZero base 20.8 med 22.6   us
+  time  89 pressureTileRoots base 161.1 med 163.2   us
+  time  90 operator       base 1121.3 med 1141.2   us
+  time  91 pressureRowsC  base 362.1 med 362.7   us
+  time  93 pmgGuess       base 80.5 med 82.0   us
+  time  94 pmgWallsG      base 19.1 med 20.2   us
+  time  95 pmgSetupF      base 193.6 med 209.8   us
+  time  96 pmgCoarsenC    base 57.5 med 59.5   us
+  time  98 pmgPreS        base 68.4 med 69.8   us
+  time  99 pmgPreU        base 45.1 med 47.7   us
+  time 100 pmgNativePre0  base 27.2 med 29.8   us
+  time 101 pmgDown0       base 65.7 med 65.9   us
+  time 102 pmgNativePre1  base 31.8 med 31.9   us
+  time 103 pmgDown1       base 17.7 med 18.3   us
+  time 104 pmgDown1C      base 27.3 med 27.4   us
+  time 105 pmgDown2       base 20.1 med 20.3   us
+  time 106 pmgDown3       base 23.0 med 23.0   us
+  time 107 pmgTopCycle    base 56.3 med 56.5   us
+  time 108 pmgUp3         base 18.1 med 19.4   us
+  time 109 pmgUp2         base 19.8 med 20.3   us
+  time 110 pmgNativePost1 base 26.0 med 26.2   us
+  time 111 pmgUp1         base 21.3 med 21.4   us
+  time 112 pmgNativePost0 base 29.5 med 29.8   us
+  time 113 pmgPostU       base 48.7 med 48.9   us
+  time 114 pmgPostS       base 67.5 med 68.0   us
+  time 115 pmgPostZ       base 55.8 med 55.8   us
+  time 116 pmgDirection   base 102.5 med 102.7   us
+  time 117 pmgUpdate      base 122.2 med 123.3   us
+  time 119 pmgWallsF      base 27.5 med 28.3   us
+  time 120 pmgWallsC      base 15.2 med 15.5   us
+  time 122 pmgPreS        base 65.2 med 65.2   us
+  time 123 pmgPreU        base 43.2 med 43.2   us
+  time 124 pmgNativePre0  base 26.3 med 26.3   us
+  time 125 pmgDown0       base 64.7 med 65.0   us
+  time 126 pmgNativePre1  base 29.9 med 30.0   us
+  time 127 pmgDown1       base 17.2 med 17.5   us
+  time 128 pmgDown1C      base 26.4 med 26.5   us
+  time 129 pmgDown2       base 19.5 med 19.6   us
+  time 130 pmgDown3       base 22.0 med 22.4   us
+  time 131 pmgTopCycle    base 52.3 med 52.4   us
+  time 132 pmgUp3         base 18.4 med 18.5   us
+  time 133 pmgUp2         base 19.2 med 19.5   us
+  time 134 pmgNativePost1 base 25.6 med 26.0   us
+  time 135 pmgUp1         base 20.8 med 21.3   us
+  time 136 pmgNativePost0 base 29.1 med 29.1   us
+  time 137 pmgPostU       base 48.3 med 48.5   us
+  time 138 pmgPostS       base 65.7 med 66.1   us
+  time 139 pmgPostZ       base 55.2 med 55.8   us
+  time 140 pmgDirection   base 98.6 med 98.8   us
+  time 141 pmgUpdate      base 121.2 med 121.4   us
+  time 143 pmgPreS        base 64.7 med 65.0   us
+  time 144 pmgPreU        base 43.3 med 43.9   us
+  time 145 pmgNativePre0  base 26.7 med 27.0   us
+  time 146 pmgDown0       base 65.2 med 65.5   us
+  time 147 pmgNativePre1  base 29.8 med 30.1   us
+  time 148 pmgDown1       base 16.9 med 17.0   us
+  time 149 pmgDown1C      base 26.8 med 26.9   us
+  time 150 pmgDown2       base 19.1 med 19.3   us
+  time 151 pmgDown3       base 22.1 med 22.1   us
+  time 152 pmgTopCycle    base 52.5 med 52.6   us
+  time 153 pmgUp3         base 17.7 med 18.9   us
+  time 154 pmgUp2         base 19.2 med 19.6   us
+  time 155 pmgNativePost1 base 26.2 med 26.3   us
+  time 156 pmgUp1         base 20.8 med 20.8   us
+  time 157 pmgNativePost0 base 28.6 med 29.0   us
+  time 158 pmgPostU       base 48.8 med 49.5   us
+  time 159 pmgPostS       base 67.4 med 67.4   us
+  time 160 pmgPostZ       base 55.0 med 55.2   us
+  time 161 pmgDirection   base 98.7 med 99.1   us
+  time 162 pmgUpdate      base 121.0 med 122.3   us
+  time 164 pmgPreS        base 64.5 med 64.7   us
+  time 165 pmgPreU        base 43.8 med 44.1   us
+  time 166 pmgNativePre0  base 26.7 med 26.9   us
+  time 167 pmgDown0       base 64.9 med 65.7   us
+  time 168 pmgNativePre1  base 30.0 med 30.3   us
+  time 169 pmgDown1       base 17.1 med 17.2   us
+  time 170 pmgDown1C      base 26.2 med 26.2   us
+  time 171 pmgDown2       base 19.4 med 19.8   us
+  time 172 pmgDown3       base 22.0 med 22.2   us
+  time 173 pmgTopCycle    base 52.1 med 52.2   us
+  time 174 pmgUp3         base 18.3 med 19.0   us
+  time 175 pmgUp2         base 19.3 med 19.5   us
+  time 176 pmgNativePost1 base 26.0 med 26.3   us
+  time 177 pmgUp1         base 20.8 med 21.0   us
+  time 178 pmgNativePost0 base 28.7 med 29.0   us
+  time 179 pmgPostU       base 47.9 med 48.8   us
+  time 180 pmgPostS       base 66.0 med 67.4   us
+  time 181 pmgPostZ       base 54.4 med 54.9   us
+  time 182 pmgDirection   base 99.7 med 100.3   us
+  time 183 pmgUpdate      base 121.2 med 121.3   us
+  time 185 pmgPreS        base 64.8 med 65.0   us
+  time 186 pmgPreU        base 44.0 med 44.0   us
+  time 187 pmgNativePre0  base 26.5 med 26.7   us
+  time 188 pmgDown0       base 64.5 med 64.5   us
+  time 189 pmgNativePre1  base 29.7 med 30.5   us
+  time 190 pmgDown1       base 17.1 med 17.2   us
+  time 191 pmgDown1C      base 26.8 med 26.9   us
+  time 192 pmgDown2       base 19.6 med 19.7   us
+  time 193 pmgDown3       base 22.3 med 22.3   us
+  time 194 pmgTopCycle    base 52.2 med 52.2   us
+  time 195 pmgUp3         base 19.0 med 19.2   us
+  time 196 pmgUp2         base 19.3 med 19.4   us
+  time 197 pmgNativePost1 base 26.2 med 26.4   us
+  time 198 pmgUp1         base 20.8 med 20.8   us
+  time 199 pmgNativePost0 base 28.5 med 28.7   us
+  time 200 pmgPostU       base 48.6 med 49.0   us
+  time 201 pmgPostS       base 66.6 med 66.8   us
+  time 202 pmgPostZ       base 54.6 med 55.3   us
+  time 203 pmgDirection   base 98.7 med 99.3   us
+  time 204 pmgUpdate      base 121.7 med 122.5   us
+  time 206 pmgPreS        base 64.7 med 65.2   us
+  time 207 pmgPreU        base 43.5 med 43.9   us
+  time 208 pmgNativePre0  base 26.9 med 27.0   us
+  time 209 pmgDown0       base 65.0 med 66.1   us
+  time 210 pmgNativePre1  base 30.3 med 30.6   us
+  time 211 pmgDown1       base 17.4 med 17.5   us
+  time 212 pmgDown1C      base 27.1 med 27.2   us
+  time 213 pmgDown2       base 19.6 med 19.7   us
+  time 214 pmgDown3       base 22.5 med 22.6   us
+  time 215 pmgTopCycle    base 52.5 med 52.6   us
+  time 216 pmgUp3         base 19.3 med 19.5   us
+  time 217 pmgUp2         base 19.8 med 19.8   us
+  time 218 pmgNativePost1 base 26.3 med 26.7   us
+  time 219 pmgUp1         base 21.2 med 21.4   us
+  time 220 pmgNativePost0 base 29.4 med 29.5   us
+  time 221 pmgPostU       base 48.8 med 49.2   us
+  time 222 pmgPostS       base 67.5 med 67.6   us
+  time 223 pmgPostZ       base 55.3 med 55.5   us
+  time 224 pmgDirection   base 99.4 med 99.4   us
+  time 225 pmgUpdate      base 121.7 med 123.2   us
+  time 227 pmgPreS        base 6.2 med 6.4   us
+  time 228 pmgPreU        base 6.2 med 6.2   us
+  time 229 pmgNativePre0  base 6.2 med 6.3   us
+  time 230 pmgDown0       base 6.1 med 6.1   us
+  time 231 pmgNativePre1  base 6.3 med 6.3   us
+  time 232 pmgDown1       base 6.0 med 6.3   us
+  time 233 pmgDown1C      base 6.0 med 6.2   us
+  time 234 pmgDown2       base 6.0 med 6.1   us
+  time 235 pmgDown3       base 6.0 med 6.3   us
+  time 236 pmgTopCycle    base 5.9 med 6.1   us
+  time 237 pmgUp3         base 5.6 med 6.4   us
+  time 238 pmgUp2         base 5.9 med 6.1   us
+  time 239 pmgNativePost1 base 6.3 med 6.4   us
+  time 240 pmgUp1         base 6.0 med 6.2   us
+  time 241 pmgNativePost0 base 6.3 med 6.4   us
+  time 242 pmgPostU       base 6.0 med 6.2   us
+  time 243 pmgPostS       base 6.5 med 6.5   us
+  time 244 pmgPostZ       base 5.9 med 6.1   us
+  time 245 pmgDirection   base 6.1 med 6.3   us
+  time 246 pmgUpdate      base 6.2 med 6.3   us
+  time 248 pmgPreS        base 6.2 med 6.3   us
+  time 249 pmgPreU        base 6.0 med 6.1   us
+  time 250 pmgNativePre0  base 6.0 med 6.3   us
+  time 251 pmgDown0       base 6.2 med 6.2   us
+  time 252 pmgNativePre1  base 6.1 med 6.3   us
+  time 253 pmgDown1       base 5.8 med 6.2   us
+  time 254 pmgDown1C      base 6.2 med 6.3   us
+  time 255 pmgDown2       base 6.0 med 6.4   us
+  time 256 pmgDown3       base 5.9 med 6.2   us
+  time 257 pmgTopCycle    base 6.0 med 6.1   us
+  time 258 pmgUp3         base 6.2 med 6.3   us
+  time 259 pmgUp2         base 6.1 med 6.2   us
+  time 260 pmgNativePost1 base 6.4 med 6.5   us
+  time 261 pmgUp1         base 6.0 med 6.3   us
+  time 262 pmgNativePost0 base 6.3 med 6.3   us
+  time 263 pmgPostU       base 6.1 med 6.1   us
+  time 264 pmgPostS       base 6.2 med 6.3   us
+  time 265 pmgPostZ       base 6.1 med 6.2   us
+  time 266 pmgDirection   base 6.3 med 6.3   us
+  time 267 pmgUpdate      base 5.8 med 5.8   us
+  time 269 pmgFinish      base 14.8 med 15.0   us
+  time 270 pmgFinishC     base 12.5 med 12.5   us
+  time 271 pressureProjectC base 149.2 med 149.6   us
+  time 272 pmgPressureDelta base 20.8 med 21.0   us
+  time 273 project        base 483.7 med 496.0   us
+  time 274 projectDry     base 194.5 med 195.3   us
+  time 275 pressureProjectRest base 13.1 med 13.2   us
+  time 276 uExt4Seed      base 288.1 med 301.8   us
+  time 277 uExt4          base 255.8 med 258.3   us
+  time 278 uExtend        base 1580.9 med 1595.7   us
+  time 280 pJoin          base 221.7 med 222.6   us
+  time 281 pDelta         base 374.8 med 379.6   us
+time: clock probe 75.7 76.0 76.1
+  clock   4 regionDeep     base     pass 141.9 us state 2 808/808; dur p50 10.0 p90 18.8 max 92.6; span 122.0, 95% ended 58.8, tail 63.2 us; avg 76.7 peak 270; in flight 63 119 165 243 264 177 104 54 20 15 14 14 5 2 2 2
+  clock   5 censusFine     base     pass 1316.9 us state 2 16360/16360; dur p50 2.9 p90 84.6 max 174.9; span 1258.6, 95% ended 1096.9, tail 161.8 us; avg 241.9 peak 303; in flight 251 290 265 280 270 261 263 278 221 268 246 284 265 286 129 14
+  clock   6 censusCoarse   base     pass 467.6 us state 2 808/808; dur p50 95.4 p90 146.6 max 312.8; span 379.0, 95% ended 289.0, tail 90.0 us; avg 164.0 peak 319; in flight 137 297 317 319 299 283 239 194 172 156 116 61 32 8 3 1
+  clock   8 censusImportance base     pass 190.4 us state 2 808/808; dur p50 4.8 p90 65.4 max 148.7; span 152.8, 95% ended 82.2, tail 70.6 us; avg 91.1 peak 415; in flight 324 201 171 162 155 143 125 74 47 13 6 2 1 1 1 1
+  clock   9 censusDecide   base     pass 1785.4 us state 2 808/808; dur p50 13.9 p90 757.5 max 1361.5; span 1767.2, 95% ended 988.4, tail 778.8 us; avg 80.9 peak 252; in flight 235 191 179 168 146 124 97 73 50 28 11 7 4 2 1 1
+  clock  10 resMark        base     pass 220.5 us state 2 2146/2146; dur p50 9.9 p90 32.3 max 65.9; span 134.8, 95% ended 83.6, tail 51.3 us; avg 273.4 peak 511; in flight 511 495 415 453 468 466 480 466 263 150 56 33 31 28 7 1
+  clock  13 resMark        base     pass 150.9 us state 2 2045/2045; dur p50 14.1 p90 34.8 max 59.0; span 112.0, 95% ended 88.4, tail 23.6 us; avg 343.9 peak 511; in flight 511 511 505 481 478 443 465 455 472 455 359 228 122 44 10 3
+  clock  25 setTransferFaces base     pass 383.3 us state 2 2291/2291; dur p50 16.8 p90 24.7 max 29.9; span 343.6, 95% ended 303.6, tail 40.1 us; avg 107.9 peak 127; in flight 127 127 126 118 117 121 114 116 118 118 120 116 116 120 64 4
+  clock  26 setTransferCells base     pass 187.3 us state 2 2291/2291; dur p50 23.4 p90 48.3 max 96.6; span 176.4, 95% ended 118.5, tail 57.8 us; avg 295.2 peak 542; in flight 537 541 477 529 514 506 512 414 306 211 130 73 38 17 4 4
+  clock  29 certCoarse     base     pass 147.2 us state 2 816/816; dur p50 32.5 p90 71.6 max 106.9; span 130.2, 95% ended 92.8, tail 37.4 us; avg 196.7 peak 415; in flight 332 408 409 409 372 322 250 197 147 113 66 40 19 11 7 3
+  clock  30 certFine       base     pass 499.4 us state 2 16512/16512; dur p50 3.3 p90 39.7 max 90.4; span 456.5, 95% ended 376.5, tail 80.0 us; avg 409.1 peak 548; in flight 399 495 446 476 479 500 466 468 436 440 483 453 468 401 121 10
+  clock  31 certError      base     pass 133.9 us state 2 816/816; dur p50 41.8 p90 59.6 max 97.3; span 131.3, 95% ended 89.5, tail 41.8 us; avg 264.4 peak 548; in flight 536 536 536 369 478 494 414 288 248 100 66 22 15 14 11 5
+  clock  33 nrReach        base     pass 145.5 us state 2 2166/2166; dur p50 2.8 p90 11.4 max 34.7; span 119.9, 95% ended 88.1, tail 31.8 us; avg 96.2 peak 128; in flight 83 124 119 120 118 114 123 113 118 120 116 106 70 28 19 10
+  clock  37 lResolve       base     pass 377.1 us state 2 2064/2064; dur p50 18.2 p90 21.1 max 34.9; span 355.5, 95% ended 326.5, tail 29.0 us; avg 105.2 peak 128; in flight 31 76 125 122 118 121 125 120 125 125 119 119 126 123 108 13
+  clock  38 uCache         base     pass 509.6 us state 2 2064/2064; dur p50 26.5 p90 31.9 max 39.5; span 446.9, 95% ended 400.8, tail 46.1 us; avg 114.5 peak 128; in flight 117 126 127 128 126 128 122 126 125 124 127 121 121 124 80 7
+  clock  39 uCache4        base     pass 66.5 us state 2 102/102; dur p50 17.7 p90 49.6 max 55.6; span 55.6, 95% ended 51.4, tail 4.2 us; avg 43.7 peak 102; in flight 102 101 81 55 53 50 44 43 38 32 23 22 22 21 10 2
+  clock  40 pLiquid        base     pass 183.3 us state 2 2064/2064; dur p50 12.2 p90 26.9 max 51.9; span 140.0, 95% ended 100.3, tail 39.7 us; avg 225.7 peak 352; in flight 352 316 338 309 313 320 314 307 315 306 267 91 43 19 13 2
+  clock  41 pSeed          base     pass 438.6 us state 2 2064/2064; dur p50 4.3 p90 6.9 max 212.4; span 424.6, 95% ended 233.9, tail 190.7 us; avg 30.4 peak 63; in flight 46 48 55 46 53 55 55 51 50 23 4 3 1 1 1 1
+  clock  43 pSeparate      base     pass 1002.1 us state 2 2387/2387; dur p50 80.9 p90 109.0 max 417.9; span 954.8, 95% ended 812.6, tail 142.2 us; avg 218.2 peak 256; in flight 256 253 253 254 255 252 255 254 255 255 254 254 252 147 31 2
+  clock  44 pMove          base     pass 1296.0 us state 2 2387/2387; dur p50 51.7 p90 100.7 max 212.6; span 1279.2, 95% ended 1175.1, tail 104.2 us; avg 118.5 peak 128; in flight 128 127 127 128 126 125 127 128 126 127 128 126 128 126 115 13
+  clock  45 pScan          base     pass 172.6 us state 2 2064/2064; dur p50 12.1 p90 17.2 max 21.9; span 101.5, 95% ended 90.7, tail 10.8 us; avg 252.4 peak 320; in flight 320 214 311 304 299 291 281 294 287 275 294 286 298 271 70 8
+  clock  46 pScatter       base     pass 101.7 us state 2 2387/2387; dur p50 11.1 p90 14.7 max 18.7; span 76.3, 95% ended 68.7, tail 7.5 us; avg 346.7 peak 416; in flight 416 378 336 410 386 380 399 392 395 402 394 385 387 315 76 14
+  clock  47 pTiles         base     pass 85.7 us state 2 2064/2064; dur p50 3.0 p90 10.4 max 30.1; span 64.2, 95% ended 46.5, tail 17.7 us; avg 148.7 peak 224; in flight 99 199 200 208 205 190 199 201 201 194 171 95 60 32 6 2
+  clock  48 setMark        base     pass 155.0 us state 2 2064/2064; dur p50 7.9 p90 44.2 max 70.8; span 93.8, 95% ended 63.9, tail 30.0 us; avg 314.9 peak 732; in flight 537 544 700 706 626 487 401 315 248 178 125 85 47 12 5 2
+  clock  54 vGauge         base     pass 290.3 us state 2 2166/2166; dur p50 25.5 p90 74.8 max 138.3; span 255.7, 95% ended 165.6, tail 90.1 us; avg 280.3 peak 511; in flight 511 500 460 474 486 482 473 471 257 173 98 59 34 15 4 1
+  clock  55 lInit          base     pass 124.5 us state 2 2064/2064; dur p50 4.4 p90 7.5 max 15.1; span 79.8, 95% ended 70.3, tail 9.5 us; avg 111.8 peak 159; in flight 159 114 116 124 117 121 119 120 119 124 120 119 120 117 70 7
+  clock  56 lAdvect        base     pass 2001.6 us state 2 2064/2064; dur p50 47.1 p90 114.4 max 259.7; span 1988.8, 95% ended 1721.5, tail 267.3 us; avg 57.8 peak 64; in flight 64 63 64 62 63 64 62 64 64 64 64 64 64 61 38 3
+  clock  57 lcAdvect       base     pass 576.4 us state 2 204/204; dur p50 109.0 p90 157.2 max 245.9; span 574.2, 95% ended 414.7, tail 159.4 us; avg 34.5 peak 63; in flight 62 63 63 63 61 56 49 41 31 27 20 12 5 3 2 1
+  clock  58 lSplat         base     pass 346.5 us state 2 2064/2064; dur p50 1.1 p90 68.8 max 153.8; span 331.6, 95% ended 211.1, tail 120.5 us; avg 98.2 peak 159; in flight 131 140 144 151 144 142 148 141 146 121 74 43 20 9 2 1
+  clock  59 lUnion         base     pass 504.8 us state 2 2064/2064; dur p50 17.7 p90 48.0 max 107.5; span 488.4, 95% ended 395.3, tail 93.0 us; avg 102.3 peak 128; in flight 51 124 126 121 127 128 123 124 127 126 127 127 127 51 13 3
+  clock  60 lcCouple       base     pass 186.4 us state 2 816/816; dur p50 19.3 p90 91.8 max 116.5; span 174.8, 95% ended 131.4, tail 43.3 us; avg 141.5 peak 317; in flight 92 230 317 312 303 232 177 156 141 127 95 59 24 13 7 3
+  clock  61 lResolve       base     pass 282.0 us state 2 2064/2064; dur p50 14.0 p90 16.2 max 27.2; span 273.6, 95% ended 251.2, tail 22.4 us; avg 106.0 peak 128; in flight 31 70 123 120 122 123 119 125 118 122 122 122 123 123 107 16
+  clock  62 lTiles         base     pass 224.4 us state 2 2064/2064; dur p50 9.1 p90 19.0 max 29.8; span 175.0, 95% ended 149.3, tail 25.7 us; avg 124.9 peak 159; in flight 159 113 107 127 146 141 146 149 149 144 144 134 133 113 28 3
+  clock  67 lClear         base     pass 310.5 us state 2 2064/2064; dur p50 11.5 p90 22.7 max 56.1; span 275.1, 95% ended 228.1, tail 47.0 us; avg 101.5 peak 128; in flight 128 119 123 122 120 123 111 123 123 123 115 120 115 68 8 1
+  clock  68 lcClear        base     pass 123.1 us state 2 102/102; dur p50 47.8 p90 60.1 max 75.0; span 75.0, 95% ended 62.7, tail 12.3 us; avg 65.1 peak 102; in flight 102 102 102 102 102 102 100 86 75 60 46 31 23 6 1 1
+  clock  69 lResolveD      base     pass 170.6 us state 2 2064/2064; dur p50 2.7 p90 16.3 max 26.7; span 154.3, 95% ended 127.0, tail 27.3 us; avg 85.3 peak 126; in flight 31 34 61 118 120 115 118 111 118 111 118 117 109 64 25 10
+  clock  74 lNear          base     pass 166.7 us state 2 2064/2064; dur p50 8.8 p90 11.4 max 15.3; span 106.8, 95% ended 92.5, tail 14.3 us; avg 162.4 peak 192; in flight 191 192 187 178 191 188 175 189 181 179 183 187 188 139 52 8
+  clock  75 lNear          base     pass 168.1 us state 2 2064/2064; dur p50 11.8 p90 15.1 max 21.0; span 139.8, 95% ended 120.8, tail 19.0 us; avg 162.4 peak 192; in flight 187 171 190 181 185 187 186 181 187 187 184 187 187 148 35 3
+  clock  76 lNear          base     pass 242.0 us state 2 2064/2064; dur p50 12.9 p90 19.9 max 27.7; span 166.7, 95% ended 141.5, tail 25.2 us; avg 161.7 peak 192; in flight 192 183 191 191 187 187 187 180 189 185 184 185 184 108 40 7
+  clock  77 lDistance      base     pass 947.3 us state 2 2064/2064; dur p50 31.6 p90 73.2 max 99.6; span 944.7, 95% ended 805.2, tail 139.5 us; avg 81.7 peak 96; in flight 95 94 95 91 92 93 91 93 91 91 90 89 94 83 25 1
+  clock  78 lcRetire       base     pass 750.6 us state 2 816/816; dur p50 92.4 p90 327.9 max 703.7; span 745.7, 95% ended 422.7, tail 323.0 us; avg 156.0 peak 511; in flight 211 509 475 361 282 212 164 112 56 32 21 15 7 5 4 1
+  clock  79 lPublish       base     pass 220.7 us state 2 2064/2064; dur p50 17.7 p90 23.3 max 33.6; span 165.1, 95% ended 144.4, tail 20.7 us; avg 215.2 peak 255; in flight 255 246 246 244 248 245 246 246 251 248 247 249 250 168 45 3
+  clock  81 lResolve       base     pass 280.2 us state 2 2064/2064; dur p50 14.2 p90 16.1 max 29.2; span 270.0, 95% ended 252.5, tail 17.5 us; avg 107.4 peak 128; in flight 31 76 125 128 124 123 120 121 125 124 124 115 119 121 123 36
+  clock  82 pSeed          base     pass 879.9 us state 2 2064/2064; dur p50 3.4 p90 72.0 max 185.6; span 866.9, 95% ended 652.2, tail 214.7 us; avg 47.9 peak 63; in flight 59 60 56 59 58 61 60 61 61 60 56 58 37 17 5 2
+  clock  83 uAdvect        base     pass 1523.1 us state 2 2166/2166; dur p50 10.0 p90 86.9 max 373.1; span 1479.0, 95% ended 946.0, tail 533.1 us; avg 44.2 peak 64; in flight 55 59 61 59 60 62 61 57 61 61 53 26 17 9 3 2
+  clock  84 pDeposit       base     pass 707.1 us state 2 2064/2064; dur p50 1.2 p90 63.3 max 127.3; span 692.6, 95% ended 566.9, tail 125.7 us; avg 47.2 peak 63; in flight 61 59 56 56 51 50 56 53 53 51 56 54 53 29 11 4
+  clock  85 uTransfer      base     pass 1480.3 us state 2 2268/2268; dur p50 34.7 p90 57.0 max 415.3; span 1460.6, 95% ended 1335.0, tail 125.6 us; avg 58.4 peak 64; in flight 62 63 63 60 62 63 61 61 59 60 59 63 60 60 59 14
+  clock  89 pressureTileRoots base     pass 197.5 us state 2 722/722; dur p50 26.6 p90 34.7 max 49.7; span 180.5, 95% ended 143.8, tail 36.6 us; avg 110.2 peak 160; in flight 160 160 150 157 159 146 160 145 158 143 91 80 47 10 2 1
+  clock  90 operator       base     pass 1190.3 us state 2 722/722; dur p50 52.5 p90 70.7 max 93.5; span 1153.5, 95% ended 1012.4, tail 141.1 us; avg 28.1 peak 32; in flight 31 29 31 30 32 32 32 32 32 31 29 31 29 28 18 6
+  clock  91 pressureRowsC  base     pass 321.3 us state 2 204/204; dur p50 4.8 p90 127.0 max 226.4; span 293.4, 95% ended 157.1, tail 136.3 us; avg 21.8 peak 64; in flight 36 50 50 39 38 36 33 27 14 7 4 3 3 2 1 1
+  clock  93 pmgGuess       base     pass 120.6 us state 2 722/722; dur p50 11.8 p90 16.0 max 20.3; span 92.8, 95% ended 79.9, tail 13.0 us; avg 78.9 peak 96; in flight 96 96 95 96 90 95 94 95 90 93 90 93 84 49 15 2
+  clock  95 pmgSetupF      base     pass 224.1 us state 2 722/722; dur p50 19.7 p90 23.6 max 26.0; span 204.0, 95% ended 179.5, tail 24.5 us; avg 51.2 peak 63; in flight 63 63 46 62 61 61 59 63 58 57 58 59 55 39 26 5
+  clock  96 pmgCoarsenC    base     pass 118.8 us state 2 102/102; dur p50 18.6 p90 28.5 max 32.5; span 81.7, 95% ended 77.0, tail 4.6 us; avg 22.2 peak 32; in flight 32 32 32 32 32 32 32 32 23 22 18 16 10 9 7 4
+  clock  98 pmgPreS        base     pass 83.2 us state 2 689/689; dur p50 7.1 p90 10.1 max 12.0; span 68.9, 95% ended 60.4, tail 8.4 us; avg 76.8 peak 96; in flight 96 96 75 96 83 96 74 96 86 93 89 86 85 56 19 5
+  clock 101 pmgDown0       base     pass 116.3 us state 2 451/451; dur p50 11.8 p90 13.2 max 14.5; span 62.7, 95% ended 60.9, tail 1.8 us; avg 84.1 peak 96; in flight 96 96 96 96 96 95 96 96 95 93 96 96 66 67 67 26
+  clock 107 pmgTopCycle    base     skipped: pmgTopCycle: entry parameters fn pmgTopCycle(@builtin(local_invocation_index) t:u32)
+  clock 114 pmgPostS       base     pass 85.1 us state 2 689/689; dur p50 7.3 p90 8.6 max 11.0; span 69.2, 95% ended 58.2, tail 11.0 us; avg 73.3 peak 96; in flight 96 96 96 91 93 86 89 86 92 80 88 82 80 31 11 1
+  clock 115 pmgPostZ       base     pass 77.7 us state 2 451/451; dur p50 7.6 p90 11.2 max 13.0; span 50.1, 95% ended 48.2, tail 1.8 us; avg 76.7 peak 96; in flight 96 96 96 8 96 96 78 96 87 95 96 37 67 67 66 21
+  clock 116 pmgDirection   base     pass 131.0 us state 2 553/553; dur p50 11.0 p90 12.8 max 20.2; span 106.5, 95% ended 99.6, tail 6.9 us; avg 55.2 peak 64; in flight 64 63 63 63 58 64 58 64 62 60 64 53 63 46 34 9
+  clock 117 pmgUpdate      base     pass 177.5 us state 2 553/553; dur p50 12.7 p90 13.9 max 16.2; span 148.3, 95% ended 108.8, tail 39.5 us; avg 42.8 peak 63; in flight 63 60 40 63 61 54 63 61 46 63 60 57 9 1 0 1
+  clock 122 pmgPreS        base     pass 84.0 us state 2 689/689; dur p50 6.6 p90 7.9 max 11.2; span 60.7, 95% ended 53.5, tail 7.2 us; avg 76.1 peak 96; in flight 96 96 96 96 77 93 82 87 84 89 89 85 89 59 17 5
+  clock 125 pmgDown0       base     pass 73.0 us state 2 451/451; dur p50 13.1 p90 14.5 max 16.5; span 70.7, 95% ended 67.9, tail 2.9 us; avg 83.1 peak 96; in flight 96 96 96 70 96 96 63 96 96 75 96 95 69 67 67 12
+  clock 131 pmgTopCycle    base     skipped: pmgTopCycle: entry parameters fn pmgTopCycle(@builtin(local_invocation_index) t:u32)
+  clock 138 pmgPostS       base     pass 84.8 us state 2 689/689; dur p50 7.3 p90 8.9 max 10.9; span 65.6, 95% ended 58.0, tail 7.6 us; avg 77.6 peak 96; in flight 96 96 68 96 52 96 76 95 78 83 82 81 89 70 24 10
+  clock 139 pmgPostZ       base     pass 76.8 us state 2 451/451; dur p50 7.8 p90 11.1 max 12.6; span 50.7, 95% ended 48.6, tail 2.1 us; avg 77.1 peak 96; in flight 96 96 96 48 96 96 32 96 96 92 96 59 67 67 61 17
+  clock 140 pmgDirection   base     pass 129.5 us state 2 553/553; dur p50 10.9 p90 12.1 max 21.8; span 103.2, 95% ended 98.7, tail 4.6 us; avg 56.5 peak 64; in flight 64 51 64 63 64 62 57 63 61 63 58 62 61 62 37 23
+  clock 141 pmgUpdate      base     pass 177.5 us state 2 553/553; dur p50 12.5 p90 13.6 max 15.9; span 144.4, 95% ended 107.5, tail 37.0 us; avg 43.4 peak 63; in flight 63 54 35 63 59 55 63 61 49 63 55 63 8 1 1 1
+  clock 143 pmgPreS        base     pass 83.7 us state 2 689/689; dur p50 6.9 p90 8.5 max 11.1; span 62.5, 95% ended 55.3, tail 7.2 us; avg 77.0 peak 96; in flight 96 96 74 96 70 96 74 93 81 88 91 82 94 66 19 8
+  clock 146 pmgDown0       base     pass 71.4 us state 2 451/451; dur p50 13.4 p90 14.5 max 15.3; span 69.7, 95% ended 68.0, tail 1.7 us; avg 85.1 peak 96; in flight 96 96 96 82 96 96 62 96 96 70 96 96 85 67 67 36
+  clock 152 pmgTopCycle    base     skipped: pmgTopCycle: entry parameters fn pmgTopCycle(@builtin(local_invocation_index) t:u32)
+  clock 159 pmgPostS       base     pass 84.8 us state 2 689/689; dur p50 7.3 p90 8.9 max 10.6; span 66.9, 95% ended 59.0, tail 7.9 us; avg 77.7 peak 96; in flight 96 96 95 96 58 96 66 95 83 91 91 81 90 72 17 12
+  clock 160 pmgPostZ       base     pass 76.2 us state 2 451/451; dur p50 7.4 p90 11.6 max 14.0; span 50.0, 95% ended 48.2, tail 1.8 us; avg 77.0 peak 96; in flight 96 96 96 23 96 96 96 96 20 96 96 50 67 67 64 21
+  clock 161 pmgDirection   base     pass 128.3 us state 2 553/553; dur p50 11.0 p90 12.3 max 22.0; span 103.5, 95% ended 100.2, tail 3.3 us; avg 57.0 peak 64; in flight 64 64 64 62 64 57 62 62 62 63 53 64 60 64 39 25
+  clock 162 pmgUpdate      base     pass 177.8 us state 2 553/553; dur p50 12.3 p90 13.4 max 15.7; span 148.0, 95% ended 104.9, tail 43.1 us; avg 41.6 peak 63; in flight 63 59 48 63 62 39 63 63 51 63 62 11 9 1 0 1
+  clock 164 pmgPreS        base     pass 85.0 us state 2 689/689; dur p50 6.6 p90 7.6 max 9.3; span 59.8, 95% ended 53.2, tail 6.6 us; avg 77.6 peak 96; in flight 96 96 88 91 87 92 87 88 80 89 86 88 85 72 21 7
+  clock 167 pmgDown0       base     pass 114.3 us state 2 451/451; dur p50 10.9 p90 12.7 max 14.1; span 58.0, 95% ended 56.9, tail 1.1 us; avg 84.2 peak 96; in flight 96 96 96 77 96 96 88 96 94 96 96 94 67 67 65 46
+  clock 173 pmgTopCycle    base     skipped: pmgTopCycle: entry parameters fn pmgTopCycle(@builtin(local_invocation_index) t:u32)
+  clock 180 pmgPostS       base     pass 84.1 us state 2 689/689; dur p50 7.2 p90 9.2 max 11.8; span 68.7, 95% ended 59.1, tail 9.5 us; avg 75.7 peak 96; in flight 96 96 94 96 62 96 69 92 84 78 92 79 85 49 21 4
+  clock 181 pmgPostZ       base     pass 79.2 us state 2 451/451; dur p50 7.7 p90 11.1 max 11.5; span 49.2, 95% ended 46.1, tail 3.1 us; avg 76.4 peak 96; in flight 96 96 96 96 96 96 29 96 96 57 96 96 67 67 63 3
+  clock 182 pmgDirection   base     pass 129.4 us state 2 553/553; dur p50 10.9 p90 12.4 max 21.2; span 105.1, 95% ended 100.3, tail 4.8 us; avg 56.3 peak 64; in flight 64 56 62 64 62 63 60 64 62 64 55 64 64 57 36 15
+  clock 183 pmgUpdate      base     pass 176.8 us state 2 553/553; dur p50 12.4 p90 13.8 max 16.6; span 147.6, 95% ended 107.5, tail 40.1 us; avg 42.4 peak 63; in flight 63 59 35 63 55 60 63 50 58 63 63 42 8 1 0 1
+  clock 185 pmgPreS        base     pass 84.0 us state 2 689/689; dur p50 6.9 p90 8.5 max 10.5; span 62.3, 95% ended 55.1, tail 7.2 us; avg 76.6 peak 96; in flight 96 96 92 96 54 96 73 93 80 86 88 80 83 69 21 4
+  clock 188 pmgDown0       base     pass 71.9 us state 2 451/451; dur p50 12.9 p90 14.0 max 15.7; span 69.6, 95% ended 67.7, tail 2.0 us; avg 83.9 peak 96; in flight 96 96 96 95 96 96 87 96 96 76 96 95 72 67 67 24
+  clock 194 pmgTopCycle    base     skipped: pmgTopCycle: entry parameters fn pmgTopCycle(@builtin(local_invocation_index) t:u32)
+  clock 201 pmgPostS       base     pass 85.4 us state 2 689/689; dur p50 7.0 p90 9.0 max 12.3; span 66.4, 95% ended 57.0, tail 9.3 us; avg 75.3 peak 96; in flight 96 96 89 96 67 95 74 89 84 82 91 78 94 49 16 7
+  clock 202 pmgPostZ       base     pass 78.0 us state 2 451/451; dur p50 7.3 p90 11.0 max 12.5; span 49.3, 95% ended 47.8, tail 1.5 us; avg 77.3 peak 96; in flight 96 96 96 96 96 96 28 96 96 92 96 84 67 67 66 25
+  clock 203 pmgDirection   base     pass 127.9 us state 2 553/553; dur p50 11.0 p90 12.7 max 20.7; span 106.2, 95% ended 100.2, tail 6.0 us; avg 55.4 peak 64; in flight 64 63 61 57 57 64 55 63 59 64 64 60 64 47 34 13
+  clock 204 pmgUpdate      base     pass 178.8 us state 2 553/553; dur p50 12.1 p90 14.0 max 16.1; span 145.7, 95% ended 105.5, tail 40.3 us; avg 42.4 peak 63; in flight 63 51 34 63 62 44 63 63 46 63 62 34 9 1 0 1
+  clock 206 pmgPreS        base     pass 83.0 us state 2 689/689; dur p50 6.5 p90 8.1 max 11.7; span 61.0, 95% ended 53.8, tail 7.1 us; avg 76.3 peak 96; in flight 96 96 90 90 83 90 91 79 94 82 89 84 86 57 26 7
+  clock 209 pmgDown0       base     pass 71.4 us state 2 451/451; dur p50 13.4 p90 13.9 max 15.3; span 69.7, 95% ended 68.9, tail 0.8 us; avg 85.0 peak 96; in flight 96 96 96 96 96 94 66 96 95 78 96 96 78 67 67 39
+  clock 215 pmgTopCycle    base     skipped: pmgTopCycle: entry parameters fn pmgTopCycle(@builtin(local_invocation_index) t:u32)
+  clock 222 pmgPostS       base     pass 84.6 us state 2 689/689; dur p50 6.9 p90 8.9 max 12.2; span 65.5, 95% ended 57.2, tail 8.3 us; avg 75.9 peak 96; in flight 96 96 64 96 75 95 81 91 84 80 92 81 93 63 17 8
+  clock 223 pmgPostZ       base     pass 75.4 us state 2 451/451; dur p50 7.9 p90 12.7 max 14.4; span 52.4, 95% ended 50.3, tail 2.1 us; avg 75.9 peak 96; in flight 96 96 96 96 96 85 96 96 39 96 96 60 67 67 60 11
+  clock 224 pmgDirection   base     pass 129.1 us state 2 553/553; dur p50 10.8 p90 12.4 max 21.4; span 104.4, 95% ended 99.6, tail 4.8 us; avg 56.1 peak 64; in flight 64 63 62 64 63 61 59 64 51 64 58 62 64 58 36 17
+  clock 225 pmgUpdate      base     pass 176.4 us state 2 553/553; dur p50 12.6 p90 13.8 max 16.5; span 142.8, 95% ended 108.6, tail 34.2 us; avg 44.4 peak 63; in flight 63 57 41 63 58 63 63 49 63 63 30 63 12 5 1 1
+  clock 271 pressureProjectC base     pass 185.0 us state 2 102/102; dur p50 18.1 p90 65.5 max 134.4; span 148.1, 95% ended 81.2, tail 66.9 us; avg 18.8 peak 63; in flight 53 57 51 34 28 23 21 19 10 2 1 1 1 1 1 1
+  clock 273 project        base     pass 506.7 us state 2 1120/1120; dur p50 24.5 p90 39.6 max 53.2; span 498.0, 95% ended 435.2, tail 62.8 us; avg 55.0 peak 64; in flight 64 58 61 61 62 63 57 57 59 59 60 63 57 59 26 6
+  clock 274 projectDry     base     pass 209.7 us state 2 1120/1120; dur p50 0.8 p90 1.0 max 162.6; span 189.0, 95% ended 32.8, tail 156.3 us; avg 9.4 peak 96; in flight 1 30 33 9 9 8 7 5 5 5 4 3 3 1 1 1
+  clock 276 uExt4Seed      base     pass 312.0 us state 2 408/408; dur p50 16.6 p90 126.0 max 255.2; span 294.0, 95% ended 177.9, tail 116.0 us; avg 55.4 peak 128; in flight 69 127 122 123 102 86 76 67 45 26 13 7 4 2 2 1
+  clock 277 uExt4          base     pass 335.8 us state 2 102/102; dur p50 21.0 p90 108.0 max 134.2; span 286.0, 95% ended 213.0, tail 73.0 us; avg 14.5 peak 32; in flight 32 32 27 24 21 19 18 16 11 9 8 7 4 3 1 1
+  clock 278 uExtend        base     pass 1639.0 us state 2 2064/2064; dur p50 15.2 p90 50.3 max 69.2; span 1594.9, 95% ended 1386.7, tail 208.2 us; avg 28.1 peak 32; in flight 32 31 32 30 30 29 30 31 32 31 32 32 31 31 20 7
+  clock 280 pJoin          base     pass 265.5 us state 2 2369/2369; dur p50 24.2 p90 43.2 max 79.5; span 195.7, 95% ended 183.2, tail 12.4 us; avg 344.0 peak 383; in flight 383 383 383 363 375 383 362 372 375 374 378 372 376 375 206 21
+  clock 281 pDelta         base     pass 400.5 us state 2 2369/2369; dur p50 46.9 p90 52.8 max 93.9; span 392.2, 95% ended 349.2, tail 43.0 us; avg 281.7 peak 320; in flight 320 320 319 320 318 319 317 318 317 319 320 317 316 284 84 10
+clock: probe 83.0 us
+fluid-gpu-run: GPU memory in use 0.27 GB at start, peak 3.10 GB; 2 process(es) in the tree
+rc 0
