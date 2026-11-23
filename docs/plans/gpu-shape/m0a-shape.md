@@ -271,3 +271,132 @@ Dawn cannot emit concurrent dispatches. The available lever is therefore packing
     node --import tsx tools/experiments/gpu-shape/analyze.mts out.jsonl [--series=base:8:16:1]
     X=q node --import tsx tools/experiments/gpu-shape/dump-wgsl.mts <dir> 96,128,160,192   # then regcap.sh <dir>/*.wgsl
     swiftc -O tools/experiments/gpu-shape/native/chase.swift -o <scratch>/chase && tools/gpu/fluid-gpu-run.sh timing <scratch>/chase native.jsonl
+
+## M0c: where random gathers collapse, and whether bytes or pages decide
+
+Lane A, 2026-11-23. The plan is in [§M0c](../gpu-shape-2026-11-23.md). The harness is `tools/experiments/gpu-shape/m0c.mts` and the data is in `results/m0c-run1.jsonl` and `m0c-run2.jsonl`. Both runs went through `fluid-gpu-run.sh timing` with rc 0 and 0 gpuErrors.
+
+**Kernel.** A dependent hash chain over a 1 GB pool whose words hold `hsh(index)`. Each link hashes the value it just loaded into an address:
+
+- a **region**: one of K regions of W bytes. Regions are scattered over the pool by an odd-multiplier bijection on W-sized slots.
+- a **16 KB page** inside the region.
+- a **word** within the first U bytes of that page.
+
+Region choice has two modes:
+
+- **clus**: the region comes from the loaded value on every link. Gathers spread over all K regions.
+- **win**: the whole workgroup uses region `(workgroup + link × G) mod K` at each link. A workgroup gathers inside one W window at a time, and the windows move through all K regions over the dispatch.
+
+**Touched** is the total K × W (× U/16 KB when U < 16 KB).
+
+Other measurement details:
+
+- A CPU model of the chain matches the GPU on 5 configurations × 256 lanes, and it asserts that every index lands inside the pool.
+- Throughput is loads / time at the wider of two widths. That is 131k lanes: L256 × G512 at D16, or L64 × G2048 at D64, both well past the random knee.
+- The slope between widths is unreliable at L64 × G1024. The G = 1024 time is inflated, for example 120 µs vs 78.7 µs for L256 × G256 at the same 64k lanes and D16 (run 2, `geo`). The cause is unexplained.
+- At the wide point the two geometries agree within 2% at every footprint.
+- Every kept record has probe ≤ 107 µs. 8 dips at 132–586 µs triggered a ramp and a re-measurement.
+
+### 1. Footprint ladder: contiguous random over F bytes (G lane-loads/s)
+
+| F (MB) | 1 | 4 | 8 | 16 | 24 | 32 | 40 | 48 | 56 | 64 | 96 | 128 | 192 | 256 | 384 | 512 | 768 | 1024 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| L256 D16 M1 | 18.0 | 14.7 | 13.8 | 10.3 | 7.73 | 6.79 | **2.81** | 1.84 | 1.47 | 1.28 | 0.98 | 0.88 | 0.79 | 0.68 | 0.65 | 0.68 | 0.63 | 0.66 |
+| L256 D16 M4 | 19.1 | 15.3 | 14.3 | 10.5 | 7.85 | 6.91 | **2.83** | 1.85 | 1.48 | 1.29 | 0.99 | 0.88 | 0.80 | 0.76 | 0.73 | 0.65 | 0.64 | 0.63 |
+| L64 D64 M1 | 18.0 | 15.1 | 14.1 | 10.3 | 7.75 | 6.79 | 2.80 | 1.82 | | 1.27 | | 0.87 | | 0.75 | | | | 0.61 |
+
+- **The decline has one cliff and two gentler slopes.**
+  - It falls gradually from 4 MB to 32 MB (14.7 → 6.8, 2.2×).
+  - **The cliff is between 32 and 40 MB** (6.8 → 2.8, 2.4× for 8 MB more footprint). It continues to 64 MB (1.28).
+  - A second, gentler decline runs from 64 to 256 MB (1.28 → 0.68–0.76, 1.8×).
+  - From 256 MB to 1 GB it is flat at 0.6–0.76.
+- M = 4 gives the same numbers as M = 1. Past the knee this is a throughput limit; extra loads in flight per lane do not help.
+- *Inference:* the cliff is the 48 MB SLC, whose effective capacity for this traffic is about 32–40 MB. The CPU and display share it. Section 2 shows the cliff follows bytes for coarse layouts. The 64–256 MB tail is translation or walk-cache reach.
+
+### 2. Bytes vs pages vs window: K regions of W bytes scattered over 1 GB (G lane-loads/s, D64, 131k lanes)
+
+**clus** (gathers spread over all regions every link):
+
+| W \ touched | 8 MB | 16 MB | 32 MB | 64 MB | 128 MB | 256 MB | 512 MB | 1024 MB |
+|---|---|---|---|---|---|---|---|---|
+| 16 KB | **1.35** | 0.81 | 0.75 | 0.66 | 0.63 | 0.63 | 0.62 | 0.62 |
+| 64 KB | 8.41 | 2.07 | 1.03 | 0.79 | 0.73 | 0.64 | 0.62 | 0.64 |
+| 256 KB | 14.1 | 8.71 | 2.82 | 1.13 | 0.85 | 0.74 | 0.60 | 0.57 |
+| 1 MB | 14.1 | 9.83 | 6.10 | 1.21 | 0.86 | 0.74 | 0.58 | 0.61 |
+| 4 MB | 14.1 | 10.2 | 6.62 | 1.25 | 0.88 | 0.75 | 0.69 | 0.62 |
+| 16 MB | – | 10.3 | 6.79 | 1.28 | 0.87 | 0.75 | 0.70 | 0.61 |
+| contiguous (ladder) | 14.1 | 10.3 | 6.79 | 1.27 | 0.87 | 0.75 | | 0.61 |
+
+**sparse pages** (clus, K scattered 16 KB pages, only the first U bytes of each used). Each cell is G/s, with bytes touched in MB in brackets:
+
+| U \ pages (span) | 512 (8 MB) | 1024 (16 MB) | 2048 (32 MB) | 4096 (64 MB) | 8192 (128 MB) | 16384 (256 MB) | 65536 (1 GB) |
+|---|---|---|---|---|---|---|---|
+| 128 B | 20.4 [0.06] | 17.9 [0.12] | 17.6 [0.25] | 7.31 [0.5] | **1.24 [1]** | 0.82 [2] | 0.65 [8] |
+| 1 KB | 17.3 [0.5] | **1.72 [1]** | 0.93 [2] | 0.73 [4] | 0.66 [8] | 0.64 [16] | 0.64 [64] |
+| 4 KB | **1.67 [2]** | 0.99 [4] | 0.72 [8] | 0.65 [16] | 0.63 [32] | 0.65 [64] | 0.61 [256] |
+| 16 KB | 1.35 [8] | 0.81 [16] | 0.75 [32] | 0.66 [64] | 0.63 [128] | 0.63 [256] | 0.62 [1024] |
+
+**win** (each workgroup gathers inside one W window per link):
+
+| W \ touched | 8 MB | 16 MB | 32 MB | 64 MB | 128 MB | 256 MB | 512 MB | 1024 MB |
+|---|---|---|---|---|---|---|---|---|
+| 16 KB | 17.5 | 17.0 | 16.8 | 13.6 | 10.9 | 8.20 | 6.92 | **6.60** |
+| 64 KB | 15.4 | 14.6 | 12.9 | 11.8 | 11.0 | 7.87 | 6.66 | 6.31 |
+| 256 KB | 15.1 | 14.2 | 12.0 | 8.90 | 7.29 | 6.54 | 6.46 | 5.66 |
+| 1 MB | 14.1 | 13.8 | 10.7 | 5.04 | 3.55 | 2.75 | 2.62 | 2.54 |
+| 4 MB | 14.1 | 10.8 | 7.20 | 2.17 | 1.63 | 1.19 | 0.99 | 0.97 |
+| 16 MB | – | 10.3 | 6.86 | 1.32 | 0.91 | 0.83 | 0.78 | 0.74 |
+
+**Answer: neither bytes alone nor distinct 16 KB pages alone. Three things decide, in this order of effect.**
+
+1. **Bytes decide for coarse layouts.**
+   - When the gathered data sits in contiguous runs of 256 KB or more, scattered regions behave exactly like a contiguous buffer with the same bytes: at 8 MB, 256 KB regions give 14.1 vs 14.1 contiguous.
+   - The cliff is at 32–40 MB of bytes (section 1).
+2. **Fine scattering moves the cliff from about 32 MB down to about 0.5–1 MB.**
+   - 8 MB spread over 512 random 16 KB pages runs at 1.35 G/s, as slow as a 1 GB contiguous buffer. Contiguous 8 MB runs at 14.1.
+   - With 64 KB regions it is 8.4; with 256 KB regions it recovers fully.
+   - On scattered pages, bytes still dominate, against a much smaller capacity. Each of these sets collapses to 1.2–1.7 G/s:
+     - 1 MB as 1 line per page over 8192 pages;
+     - 1 MB as 1 KB per page over 1024 pages;
+     - 2 MB as 4 KB per page over 512 pages.
+   - Page count modulates this at equal bytes. At 512 KB, 512 pages give 17.3 and 4096 pages give 7.3. At 2 MB, 512 pages give 1.67 and 16384 pages give 0.82.
+   - *Inference:* hits in the GPU L2 (about 0.5–1 MB, assumed virtually addressed) need no translation. L2 misses need one. Translations of scattered 16 KB pages miss the TLB, so even SLC-resident data is served at near-DRAM rate. The 256 KB recovery point fits translation that caches 128-byte page-table-entry lines (16 PTEs × 16 KB = 256 KB) or uses contiguous-block entries. This is not verified.
+3. **Workgroup window locality dominates both.**
+   - When a workgroup's lanes gather inside one 16 KB window at a time, throughput holds 17 G/s up to 32 MB touched, 13.6 at 64 MB, and **6.6 G/s at 1 GB**. Global random scattering gives 0.62 G/s at 1 GB with the same pages, so this is **10.6×**.
+   - At 1 GB, K = 65536 windows are each visited about twice per dispatch, so the gain is not reuse. *Inference:* it comes from one translation, and a few lines, serving a whole simdgroup's loads.
+   - Up to 256 KB, the window size costs little (5.7–6.6 G/s at 1 GB). It costs a lot from 1 MB (2.5) and 4 MB (0.97) upward.
+
+**For the brick engine** (*inference*, to be checked against lane B's census):
+
+- A heavy kernel's gathers are fast if a workgroup's neighbourhood falls within a few contiguous 16–256 KB windows, whatever the pool size.
+- They collapse to about 0.6–1.3 G/s if the 27 neighbour slots are scattered across a pool larger than about 1 MB at 16 KB granularity.
+- The lever is slot order: keep spatial neighbours in nearby slots, or allocate bricks in ≥256 KB chunks per region. Shrinking the pool below the SLC only helps if the layout is also coarse.
+
+### 3. Reusable clock probe
+
+`tools/experiments/gpu-shape/clock-probe.ts` provides `createClockProbe(device, { capacity, after })`. The returned object has three methods:
+
+- `encode(encoder)` appends one timestamped probe pass: one 32-lane workgroup running 2048 dependent FMA steps.
+- `read()` resolves and returns µs per encode, in order.
+- `destroy()` releases the probe's resources.
+
+It also exports `TOP_CLOCK_PROBE_US = 75.5` (Dawn, M1 Max), so `clockFraction = 75.5 / probeUs`. The device needs the `timestamp-query` feature, and Dawn's `timestamp_quantization` should be disabled.
+
+The probe writes only its own buffers, so it cannot change the step's results. `after` is optional: a buffer the preceding pass writes (at least 16 bytes, with STORAGE usage). The probe binds it read-only, behind a uniform branch that is never taken, so it never reads the value. The binding makes Metal's hazard tracking order the probe after that pass.
+
+Measured within one command buffer, three times each (run 1 and run 2):
+
+| placement | probe µs |
+|---|---|
+| after an ALU pass | 75.9–76.4 |
+| after a 3.4 ms 1 GB random gather, with `after` | 76.5–101 |
+| after the same gather, without `after` | 76.9, 92–127, **1062–1066** |
+
+Without `after`, one of three probes overlapped the gather and read 14× slow. **Always pass `after`.** The 101 µs reading, with ordering, is a real clock dip after the memory-bound pass. m0c.mts uses this helper for its own clock control.
+
+### M0c caveats
+
+- The kernel is synthetic: hash-derived addresses, 4-byte loads, no ALU work beyond the hashes.
+- Page size and placement are virtual. The pool's physical layout and the GPU MMU's page size and TLB structure are not observable here. Everything said about translation is inference from the data's shape.
+- "Touched" counts the bytes addressable by the chain. At low visit counts not every line is necessarily touched; at D64 × 131k lanes, coverage of small sets is complete.
+- win mode re-visits windows in a fixed order (`workgroup + link × G`). Real brick neighbourhoods also have temporal reuse across workgroups, which this model under-represents at small K.
