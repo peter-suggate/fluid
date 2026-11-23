@@ -893,30 +893,36 @@ ${stagedHead("vcViscousPage")}
  }
 }`);
 
-  // uExtend (the extension pair at h): a workgroup a brick, 512 lanes, one axis at a time over the 12^3 window
-  // (cells o-2..o+9). Seeds (ufxSeedCodeOf): 3 a closed face, 1 a source (liquid either side), 2 blocked (the
+  // uExtend (the extension pair at h): a workgroup a brick, 256 lanes, one axis at a time over the 12^3 window
+  // (cells o-2..o+9), swept as the brick's two z halves in turn (each 12 x 12 x 8, cells z0-2..z0+5). Seeds (ufxSeedCodeOf): 3 a closed face, 1 a source (liquid either side), 2 blocked (the
   // tile of the old texel, the cell below the face, lacks support: occupied distance over 3 tiles), 0 unreached.
   // uExtend reads the window alone (fgSlotWindowStrict): its stencil (from xLow = o - 3), the tiles 2B - 1 .. 2B + 2 of
   // its seam and support words and the 27 bricks' FC_LIQ words lie in the 3^3 bricks about it (a window probe saw no
   // lookup outside it on the pour or the seep; one would latch WINDOW). 4.11 to 3.77 ms on the pour, exact.
   const uExtend = k("uExtend", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, ...(F.tiered ? [FB.fext4] : [])], windowBase.replace(FG_SLOT_WINDOW_WGSL, FG_SLOT_WINDOW_STRICT_UX) + V_LIQUID_WGSL + V_RING_WGSL + nbfExtensionWGSL + (F.tiered ? V_EXT4_WGSL : "fn x4Slot(T:vec3i)->u32{return NB_NONE;}fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{return vec3f(0.0,0.0,-1.0);}") + /* wgsl */`
-var<workgroup> wV:array<f32,1728>;
-var<workgroup> wD:array<f32,1728>;
+// GPU-shape (docs/plans/gpu-shape/m1-distinct-once.md, lane A2): at 512 lanes over the whole 12^3 window (~23 KB of
+// workgroup memory, cap 768) one group was resident a core, and each of its ~17 barriers idled the core (m3-cpages.md
+// §5). Now 256 lanes sweep the brick's two z halves in turn: wV/wD hold a half's 12 x 12 x 8 window (9.2 KB, not
+// 13.8), wD is u32 (the distances bitcast) so that wLiqW's FC_LIQ words live in it before the first seed, and wS4
+// is three f32 a state (4.5 KB, not 6): ~15.4 KB a group. The same faces from the same seeds, in the same arithmetic.
+var<workgroup> wV:array<f32,1152>;
+var<workgroup> wD:array<u32,1152>;
+var<private> xZ0:i32;
 // fgLiquidOwner of cells o-3..o+9 (13^3 bits, from FC_LIQ: vLiquidOwner), staged once for the three axes.
 var<workgroup> wLiq:array<atomic<u32>,69>;
 // Tiered: the 4h state about the brick (ufxStage4: old 4h faces C in base-2..base+2, C's +face the C face C + e_a)
 // and whether each brick of the window has a supported h tile (ufxRH's mode bit 0).
-var<workgroup> wS4:array<vec4f,${F.tiered ? 375 : 1}>;
+var<workgroup> wS4:array<f32,${F.tiered ? 1125 : 3}>;
 var<workgroup> wSwept:array<atomic<u32>,27>;
 // Whether the window can seed a source: bit a, a reached 4h state of axis a staged (xProlong's only finite seeds);
 // bit 3, a liquid cell in wLiq (xCode's code 1). An axis with neither seeds no reached face, and a sweep over
 // unreached and blocked seeds changes none (ufxCombine of unreached neighbours keeps old): its sweep is skipped.
 var<workgroup> wReach:atomic<u32>;
 // vLiquidOwner's inputs, staged once: the 4^3 tiles about the window (tiles xBase4-1..xBase4+2; bit 0 4h-owned,
-// bit 1 its tile centre φ under -0.001) and the FC_LIQ words of the 27 bricks about the brick (16 a brick). The same
+// bit 1 its tile centre φ under -0.001) and the FC_LIQ words of the 27 bricks about the brick (16 a brick, in wD's
+// first 432 words until the first seed). The same
 // tiles' bit 2 is fgTileSupported (xCode's) and bit 3 foTileOwnerH, for the seeds and the finish.
 var<workgroup> wTile4:array<u32,64>;
-var<workgroup> wLiqW:array<u32,432>;
 var<private> xLow:vec3i;
 var<private> xBase4:vec3i;
 var<private> xBrick:vec3i;
@@ -927,7 +933,7 @@ fn xLiquidStaged(c:vec3i)->bool{
  if(!nbInWallBox(c)){return false;}
  let s=fgSlot(c);if(s==NB_NONE){return fgLiquidCell(c);}
  let n=vec3u((c>>vec3u(3u))-xBrick+vec3i(1));let l=nbLocal(c);
- return ((wLiqW[16u*(n.x+3u*n.y+9u*n.z)+(l>>5u)]>>(l&31u))&1u)!=0u;
+ return ((wD[16u*(n.x+3u*n.y+9u*n.z)+(l>>5u)]>>(l&31u))&1u)!=0u;
 }
 fn xTileBits(c:vec3i)->u32{let r=vec3u((c>>vec3u(2u))-xBase4+vec3i(1));return wTile4[r.x+4u*r.y+16u*r.z];}
 fn xOwnerH(c:vec3i)->bool{return (xTileBits(c)&8u)!=0u;}
@@ -942,12 +948,12 @@ fn xFaceU(c:vec3i,a:u32)->f32{
  return foUFaceU(c,a);
 }
 fn xLiquid(c:vec3i)->bool{let r=c-xLow;let i=u32(r.x+13*(r.y+13*r.z));return ((atomicLoad(&wLiq[i>>5u])>>(i&31u))&1u)!=0u;}
-fn xCell(k:u32)->vec3i{return vec3i(vec3u(k%12u,(k/12u)%12u,k/144u))-vec3i(2);}
-fn xInset(j:u32)->vec3i{return vec3i(vec3u(j%10u,(j/10u)%10u,j/100u))-vec3i(1);}
-fn xAt(c:vec3i)->u32{let q=vec3u(c+vec3i(2));return q.x+12u*(q.y+12u*q.z);}
-fn xUpwind(i:u32)->Ufx{let d=wD[i];if(d<0.0){return Ufx(0.0,1e+20);}return Ufx(wV[i],d);}
+fn xCell(k:u32)->vec3i{return vec3i(vec3u(k%12u,(k/12u)%12u,k/144u))-vec3i(2,2,2-xZ0);}
+fn xInset(j:u32)->vec3i{return vec3i(vec3u(j%10u,(j/10u)%10u,j/100u))-vec3i(1,1,1-xZ0);}
+fn xAt(c:vec3i)->u32{let q=vec3u(c+vec3i(2,2,2-xZ0));return q.x+12u*(q.y+12u*q.z);}
+fn xUpwind(i:u32)->Ufx{let d=bitcast<f32>(wD[i]);if(d<0.0){return Ufx(0.0,1e+20);}return Ufx(wV[i],d);}
 fn xSweepAt(c:vec3i,h:vec3f)->Ufx{
- let i=xAt(c);let old=Ufx(wV[i],wD[i]);if(old.d<=0.0){return old;}
+ let i=xAt(c);let old=Ufx(wV[i],bitcast<f32>(wD[i]));if(old.d<=0.0){return old;}
  return ufxCombine(old,xUpwind(i-1u),xUpwind(i+1u),xUpwind(i-12u),xUpwind(i+12u),xUpwind(i-144u),xUpwind(i+144u),h);
 }
 fn xCode(c:vec3i,a:u32)->u32{
@@ -960,7 +966,7 @@ fn xCode(c:vec3i,a:u32)->u32{
 // p = c - e_a: linear between the 4h owner's two faces on the axis, constant across; a coarse face weighs in only
 // where its sweep reached it. All h there is no 4h band: unreached.
 struct Uf4{v:vec2f,d:f32}
-fn xAt4(C:vec3i,a:u32)->Uf4{let d=vec3u(C-xBase4+vec3i(2));let s=wS4[125u*a+d.x+5u*d.y+25u*d.z];return Uf4(s.xy,s.z);}
+fn xAt4(C:vec3i,a:u32)->Uf4{let d=vec3u(C-xBase4+vec3i(2));let i=3u*(125u*a+d.x+5u*d.y+25u*d.z);return Uf4(vec2f(wS4[i],wS4[i+1u]),wS4[i+2u]);}
 fn xProlong(c:vec3i,a:u32)->Uf4{
  if(!FG_TIERED){return Uf4(vec2f(0.0),1e+20);}
  let e=fgUnit(a);let p=c-e;let C=p>>vec3u(2u);let hi=xAt4(C,a);let khi=ufxReached(hi.d);let own=Uf4(hi.v,select(1e+20,hi.d,khi));
@@ -987,7 +993,7 @@ fn xSeed(q:vec3i,a:u32)->Ufx{
  return Ufx(0.0,-1.0);
 }
 fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-xBrick+vec3i(1));return atomicLoad(&wSwept[r.x+3u*r.y+9u*r.z])!=0u;}
-@compute @workgroup_size(512) fn uExtend(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+@compute @workgroup_size(256) fn uExtend(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);var live=g<nbListCount(NB_LIST_F_ALL);
  var slot=0u;var o=vec3i(0);
  if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);}
@@ -996,38 +1002,42 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  vRingMarkDir(o,lid,live);workgroupBarrier();
  if(lid==0u){sRing=select(0u,1u,!live||vRingOf(live));}
  if(workgroupUniformLoad(&sRing)!=0u){return;}
- let h=vH();let l=lid;let c=o+nbLocalCoord(l);
+ let h=vH();
  xLow=o-vec3i(3);xBase4=o>>vec3u(2u);xBrick=o>>vec3u(3u);
- fgWindowStage(o>>vec3u(3u),lid,512u);workgroupBarrier();
+ fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();
  if(lid<69u){atomicStore(&wLiq[lid],0u);}
  if(lid<27u){atomicStore(&wSwept[lid],0u);}
  if(lid==0u){atomicStore(&wReach,0u);}
- if(live&&lid<432u){
-  let n=lid>>4u;let b=xBrick+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);
-  let s=fgBrickSlot(b);var w=0u;if(s!=NB_NONE){w=fcLoad(FC_LIQ+16u*s+(lid&15u));}
-  wLiqW[lid]=w;
- }
- if(live&&lid>=448u){
-  let j=lid-448u;let T=xBase4+vec3i(i32(j&3u),i32((j>>2u)&3u),i32(j>>4u))-vec3i(1);
-  var bits=0u;
-  if(FG_TIERED&&nbInWallBox(4*T)&&!foTileOwnerH(T)){bits=1u;if(fgTileCentre4(T)< -0.001){bits=3u;}}
-  if(fgTileSupported(4*T)){bits|=4u;}
-  if(FG_TIERED&&foTileOwnerH(T)){bits|=8u;}
-  wTile4[j]=bits;
- }
- if(FG_TIERED&&live&&lid<375u){
-  let d=lid%125u;let a=lid/125u;let C=xBase4+vec3i(vec3u(d%5u,(d/5u)%5u,d/25u))-vec3i(2);let T=C+fgUnit(a);
-  let cs=x4Slot(T);var st=vec3f(0.0,0.0,-1.0);if(cs!=NB_NONE){st=x4Load(cs,1u,foTileIndex(T),a);}
-  wS4[lid]=vec4f(st,0.0);
+ if(live){
+  for(var j=lid;j<432u;j+=256u){
+   let n=j>>4u;let b=xBrick+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);
+   let s=fgBrickSlot(b);var w=0u;if(s!=NB_NONE){w=fcLoad(FC_LIQ+16u*s+(j&15u));}
+   wD[j]=w;
+  }
+  if(lid>=192u){
+   let j=lid-192u;let T=xBase4+vec3i(i32(j&3u),i32((j>>2u)&3u),i32(j>>4u))-vec3i(1);
+   var bits=0u;
+   if(FG_TIERED&&nbInWallBox(4*T)&&!foTileOwnerH(T)){bits=1u;if(fgTileCentre4(T)< -0.001){bits=3u;}}
+   if(fgTileSupported(4*T)){bits|=4u;}
+   if(FG_TIERED&&foTileOwnerH(T)){bits|=8u;}
+   wTile4[j]=bits;
+  }
+  if(FG_TIERED){
+   for(var j=lid;j<375u;j+=256u){
+    let d=j%125u;let a=j/125u;let C=xBase4+vec3i(vec3u(d%5u,(d/5u)%5u,d/25u))-vec3i(2);let T=C+fgUnit(a);
+    let cs=x4Slot(T);var st=vec3f(0.0,0.0,-1.0);if(cs!=NB_NONE){st=x4Load(cs,1u,foTileIndex(T),a);}
+    wS4[3u*j]=st.x;wS4[3u*j+1u]=st.y;wS4[3u*j+2u]=st.z;
+   }
+  }
  }
  workgroupBarrier();
  if(live){
   var wet=false;
-  for(var j=lid;j<2197u;j+=512u){
+  for(var j=lid;j<2197u;j+=256u){
    if(xLiquidStaged(xLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u)))){atomicOr(&wLiq[j>>5u],1u<<(j&31u));wet=true;}
   }
   var reach=select(0u,8u,wet);
-  if(FG_TIERED&&lid<375u&&ufxReached(wS4[lid].z)){reach|=1u<<(lid/125u);}
+  if(FG_TIERED){for(var j=lid;j<375u;j+=256u){if(ufxReached(wS4[3u*j+2u])){reach|=1u<<(j/125u);}}}
   if(reach!=0u){atomicOr(&wReach,reach);}
   // A lane a tile of the 27 bricks about the brick (216 lanes).
   if(FG_TIERED&&lid<216u){
@@ -1040,30 +1050,34 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  for(var a=0u;a<3u;a++){
   // No source seeded (wReach): every face keeps its seed, the finish takes its own.
   let sweep=(reach&(8u|(1u<<a)))!=0u;
-  if(live&&sweep){
-   for(var r=0u;r<4u;r++){
-    let k=lid+512u*r;if(k>=1728u){continue;}
-    // The old texel q - e_a in a 4h tile: the 4h band prolonged (ufxH's kind 2); else F's own seed.
-    let s=xSeed(o+xCell(k),a);
-    wV[k]=s.v;wD[k]=s.d;
+  for(var hz=0u;hz<2u;hz++){
+   // Half hz: the brick's cells z 4hz..4hz+3 (lane lid's cell lid + 256 hz), its window z 4hz-2..4hz+5.
+   xZ0=4*i32(hz);let l=lid+256u*hz;let c=o+nbLocalCoord(l);
+   if(live&&sweep){
+    for(var r=0u;r<5u;r++){
+     let k=lid+256u*r;if(k>=1152u){continue;}
+     // The old texel q - e_a in a 4h tile: the 4h band prolonged (ufxH's kind 2); else F's own seed.
+     let s=xSeed(o+xCell(k),a);
+     wV[k]=s.v;wD[k]=bitcast<u32>(s.d);
+    }
    }
+   workgroupBarrier();
+   var held:array<Ufx,3>;
+   if(live&&sweep){for(var r=0u;r<3u;r++){let k=lid+256u*r;if(k<600u){held[r]=xSweepAt(xInset(k),h);}}}
+   workgroupBarrier();
+   if(live&&sweep){for(var r=0u;r<3u;r++){let k=lid+256u*r;if(k<600u){let i=xAt(xInset(k));wV[i]=held[r].v;wD[i]=bitcast<u32>(held[r].d);}}}
+   workgroupBarrier();
+   // F writes the faces whose old texel (the cell below) is h-owned; a 4h owner's subfaces are uExt4's.
+   if(live&&(!FG_TIERED||xOwnerH(c)||xOwnerH(c-fgUnit(a)))&&!xCoarse(c-fgUnit(a))){
+    var s=Ufx(0.0,-1.0);
+    if(sweep){s=xSweepAt(nbLocalCoord(l),h);}else{s=xSeed(c,a);}
+    let iu=vAt(NB_VEL_F_UP0,slot,a,l);
+    var out=xFinish(s,c,a,xCode(c,a),vel[iu],xSwept(c-fgUnit(a)));
+    if(!fgFaceOpen(c,a)){out.y=0.0;}
+    vel[vAt(NB_VEL_F_US0,slot,a,l)]=out.x;vel[iu]=out.y;
+   }
+   workgroupBarrier();
   }
-  workgroupBarrier();
-  var held:array<Ufx,2>;
-  if(live&&sweep){for(var r=0u;r<2u;r++){let k=lid+512u*r;if(k<1000u){held[r]=xSweepAt(xInset(k),h);}}}
-  workgroupBarrier();
-  if(live&&sweep){for(var r=0u;r<2u;r++){let k=lid+512u*r;if(k<1000u){let i=xAt(xInset(k));wV[i]=held[r].v;wD[i]=held[r].d;}}}
-  workgroupBarrier();
-  // F writes the faces whose old texel (the cell below) is h-owned; a 4h owner's subfaces are uExt4's.
-  if(live&&(!FG_TIERED||xOwnerH(c)||xOwnerH(c-fgUnit(a)))&&!xCoarse(c-fgUnit(a))){
-   var s=Ufx(0.0,-1.0);
-   if(sweep){s=xSweepAt(nbLocalCoord(l),h);}else{s=xSeed(c,a);}
-   let iu=vAt(NB_VEL_F_UP0,slot,a,l);
-   var out=xFinish(s,c,a,xCode(c,a),vel[iu],xSwept(c-fgUnit(a)));
-   if(!fgFaceOpen(c,a)){out.y=0.0;}
-   vel[vAt(NB_VEL_F_US0,slot,a,l)]=out.x;vel[iu]=out.y;
-  }
-  workgroupBarrier();
  }
 }
 fn fsBit4(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}`);
