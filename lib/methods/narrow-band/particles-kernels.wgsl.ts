@@ -589,43 +589,52 @@ fn psCellGate(c:vec3i,re:bool)->vec3f{
 }
 fn psSalt(initial:bool)->u32{return select(select(nbRing(cfg.x,NB_RING_STEP)+1u,(nbRing(cfg.x,NB_RING_STEP)+1u)^0x80000000u,cfg.w==2u),0u,initial);}
 // The count pass: the accepted sites of cell c, a bit a site index j.
-fn pSeedCellMask(c:vec3i,bank:u32,initial:bool)->u32{
+// A site a lane (GPU-shape, lane C, docs/plans/gpu-shape/lane-c-particles.md): 0.1-1.6% of a step's launched cells
+// reach the site loop, each a serial chain of up to 8 site tests. Phase A runs every cell's gates (pSeedCellPush,
+// two cells a lane) and lists a looping cell with its goal - n0 sites; phase B runs one (cell, j) a lane and sets the
+// site's bit in the cell's mask (sMask; order-free, the held skip depends on j alone); the count and write passes
+// read the masks. pSeed -6..-10% a step, its written buffers identical on dam, letters, paddleboats and seep.
+const PS_SCAP:u32=512u;
+var<workgroup> sEnt:array<u32,512>;
+var<workgroup> sHD:array<vec2f,512>;
+var<workgroup> sPB:array<u32,512>;
+var<workgroup> sMask:array<atomic<u32>,512>;
+var<workgroup> sAlloc:atomic<u32>;
+// Phase A: cell c's gates (pSeedCellMask's, to its site loop); a looping cell takes a list entry and its pairs.
+fn pSeedCellPush(c:vec3i,bank:u32,initial:bool,li:u32){
  let re=cfg.w==2u;
- let gate=psCellGate(c,re);if(gate.x==0.0){return 0u;}let d=gate.y;
- let reentry=cfg.w==2u;
- let goal=nbSeedTarget(d);let mass=nbfSeedMass(d);
+ let gate=psCellGate(c,re);if(gate.x==0.0){return;}let d=gate.y;
+ let goal=nbSeedTarget(d);
  var n0=0u;var held=0.0;
  if(!initial){
-  let run=fgRun(c);n0=run.y-run.x;if(n0>=goal){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return 0u;}
-  held=pCellMass(run,bank);if(held>=8.0){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return 0u;}
+  let run=fgRun(c);n0=run.y-run.x;if(n0>=goal){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return;}
+  held=pCellMass(run,bank);if(held>=8.0){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return;}
  }
- // uncovered (pUncovered || psSeam) only where nbfSeedSiteOk reads it (a shallow site, the reseed); a cell with its
- // own records has one among its 27 (pUncovered false).
  var uncovered=true;var known=initial;
- let salt=psSalt(initial);
- // The cell's own tile is h-owned (sTileOk): fgCellOwned(c).
- let fine=true;
- var mask=0u;
- // A shallow cell (centre over -1.5) takes uncovered at its first site (the mass rule never skips it: held < 8).
- // Taken first, a covered one passes only a site in this step's drop (nbfSeedSiteOk's second rule): none without a
- // source (sourcePhi 1), and its sites' source test precedes their depth.
  if(!known&&d>-1.5){uncovered=(n0==0u&&pUncovered(c))||psSeam(c);known=true;}
  let covered=!initial&&d>-1.5&&!uncovered;
- if(covered&&(cfg.w==2u||!nbSourceOn())){return 0u;}
- for(var j=n0;j<goal;j++){
-  if(!initial&&held+f32(j-n0)*mass>=8.0){continue;}
-  let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);
-  // seedSite's source test (nbSourcePhi(q, 1)): a site in this step's drop is exempt from the inner-band rule, so a
-  // drop gets its whole band (Ferstl et al. 2016 §3.2: liquid made from a description). The old engine seeds after
-  // the union (transfer): part 2's seed; part 1's re-entry (cfg.w = 2) runs before this step's drop is in φ.
-  let sourcePhi=select(1.0,nbSourcePhi(site,1.0),cfg.w!=2u);
-  if(covered&&sourcePhi>=0.0){continue;}
-  let distance=psSiteDistanceCell(site,reentry);
-  if(!known&&(distance>-1.0||d>-1.5)){uncovered=(n0==0u&&pUncovered(c))||psSeam(c);known=true;}
-  if(!nbfSeedSiteOk(distance,false,initial,d,sourcePhi,uncovered,fine)){continue;}
-  mask|=1u<<j;
- }
- return mask;
+ if(covered&&(cfg.w==2u||!nbSourceOn())){return;}
+ // The loop's lazy uncovered (a site over -1): the same value, taken up front (nbfSeedSiteOk reads it only there).
+ if(!known){uncovered=(n0==0u&&pUncovered(c))||psSeam(c);}
+ let a=atomicAdd(&sAlloc,((goal-n0)<<16u)|1u);let e=a&0xffffu;
+ sEnt[e]=li|(n0<<9u)|(select(0u,1u,uncovered)<<25u)|(select(0u,1u,covered)<<26u);
+ sHD[e]=vec2f(held,d);sPB[e]=a>>16u;atomicStore(&sMask[e],0u);
+}
+// Phase B: site j of list cell e.
+fn pSeedSite(o:vec3i,e:u32,k:u32,initial:bool){
+ let w=sEnt[e];let c=o+nbLocalCoord(w&511u);let n0=(w>>9u)&0xffffu;let j=n0+k;
+ let hd=sHD[e];let held=hd.x;let d=hd.y;
+ let reentry=cfg.w==2u;let mass=nbfSeedMass(d);
+ if(!initial&&held+f32(j-n0)*mass>=8.0){return;}
+ let uncovered=((w>>25u)&1u)!=0u;let covered=((w>>26u)&1u)!=0u;
+ let salt=psSalt(initial);let fine=true;
+ let kk=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),kk,salt);
+ let sourcePhi=select(1.0,nbSourcePhi(site,1.0),cfg.w!=2u);
+ if(covered&&sourcePhi>=0.0){return;}
+ if(!reentry&&any(c!=psCC)){psCC=c;psCR=psReach1(c);if(psCR){for(var q=0u;q<8u;q++){psCV[q]=psDepthVertex(c+vec3i(vec3u(q&1u,(q>>1u)&1u,q>>2u)));}}}
+ let distance=psSiteDistanceCell(site,reentry);
+ if(!nbfSeedSiteOk(distance,false,initial,d,sourcePhi,uncovered,fine)){return;}
+ atomicOr(&sMask[e],1u<<j);
 }
 // The write pass: cell c's accepted sites (mask) from at, in site order.
 fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
@@ -646,7 +655,7 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
 }
 @compute @workgroup_size(256) fn pSeed(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let bank=pSrc()^1u;let initial=cfg.w==1u;let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
- if(lid==0u){atomicStore(&sCount,0u);}
+ if(lid==0u){atomicStore(&sCount,0u);atomicStore(&sAlloc,0u);}
  if(lid<8u){atomicStore(&sTileSeeds[lid],0u);}
  var o=vec3i(0);var slot=0u;
  if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);}
@@ -672,11 +681,20 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
   if(cfg.w!=2u){for(var j=lid;j<729u;j+=256u){sDepth[j]=fgDepthVertex(o+vec3i(i32(j%9u),i32((j/9u)%9u),i32(j/81u)));}}
   workgroupBarrier();psStaged=cfg.w!=2u;
  }
- var n=0u;var masks=array<u32,2>(0u,0u);
+ var n=0u;var ncell=0u;
  if(go){
-  for(var r=0u;r<2u;r++){
-   let c=o+nbLocalCoord(lid+256u*r);let mk=pSeedCellMask(c,bank,initial);masks[r]=mk;let m=countOneBits(mk);n+=m;
-   if(cfg.w==2u&&m>0u){atomicAdd(&sTileSeeds[fgTileOf(c)],m);}
+  for(var r=0u;r<2u;r++){let li=lid+256u*r;pSeedCellPush(o+nbLocalCoord(li),bank,initial,li);}
+  workgroupBarrier();
+  let a=atomicLoad(&sAlloc);ncell=a&0xffffu;let npair=a>>16u;
+  for(var p=lid;p<npair;p+=256u){
+   var lo=0u;var hi=ncell;
+   while(hi-lo>1u){let mid=(lo+hi)>>1u;if(sPB[mid]<=p){lo=mid;}else{hi=mid;}}
+   pSeedSite(o,lo,p-sPB[lo],initial);
+  }
+  workgroupBarrier();
+  for(var e=lid;e<ncell;e+=256u){
+   let m=countOneBits(atomicLoad(&sMask[e]));n+=m;
+   if(cfg.w==2u&&m>0u){atomicAdd(&sTileSeeds[fgTileOf(o+nbLocalCoord(sEnt[e]&511u))],m);}
   }
  }
  var off=0u;if(n>0u){off=atomicAdd(&sCount,n);}
@@ -701,7 +719,7 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
  workgroupBarrier();
  if(n==0u){return;}
  var at=sBase+off;
- for(var r=0u;r<2u;r++){if(masks[r]!=0u){pSeedCellWrite(o+nbLocalCoord(lid+256u*r),bank,initial,masks[r],at);at+=countOneBits(masks[r]);}}
+ for(var e=lid;e<ncell;e+=256u){let m=atomicLoad(&sMask[e]);if(m!=0u){pSeedCellWrite(o+nbLocalCoord(sEnt[e]&511u),bank,initial,m,at);at+=countOneBits(m);}}
 }`;
   // Statics (lane E): seedSite's nbParticleBlocked refuses a site in a closed cell.
   const seedBindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.parts, FB.fcell, FB.src];
