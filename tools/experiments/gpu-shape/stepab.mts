@@ -30,14 +30,16 @@
 //              count and the max reported); every other word stays exact. A word is f32 by its binding's declared type
 //              (array<f32>: vel, pres, pmgF, pmgRed, xfer, fext4, pEnergy), by the phi pool's channels (PHI, PHI1;
 //              FLAGS exact) or by the particle record (every word but before.w, which packs mass, mode and age).
-//              Anything else (set, dir, args, census, fcell, pmgTop, cut's BMASK, and pmgC, which stores u32
+//              The set's velocity bounds (BOUND_F, BOUND_C: atomicMax of bitcast non-negative f32 speeds, pMove's pCount)
+//              are f32 words too, with vel's floor (lane C, 2026-11-24: a pMove schedule's 1-ulp grid velocities moved bounds).
+//              Anything else (the rest of set, dir, args, census, fcell, pmgTop, cut's BMASK, and pmgC, which stores u32
 //              patterns as bitcast f32 in its PDELTA words) stays exact. An order-dependent particle buffer
 //              cancels its identical records and pairs the rest by their exact words and quantized floats.
 //              Near zero, where relaxed math's cancellation makes ulp meaningless (pSeed's site depth, 2026-11-24), an
 //              f32 word also passes if |Δ| ≤ 1e-6 × its channel's typical scale (absFloor): h for distances and φ, which
 //              the engine stores in h (phi's PHI and PHI1, a particle's position.xyz and site depth velocity.w,
 //              fext4's distance), and 1 m/s for velocities (vel, a particle's velocity.xyz, before.xyz and affine
-//              rows cx..cz in m/s per h, fext4's value and prior): both 1e-6 in stored units. Channels without a
+//              rows cx..cz in m/s per h, fext4's value and prior, the set's speed bounds): both 1e-6 in stored units. Channels without a
 //              scale of their own keep the ulp test alone: pres, pmgF, pmgRed, xfer, pEnergy, a particle's heat
 //              (position.w).
 //   SCENE=seep|dam|letters|paddleboats|<id> STEPS=100 BASE=tree CAND=tree [S=9] [R=4] [OUT=x.jsonl] [NOEXACT=1] [NOTIME=1] [TOL=ulp4]
@@ -169,6 +171,8 @@ const floatWords = (name: string, type: string | undefined): ((k: number) => boo
     return k => k < end && !(k >= flagsF && k < flagsF + f) && !(k >= flagsC && k < flagsC + c);
   }
   if (F32_BUFFERS.has(name) && type === "array<f32>") return () => true;
+  // BOUND_F then BOUND_C, contiguous up to BIN_START (brick-abi.ts set regions; alignment padding stays zero).
+  if (name === "set") { const lo = L.set.boundF, hi = L.set.binStart; if (!(L.set.boundC > lo && L.set.boundC < hi)) throw new Error("stepab: set's bound regions moved (classify them)"); return k => k >= lo && k < hi; }
   return null;
 };
 /** The absolute floor of an f32 word (0: the ulp test alone); see the header. Words in stored units. */
@@ -176,6 +180,8 @@ const ABS_FLOOR = 1e-6;
 const absFloor = (name: string): ((k: number) => number) => {
   if (PARTICLE_BUFFERS.has(name)) { const st = e.layout.particleStride; return k => (k % st === 3 ? 0 : ABS_FLOOR); }
   if (name === "phi" || name === "vel" || name === "fext4") return () => ABS_FLOOR;
+  // The set's velocity bounds are speeds in vel's units: vel's floor.
+  if (name === "set") { const lo = e.layout.set.boundF, hi = e.layout.set.binStart; return k => (k >= lo && k < hi ? ABS_FLOOR : 0); }
   return () => 0;
 };
 const f32v = new Float32Array(1), u32v = new Uint32Array(f32v.buffer);

@@ -185,6 +185,25 @@ fn pSupported(q:vec3f)->bool{
 // it. Tiered, off the h band it is the 4h authority's φ (fgPhiAt), not fgDepth's push to six cells (nbfFarDepth): a
 // cell at a 4h surface is not deep (the push merged held records heavy and kept re-entered ones from splitting:
 // sparse heavy records and dimples by the seam). Every other fgDepth reader, the grid's included, keeps the push.
+// pMassDepth2 (GPU-shape, lane C): the merge's cell-centre depth (x, pMassDepth(floor(q) + 0.5)) and G2P's fgDepth(q)
+// (y) read the same cell's reach word and eight FC_DEPTH vertices, atomic loads the compiler never merges; one read
+// serves both (pMove -8..-15% a step; fmoved within 1 ulp under relaxed math, TOL=ulp4).
+fn pMassDepth2(q:vec3f)->vec2f{
+ let c=vec3i(floor(q));let p=floor(q)+0.5;
+ if(!fgReach1(c)){
+  let far=fgPhiAt(q);let fq=select(max(far,6.0),min(far,-6.0),far<0.0);
+  let fp=fgPhiAt(p);var dm=fp;if(!FG_TIERED){dm=select(max(fp,6.0),min(fp,-6.0),fp<0.0);}
+  return vec2f(dm,fq);
+ }
+ let fm=p-vec3f(c);let f=q-vec3f(c);var vm=0.0;var vq=0.0;
+ fdBricks(c);
+ for(var k=0u;k<8u;k++){
+  let corner=vec3u(k&1u,(k>>1u)&1u,k>>2u);let v=fdVertex(c+vec3i(corner));
+  let wm=select(1.0-fm,fm,corner!=vec3u(0));let w=select(1.0-f,f,corner!=vec3u(0));
+  vm+=wm.x*wm.y*wm.z*v;vq+=w.x*w.y*w.z*v;
+ }
+ return vec2f(vm,vq);
+}
 fn pMassDepth(p:vec3f)->f32{if(FG_TIERED&&!fgReach1(vec3i(floor(p)))){return fgPhiAt(p);}return fgDepth(p);}
 // The cell-mass cut's bound (Ferstl et al. 2016 §3.3, as mass). In the refill's deep class (centre depth <= -1.5,
 // where pSeedCellMask seeds graded records up to one cell's mass, 8) the cut is at that same 8, so the refill and the
@@ -266,10 +285,12 @@ fn pFile(i:u32,p:Particle,split:bool){
  // crowdedCells "merge" with the cell-mass cut (Ferstl et al. 2016 §3.3), on the pre-move runs. Not in a 4h-owned
  // cell (lane E): its depth is not known there (fgDepth's -6 off the h band is the deep interior's, not a held
  // record's surface), and a held record is kept as it is for a quick reversal; merged there it re-enters heavy.
+ // The merge's depth read also gives G2P's fgDepth(q) (pMassDepth2), kept while q is unmerged.
+ var mD=0.0;var mHaveD=false;
  if(!fgCellCoarse(vec3i(floor(q)))){
   let run=fgRun(vec3i(floor(q)));
   if(i>=run.x&&i<run.y){
-   let start=run.x;let deep=pMassDepth(floor(q)+0.5);let cap=nbfCellCap(deep,20.0);
+   let start=run.x;let dd=pMassDepth2(q);let deep=dd.x;mD=dd.y;mHaveD=true;let cap=nbfCellCap(deep,20.0);
    var end=run.y;
    if(deep< -1.0){
     var held=0.0;let bound=pCellMassBound(deep);
@@ -296,7 +317,7 @@ fn pFile(i:u32,p:Particle,split:bool){
  }
  if(!nbfFinite(v,1e10)){pFatal(2u,i);return;}${apic ? `
  if(!nbfApicFinite(array<vec3f,3>(p.cx.xyz,p.cy.xyz,p.cz.xyz),1e10)){pFatal(2u,i);return;}` : ""}
- let depth=fgDepth(q);
+ var depth=mD;if(!mHaveD||merged){depth=fgDepth(q);}
  p.before.w=nbParticleRestate(p,0.0,mode);
  p.velocity=vec4f(v,depth);p.position.w=max(p.position.w,pHeat(q));
  p.before=vec4f(pic,p.before.w);
@@ -321,7 +342,8 @@ fn pFile(i:u32,p:Particle,split:bool){
  if(!ballistic){p.position.w=nbfArrivalHeat(p.position.w,pHeat(endpoint));}
  p.position=vec4f(endpoint,p.position.w);
  var split=false;
- {
+ // nbfSplitWanted needs a mass over 1 and a coupled record: only such a record reads the endpoint's run and depth.
+ if(m>1.0&&!ballistic){
   let run=fgRun(pCellOf(endpoint));
   let seeded=nbSeedTarget(pMassDepth(floor(endpoint)+0.5));
   if(nbfSplitWanted(m,ballistic,20.0,run.y-run.x,seeded)){
