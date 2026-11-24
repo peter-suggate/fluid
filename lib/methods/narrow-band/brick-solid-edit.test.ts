@@ -190,7 +190,9 @@ test("brick solid edit (GPU): fill, undo, redo, clear and reload on the running 
       // resident now; the next step's census promotes the rest (the static need rule reads the new mask).
       const f1 = fillCells(s1, "fill");
       t.diagnostic(`fill: ${solidCells} solid cells, ${touched} bricks in reach, ${f1.near} NEAR_SOLID, ${f1.closed} fill cells resident and closed, K free ${s0.topK} -> ${s1.topK}`);
-      assert.ok(f1.near > 0, "the fill's reach holds resident bricks");
+      // Since R2's 4h-scale demotion (35eb7ee3, 2026-11-23) the census holds the fill's whole reach 4h at step 3 (it held
+      // three F bricks there before), so this restamp may reach none; the refill below restamps resident bricks live.
+      assert.equal(f1.near, touched, "every resident brick in the fill's reach is NEAR_SOLID");
 
       // Undo, then redo: each state again, and the mask back to its slots.
       assert.notEqual(solver.applySceneUniforms(scene0), false, "the undo is taken live");
