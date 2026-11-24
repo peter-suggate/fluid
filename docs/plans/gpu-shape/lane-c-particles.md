@@ -357,3 +357,39 @@ velocity, the same as the old engine's nbFinish.
   converges into the wall, and the sheet's records all lie at surface depth, where neither the projection, nor
   merge, nor separation (tangential only) holds their spacing.
 - The drift and timing round was not run, since the piles did not go.
+
+### pSeparateHeavy: built, exact, slower everywhere (no-go, 2026-11-24)
+
+**Built as designed** (scratch tree lane-c/heavy/tree; patch lane-c/heavy/pseparate-heavy-NOGO.patch).
+- pSeparate lists a record whose own cell's run holds more than T records (an `atomicAdd` into a set list of 64
+  words an F slot, header words 76 and 77), and skips it. Past the list's capacity it sums in place.
+- pSeparateArgs (direct, one lane) writes the arguments at args word `ARGS.LANE_F + 6`.
+- pSeparateHeavy runs one listed record a 32-lane workgroup. With subgroups it uses a ballot and subgroupShuffle;
+  without them, workgroup memory and lane 0. Both forms are exact.
+
+**Exactness.** Computing each neighbour's term in its own lane and adding the shuffled terms in j order is *not*
+exact: 5–12k fmoved words differ, up to 84k ulp. That held for three forms of the term (as written, its product
+fused with the reciprocal, and the scalar factor fused). Metal's relaxed math contracts the term into the add
+differently in each context, and the sum's cancellation amplifies a 1-ulp term into a large ulp error in the result.
+- The exact form spreads only the loads: the lanes load 32 neighbours, a conservative ballot (`l2 < 1.001·far`)
+  drops the sure misses, and every lane runs nbfSeparationAdd on each shuffled neighbour in j order.
+- m7ab range pSeparate → pSeparateHeavy: fmoved identical; only the list words and the args differ.
+
+**Timing** (m7ab, Δ min of the range against the in-place pSeparate, R = 3; A/A in brackets):
+
+| dam state | T | exact (subgroup) | parallel terms (inexact, the timing ceiling) |
+|---|---|---|---|
+| step 100 | 32 | +834 µs (+12); workgroup form +284 (−4) | +122 (+0.5) |
+| step 120 | 64 | +2168 (−49) | +908 (+190) |
+| step 120 | 128 | +1510 (−15) | +203 (−17) |
+| step 150 | 64 | +1904 (−3) | +111 (−7) |
+| step 150 | 128 | +424 (+18) | +330 (−16) |
+
+**Why it loses.** In-place pSeparate is already efficient on a crowded cell. Its 32 lanes are 32 records of the same
+cell, the same runs and the same neighbour loads (broadcast from cache), and each lane's chain is that record's
+whole sum. Spread one record a SIMD, the exact chain is the same length but 32 times fewer records share it. Even with
+the terms in parallel (inexact), a ballot-and-shuffle step per neighbour within reach costs more SIMD time than the
+tail it removes. The heavy records' 0.78 ms bound is real work, not idle tail.
+
+pSeparateHeavy is not landed. pSeparate's remaining lever is fewer neighbours, which is physics: the parked "why
+the old engine relaxes faster" item.
