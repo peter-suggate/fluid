@@ -37,8 +37,10 @@ import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
  * - TRACE_CAPPED: the momentum traces that hit the segment cap (a counter);
  * - VOL_BUDGET (2 words: low, high): the captured budget, cells in 2^-20 units (boot's vGauge);
  * - VOL_SUM (2 pairs, by step parity): the step's filled volume, same units (vGauge; the next step clears it);
- * - VOL_CAPTURED: 1 once the boot captured the budget; VOL_FILLED: the last gauge's filled cells (f32 bits). */
-export const FH = { RATE: 64, TRACE_CAPPED: 65, VOL_BUDGET: 66, VOL_SUM: 68, VOL_CAPTURED: 72, VOL_FILLED: 73 } as const;
+ * - VOL_CAPTURED: 1 once the boot captured the budget; VOL_FILLED: the last gauge's filled cells (f32 bits);
+ * - LC_LONG: lcRetire's listed vertices (a counter; levelset-coarse.wgsl.ts lcRetireArgs moves it to LC_LONG_RUN,
+ *   lcRetireLong's count, and zeroes it). */
+export const FH = { RATE: 64, TRACE_CAPPED: 65, VOL_BUDGET: 66, VOL_SUM: 68, VOL_CAPTURED: 72, VOL_FILLED: 73, LC_LONG: 74, LC_LONG_RUN: 75 } as const;
 /** The gauge's fixed point: 2^20 a cell, so a brick's sum (at most 512 cells) fits a word and the order of the
  * atomics cannot change the total. */
 export const VOL_UNIT = 2 ** 20;

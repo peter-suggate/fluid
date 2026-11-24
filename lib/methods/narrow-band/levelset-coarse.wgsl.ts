@@ -17,6 +17,8 @@
  *   place (see "Race freedom").
  * - lcRetire: uniform-narrow-band-redistance.wgsl.ts nbBuildDistance (73-111), nbRedistanceVertex (146-166),
  *   nbCoarseBuild (175-179), nbBoundCoarseMetric (221-242), depthCoarse/redistanceCoarse (to 251). PHI → PHI1.
+ *   Split (GPU-shape A2, 2026-11-24): lcRetire retires the vertices it does not build and lists the rest;
+ *   lcRetireArgs and lcRetireLong build those, a lane each. The same functions, so bit for bit.
  * - lcPublish: redistanceCoarse's store (nbStoreInPlace) of lcRetire's result. PHI1 → PHI.
  * The shared formulas are lane F's verbatim ports (levelset-formulas.wgsl.ts): nbfSurfaceTrace, nbfCellTrilinear,
  * nbfCubicLimited, nbfMovedSmoothing, nbfInterpolatedHeat, nbfUnion*, nbfBulkDepth, nbfCellDistance, nbfTrilinear,
@@ -116,20 +118,22 @@
  *
  * Unknown features fail: a lattice that is not whole pages latches FAIL.UNSUPPORTED (0x4c430001; brick-scene refuses
  * it), BULK16 state in lcAdvect latches FAIL.UNSUPPORTED (0x4c430003, deviation 2), and a trace over 128 cells
- * latches FAIL.SEGMENTS (0x4c430002, nbfSurfaceTrace's fatal).
+ * latches FAIL.SEGMENTS (0x4c430002, nbfSurfaceTrace's fatal). lcRetire's list over its 512 words a C slot latches
+ * FAIL.UNSUPPORTED (0x4c430004; a vertex is listed at most once a step, so a guard).
  *
  * Dispatch: every kernel is list C_ALL, G1 (a workgroup a page), workgroup size 256 (two rounds of the page's 512
  * C vertices), like lane F's F_ALL G1 kernels. Each one can instead fold into the pass of its lane F twin over the
  * FC list (FC_G1: F_ALL then C_ALL; LC_FOLD): the twin's F-side and this C-side read and write disjoint words. The
  * page bodies take the page and a uniform live flag, and every barrier they hold is under uniform control.
  */
-import { ARGS, BOX_TOKEN, type BrickLayout } from "./brick-abi";
+import { ARGS, BOX_TOKEN, H, type BrickLayout } from "./brick-abi";
 import { CFG, type BrickKernel } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { FB, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel, fluidLayout } from "./fluid-grid.wgsl";
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 import { brickSourceWGSL } from "./brick-source.wgsl";
+import { FH } from "./velocity-kernels.wgsl";
 
 /** Lane F's kernel whose pass each C kernel can fold into (FC_G1 dispatch), in the frame's order. */
 export const LC_FOLD = { lcAdvect: "lAdvect", lcCouple: "lUnion", lcClear: "lClear", lcRetire: "lDistance", lcPublish: "lPublish" } as const;
@@ -683,24 +687,29 @@ fn lcHotCorner(v:vec3i)->bool{
  return false;
 }
 // nbRedistanceVertex at C vertex v (cur: its current φ), with nbCoarseBuild's build where it applies; deviation 11
-// where no h tile is in the stencil.
-fn lcRetired(v:vec3i,cur:f32)->f32{
- if(lcVertexCold(v)||lcHotCorner(v)){return cur;}
- let c=lcCellOf(v);
- if(!lcStencilFine(c>>vec3u(2u))){return lcBoundMetric(v,lcBuildDistance(v,c),true);}
- if(fgReach2(c)){return lcBoundMetric(v,lcBuildDistance(v,c),false);}
- return nbfFarSentinel(cur,1.0);
-}
-// One C vertex a lane: the page's z plane lcPart (X8), as lcAdvect.
+// where no h tile is in the stencil (coarse).
+// One C vertex a lane: the page's z plane lcPart (X8), as lcAdvect. The redistance's tests here; a vertex it builds
+// (lcBuildDistance, then lcBoundMetric) is listed (C slot << 10 | l << 1 | coarse) for lcRetireLong, the rest
+// retired here. Built in place, a page's workgroup ran its slowest vertex's whole chain (to 1.2 ms) while its other
+// lanes idled; listed, lcRetireLong packs the built vertices 64 a workgroup.
 fn lcRetirePage(slot:u32,live:bool,lid:u32){
  lcCheckLattice(lid);
  if(!live){return;}
- let o=nbCOrigin(slot);
- for(var r=0u;r<1u;r++){
-  let l=lid+64u*lcPart;let v=o+4*nbLocalCoord(l);
-  if(!lcCOwned(v)){lcMirror(NB_PHI_F_PHI1,NB_PHI_C_PHI1,slot,l,v);continue;}
-  lcSetC(NB_PHI_C_PHI1,slot,l,lcRetired(v,lcPhiC(NB_PHI_C_PHI,slot,l)));
- }
+ let o=nbCOrigin(slot);let l=lid+64u*lcPart;let v=o+4*nbLocalCoord(l);
+ if(!lcCOwned(v)){lcMirror(NB_PHI_F_PHI1,NB_PHI_C_PHI1,slot,l,v);return;}
+ let cur=lcPhiC(NB_PHI_C_PHI,slot,l);
+ if(lcVertexCold(v)||lcHotCorner(v)){lcSetC(NB_PHI_C_PHI1,slot,l,cur);return;}
+ let c=lcCellOf(v);let coarse=!lcStencilFine(c>>vec3u(2u));
+ if(!coarse&&!fgReach2(c)){lcSetC(NB_PHI_C_PHI1,slot,l,nbfFarSentinel(cur,1.0));return;}
+ let i=atomicAdd(&nbSet[NB_H_LANE_F+${FH.LC_LONG - H.LANE_F}u],1u);
+ if(i>=NB_LC_LONG_CAP){nbFail(NB_FAIL_UNSUPPORTED,0x4c430004u);return;}
+ atomicStore(&nbSet[NB_S_LC_LONG+i],(slot<<10u)|(l<<1u)|select(0u,1u,coarse));
+}
+// lcRetireLong: a listed vertex a lane (lcRetireArgs's count), the build lcRetirePage's tests chose for it.
+fn lcRetireLongAt(i:u32){
+ if(i>=min(nbSetWord(NB_H_LANE_F+${FH.LC_LONG_RUN - H.LANE_F}u),NB_LC_LONG_CAP)){return;}
+ let w=nbSetWord(NB_S_LC_LONG+i);let slot=w>>10u;let l=(w>>1u)&511u;let v=nbCOrigin(slot)+4*nbLocalCoord(l);
+ lcSetC(NB_PHI_C_PHI1,slot,l,lcBoundMetric(v,lcBuildDistance(v,lcCellOf(v)),(w&1u)!=0u));
 }
 fn lcPublishPage(slot:u32,live:bool,lid:u32){
  lcCheckLattice(lid);
@@ -732,10 +741,15 @@ export const LC_ADVECT_GROUPS = { indirect: ARGS.C_ACT2_G1 } as const;
  * couple's and retire's (lane E, 2026-11-16, frozen dam at step 100: 0.37 -> 0.27 and 0.63 -> 0.40 ms, bit for bit).
  * lcClear and lcPublish take a 256-lane workgroup an entry (G1); lcAdvect takes LC_ADVECT_GROUPS. */
 export const LC_GROUPS = { lcAdvect: LC_ADVECT_GROUPS, lcCouple: "X8", lcRetire: "X8", lcClear: "G1", lcPublish: "G1" } as const;
+/** lcRetireLong's arguments (lane F's args region), lcRetireArgs's: a 64-lane workgroup a 64 listed vertices. */
+export const LC_RETIRE_ARGS = ARGS.LANE_F + 3;
 
 export interface LevelSetCoarseKernels {
   readonly lcAdvect: BrickKernel; readonly lcCouple: BrickKernel; readonly lcClear: BrickKernel;
   readonly lcRetire: BrickKernel; readonly lcPublish: BrickKernel;
+  /** lcRetire's split: lcRetireArgs (a direct one-lane dispatch after lcRetire) takes the listed count (FH.LC_LONG)
+   * into LC_RETIRE_ARGS, and lcRetireLong (from them) builds the listed vertices. */
+  readonly lcRetireArgs: BrickKernel; readonly lcRetireLong: BrickKernel;
 }
 
 /** The standalone kernels on list C_ACT at LC_GROUPS: X8 with workgroup 64 (lcCouple, lcRetire), G1 with workgroup
@@ -767,6 +781,18 @@ export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayo
     lcCouple: k8("lcCouple", levelSetCoarseWGSL.couple(), "lcCouplePage"),
     lcClear: k("lcClear", levelSetCoarseWGSL.clear(), "lcClearPage"),
     lcRetire: k8("lcRetire", levelSetCoarseWGSL.retire(L), "lcRetirePage"),
+    // A direct one-lane dispatch: a kernel dispatched from the args buffer may not write it (WebGPU usage scope).
+    lcRetireArgs: fluidKernel(L, F, "lcRetireArgs", [CFG, FB.set, FB.dir, { name: "args", kind: "rw", type: "array<u32>" }], /* wgsl */`
+@compute @workgroup_size(1) fn lcRetireArgs(){
+ let at=NB_H_LANE_F+${FH.LC_LONG - H.LANE_F}u;let n=min(atomicLoad(&nbSet[at]),NB_LC_LONG_CAP);
+ atomicStore(&nbSet[at],0u);atomicStore(&nbSet[NB_H_LANE_F+${FH.LC_LONG_RUN - H.LANE_F}u],n);
+ let g=(n+63u)/64u;
+ args[${LC_RETIRE_ARGS}u]=min(g,NB_FOLD);args[${LC_RETIRE_ARGS + 1}u]=max((g+NB_FOLD-1u)/NB_FOLD,1u);args[${LC_RETIRE_ARGS + 2}u]=1u;
+}`),
+    lcRetireLong: fluidKernel(L, F, "lcRetireLong", bindings, [levelSetCoarseWGSL.common(L), levelSetCoarseWGSL.retire(L), /* wgsl */`
+@compute @workgroup_size(64) fn lcRetireLong(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ lcRetireLongAt(64u*nbGroup(wid)+lid);
+}`].join("\n")),
     lcPublish: k("lcPublish", levelSetCoarseWGSL.retire(L), "lcPublishPage"),
   };
 }

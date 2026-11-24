@@ -115,8 +115,9 @@ test("brick ABI: the box hook (M3 padding): walls at the box, an unpadded text u
   // (the whole-pages latch, the page lookups) stays at the lattice.
   const { levelSetCoarseKernels } = await import("./levelset-coarse.wgsl");
   const lc = Object.values(levelSetCoarseKernels(P)), lcUnpadded = Object.values(levelSetCoarseKernels(L));
-  assert.equal(lc.length, 5);
-  for (const k of lc) {
+  assert.equal(lc.length, 7);
+  // lcRetireArgs (lcRetireLong's arguments) holds no C module.
+  for (const k of lc.filter(k => k.label !== "lcRetireArgs")) {
     assert.ok(!k.code.includes(BOX_TOKEN) && !k.code.includes("InWallBox("), `${k.label}: token unresolved`);
     assert.ok(!/OnWall\(c:vec3i,a:u32\)->bool\{return c\[a\]<=0\|\|c\[a\]>=NB_LATTICE\[a\];\}/.test(k.code), `${k.label}: an owner wall at the storage edge`);
     assert.match(k.code, /fn lcCheckLattice\(lid:u32\)\{if\(lid==0u&&any\(\(NB_LATTICE&vec3i\(31\)\)/, k.label);

@@ -32,7 +32,7 @@ import { ARGS, LIST } from "./brick-abi";
 import type { BrickDispatch, BrickKernel, BrickPlacement } from "./brick-kernel";
 import type { BrickStages, BrickStagesFactory } from "./brick-stages";
 import { fluidLayout } from "./fluid-grid.wgsl";
-import { LC_GROUPS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
+import { LC_GROUPS, LC_RETIRE_ARGS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
 import { levelSetKernels } from "./levelset-kernels.wgsl";
 import { NBF_PARTICLE_SETTINGS, nbfParticleSupported } from "./particles-formulas.wgsl";
 import { P_ARGS_RECORDS, P_ENERGY_BUFFER, particleKernels } from "./particles-kernels.wgsl";
@@ -67,7 +67,9 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const bothAct: BrickDispatch = tiered ? { indirect: ARGS.FCA_G1 } : all, pagesAct = list(LIST.C_ACT, "G1");
   const c = tiered ? levelSetCoarseKernels(L, F) : undefined;
   const lcDispatch = (g: (typeof LC_GROUPS)[keyof typeof LC_GROUPS]): BrickDispatch => (typeof g === "string" ? list(LIST.C_ACT, g) : g);
-  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: lcDispatch(LC_GROUPS[kernel]), z: 0, w: 0 }] : [];
+  const coarse = (kernel: keyof typeof LC_GROUPS): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: lcDispatch(LC_GROUPS[kernel]), z: 0, w: 0 }] : [];
+  // lcRetire's split: its listed vertices' count, then their build (levelset-coarse.wgsl.ts lcRetireLong).
+  const retire: BrickPlacement[] = c ? [...coarse("lcRetire"), { kernel: c.lcRetireArgs, dispatch: { direct: [1, 1, 1] }, z: 0, w: 0 }, { kernel: c.lcRetireLong, dispatch: { indirect: LC_RETIRE_ARGS }, z: 0, w: 0 }] : [];
   // The record passes run over the live records (pArgs's arguments), not the bank's capacity.
   const records: BrickDispatch = { indirect: P_ARGS_RECORDS };
   const at = (kernel: BrickKernel, dispatch: BrickDispatch, z = 0, w = 0): BrickPlacement => ({ kernel, dispatch, z, w });
@@ -100,7 +102,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const levelSet = runs([
     [T.levelAdvect, [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, allX8), ...(l.phiSolid ? [at(l.phiSolid, allX8)] : []), ...coarse("lcAdvect")]],
     [T.levelUnion, [at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"), ...resolve]],
-    [T.levelAnalysis, [...analysis, ...coarse("lcRetire")]],
+    [T.levelAnalysis, [...analysis, ...retire]],
     [T.levelPublish, [at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all), ...(l.lWall ? [at(l.lWall, all)] : [])]],
   ]);
   const velocity = runs([[T.velocityAdvect, [at(v.uAdvect, tiered ? { indirect: ARGS.FCA2_G1 } : all)]], [T.velocityDeposit, [at(v.pDeposit, all)]],

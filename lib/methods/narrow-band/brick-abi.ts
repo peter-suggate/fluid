@@ -350,6 +350,9 @@ export class BrickLayout {
     readonly candMask: number;
     /** The active class (ACT): a word an F slot, written by setMark and the head's setLists, zeroed by setClaimBricks. */
     readonly act: number;
+    /** lcRetire's listed vertices (levelset-coarse.wgsl.ts lcRetireLong): 512 words a C slot, an entry a C vertex
+     * (C slot << 10 | vertex << 1 | coarse), lcRetire's appends in any order. */
+    readonly lcLong: number;
     readonly words: number;
   };
   /** dir buffer regions (words). */
@@ -403,7 +406,8 @@ export class BrickLayout {
     const psupport = take(PSUPPORT_WORDS * f);
     const candMask = take(CAND_MASK_WORDS * c);
     const act = take(f);
-    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, pLiquid, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, psupport, candMask, act, words: at };
+    const lcLong = take(512 * c);
+    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, pLiquid, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, psupport, candMask, act, lcLong, words: at };
     const pageWords = this.window[0] * this.window[1] * this.window[2];
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
@@ -526,6 +530,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig); c("NB_S_TLIST", s.tlist); c("NB_TCAP", L.cap.t); c("NB_S_AIR_GATE", s.airGate);
   c("NB_S_REACH0", s.reach0); c("NB_S_REACH1", s.reach1); c("NB_S_REACH_STEP", s.reachStep); c("NB_S_WALL_TILE", s.wallTile);
   c("NB_S_PSUPPORT", s.psupport); c("NB_S_CAND_MASK", s.candMask); c("NB_CAND_MASK_WORDS", CAND_MASK_WORDS); c("NB_PSUPPORT_WORDS", PSUPPORT_WORDS); c("NB_KEY_CLAIMED", KEY_CLAIMED);
+  c("NB_S_LC_LONG", s.lcLong); c("NB_LC_LONG_CAP", 512 * L.cap.c);
   c("NB_S_ACT", s.act); for (const [name, v] of Object.entries(ACT)) c(`NB_ACT_${name}`, v); c("NB_ACT_DILATION", ACT_DILATION);
   lines.push(`const NB_S_LIST=array<u32,${LIST_SLOTS}>(${s.lists.map(u).join(",")});`);
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);

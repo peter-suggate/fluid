@@ -133,8 +133,9 @@ test("resolved φ: no resolved read before the schedule's lResolve or after a C 
   const resolved = (k: K) => k.code.includes("const FG_PHI_RESOLVED:bool=true;") || /\bfgRingStage\(/.test(k.code.replace(/fn fgRingStage\(/g, ""))
     || (k.label === "lcAdvect" && k.code.includes("fn lcFResolved("));
   // Lane E's C kernels share one module text, so their writes are classified by entry (levelset-coarse.wgsl.ts):
-  // C PHI by lcCouple, lcClear and lcPublish; PHI1 only by lcAdvect and lcRetire. Any other C writer fails here.
-  const C_PHI = new Set(["lcCouple", "lcClear", "lcPublish"]), C_PHI1 = new Set(["lcAdvect", "lcRetire"]);
+  // C PHI by lcCouple, lcClear and lcPublish; PHI1 only by lcAdvect, lcRetire and lcRetireLong (lcRetire's listed
+  // vertices). Any other C writer fails here.
+  const C_PHI = new Set(["lcCouple", "lcClear", "lcPublish"]), C_PHI1 = new Set(["lcAdvect", "lcRetire", "lcRetireLong"]);
   const writesC = (k: K) => {
     if (C_PHI.has(k.label)) return true;
     if (C_PHI1.has(k.label)) return false;

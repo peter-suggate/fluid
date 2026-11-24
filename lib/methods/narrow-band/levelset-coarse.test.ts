@@ -17,8 +17,8 @@ import { snapshot } from "./brick-readback";
 import { bringUpStages } from "./brick-stages";
 import { brickTransferKernels } from "./brick-transfer.wgsl";
 import { FT, FTF, fluidLayout } from "./fluid-grid.wgsl";
-import { LC_ADVECT_GROUPS, LC_GROUPS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
-import { velocityKernels } from "./velocity-kernels.wgsl";
+import { LC_ADVECT_GROUPS, LC_GROUPS, LC_RETIRE_ARGS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
+import { FH, velocityKernels } from "./velocity-kernels.wgsl";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 type V = [number, number, number];
@@ -750,13 +750,28 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     // ---- one kernel: run, then the φ pool differs from before only at the expected C words, by the oracle's values,
     // and the set only at the words the oracle names (lcClear's gate words).
     const words = (a: Uint32Array, b: Uint32Array) => { let n = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++; return n; };
-    const step = async (name: keyof typeof kernels, ch: "PHI" | "PHI1", oracle: (W: World, tally: Tally, setWant: Map<number, number>) => Map<string, number>, tol: (x: number) => number) => {
+    const step = async (name: keyof typeof LC_GROUPS, ch: "PHI" | "PHI1", oracle: (W: World, tally: Tally, setWant: Map<number, number>) => Map<string, number>, tol: (x: number) => number) => {
       const before = new Uint32Array(await e.read("phi")), setBefore = new Uint32Array(await e.read("set"));
       W.phi = new Float32Array(before.slice().buffer); W.set = setBefore;
       const tally: Tally = {}, setWant = new Map<number, number>(), want = oracle(W, tally, setWant);
-      await e.run([{ kernel: kernels[name], dispatch: name === "lcAdvect" ? LC_ADVECT_GROUPS : LC_GROUPS[name] === "X8" ? listX8 : listC }]);
+      // lcRetire with its split: lcRetireArgs, then lcRetireLong over the vertices lcRetire listed.
+      const split = name === "lcRetire";
+      await e.run([{ kernel: kernels[name], dispatch: name === "lcAdvect" ? LC_ADVECT_GROUPS : LC_GROUPS[name] === "X8" ? listX8 : listC },
+        ...(split ? [{ kernel: kernels.lcRetireArgs, dispatch: { direct: [1, 1, 1] } as const }, { kernel: kernels.lcRetireLong, dispatch: { indirect: LC_RETIRE_ARGS } }] : [])]);
       const after = await e.read("phi"), af = new Float32Array(after.buffer), setAfter = new Uint32Array(await e.read("set"));
       assert.equal(setAfter[H.FAIL], 0, `${name}: FAIL ${setAfter[H.FAIL]} info ${setAfter[H.FAIL_INFO]}`);
+      // The split's own set words: its list (an entry a listed vertex, once each, of the fixture's pages) and the count
+      // lcRetireArgs moved to LC_LONG_RUN (LC_LONG back to 0).
+      if (split) {
+        const n = setAfter[FH.LC_LONG_RUN]!;
+        assert.equal(setAfter[FH.LC_LONG], 0, "lcRetireArgs zeroes the list's counter");
+        assert.ok(n > 0 && n <= 512 * L.cap.c, `lcRetire lists ${n} vertices`);
+        const listed = new Set<number>();
+        for (let i = 0; i < n; i++) { const w = setAfter[L.set.lcLong + i]!; assert.ok(slots.includes(w >>> 10), `entry ${i}: C slot ${w >>> 10}`); listed.add(w >>> 1); }
+        assert.equal(listed.size, n, "each listed vertex once");
+        console.log(`${name}: ${n} vertices listed for lcRetireLong`);
+        setBefore[FH.LC_LONG_RUN] = n; for (let i = 0; i < n; i++) setBefore[L.set.lcLong + i] = setAfter[L.set.lcLong + i]!;
+      }
       let setBad = 0, gateBits = 0; const setReport: string[] = [];
       for (let i = 0; i < setAfter.length; i++) {
         const x = setWant.get(i) ?? setBefore[i]!;
