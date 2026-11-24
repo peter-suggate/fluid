@@ -354,7 +354,12 @@ test("levelset-release (GPU): reach words, wall reach, the readers and lcAdvect'
       for (const [bk, fs] of sb.bricks) if (retired(brickKeyCoord(bk) as V)) gone.add(fs);
       assert.equal(gone.size, 4, "the retired bricks are resident at boot");
       for (const fs of gone) dir[L.dir.frec + 32 * fs + REC.KEY] = NONE;
-      for (const cs of sb.pages.values()) for (let j = 0; j < 64; j++) if (gone.has(dir[L.dir.child + 64 * cs + j]!)) dir[L.dir.child + 64 * cs + j] = NONE;
+      for (const cs of sb.pages.values()) for (let j = 0; j < 64; j++) if (gone.has(dir[L.dir.child + 64 * cs + j]!)) {
+        dir[L.dir.child + 64 * cs + j] = NONE;
+        const P = brickKeyCoord(dir[L.dir.crec + 32 * cs + REC.KEY]!) as V;
+        dir[L.flatIndex(4 * P[0] + (j & 3), 4 * P[1] + ((j >> 2) & 3), 4 * P[2] + (j >> 4))] = NONE; // FLAT follows CHILD (brick-abi.md §3)
+      }
+      assert.equal(L.flatMismatches(dir).count, 0, "FLAT follows the retired bricks' child words");
       for (const fs of sb.bricks.values()) for (let j = 0; j < 27; j++) if (gone.has(dir[L.dir.frec + 32 * fs + j]!)) dir[L.dir.frec + 32 * fs + j] = NONE;
       for (let k = LIST.F_ALL; k <= LIST.F_CHANGED; k++) {
         const kept = sb.list(k).filter(x => !gone.has(x));

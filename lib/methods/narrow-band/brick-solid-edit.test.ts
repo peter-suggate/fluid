@@ -67,6 +67,9 @@ test("brick solid edit (GPU): fill, undo, redo, clear and reload on the running 
   const STATIC = F_CLASS.NEAR_SOLID | F_CLASS.CUT_STATIC;
   const state = async (s: Solver): Promise<State> => {
     const e = s.brickEngine, L = e.layout, snap = await snapshot(e);
+    // FLAT is the walk page -> child resolved after every edit, undo, redo and reload (brick-abi.md §3).
+    const flat = L.flatMismatches(snap.dir);
+    assert.equal(flat.count, 0, `FLAT differs from the walk at ${flat.count} bricks (${flat.first})`);
     const phi = await e.read("phi"), vel = await e.read("vel"), cut = new Float32Array((await e.read("cut")).buffer), solid = await e.read("solid");
     const flags = L.base("phi", "F", "FLAGS"), bricks = new Map<number, Brick>();
     const channels = ["FRAC", "AP0", "AP1", "AP2"].map(ch => L.base("cut", "K", ch));

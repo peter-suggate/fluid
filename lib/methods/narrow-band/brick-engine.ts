@@ -783,7 +783,7 @@ export class BrickEngine {
     fill(L.set.freeF, cap.f); fill(L.set.freeC, cap.c); fill(L.set.freeB, cap.b); fill(L.set.freeK, cap.k);
     s.set(initial, L.set.cand); s[H.N_CAND] = initial.length;
     uploadWords(d.queue, set, 0, s);
-    // The directory: every page, child and record word NONE, the tile masks clear.
+    // The directory: every page, child, FLAT and record word NONE, the tile masks clear.
     const w = new Uint32Array(L.dir.words).fill(NONE); w.fill(0, L.dir.cmask);
     if (this.staticTiles) w.set(this.staticTiles.bits, L.dir.closed);
     uploadWords(d.queue, dir, 0, w);

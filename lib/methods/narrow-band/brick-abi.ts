@@ -353,7 +353,7 @@ export class BrickLayout {
     readonly words: number;
   };
   /** dir buffer regions (words). */
-  readonly dir: { readonly page: number; readonly child: number; readonly frec: number; readonly crec: number; readonly cmask: number; readonly closed: number; readonly inexact: number; readonly dtl: number; readonly words: number };
+  readonly dir: { readonly page: number; readonly child: number; readonly flat: number; readonly frec: number; readonly crec: number; readonly cmask: number; readonly closed: number; readonly inexact: number; readonly dtl: number; readonly words: number };
   /** Words of each pool. */
   readonly poolWords: Readonly<Record<PoolName, number>>;
   readonly partsWords: number;
@@ -407,13 +407,16 @@ export class BrickLayout {
     const pageWords = this.window[0] * this.window[1] * this.window[2];
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
-    const page = dtake(pageWords), child = dtake(CHILD_WORDS * c), frec = dtake(RECORD_WORDS * f), crec = dtake(RECORD_WORDS * c), cmask = dtake(CMASK_WORDS * c);
+    // FLAT (brick-abi.md §3): the walk page -> child resolved, a word a window brick (the window in bricks, 4 W an
+    // axis, toroidal as the page window): the F slot, or NONE. 64 words a page word: it scales with the page table,
+    // never the lattice. It lies before CMASK, so the build's NONE fill covers it.
+    const page = dtake(pageWords), child = dtake(CHILD_WORDS * c), flat = dtake(CHILD_WORDS * pageWords), frec = dtake(RECORD_WORDS * f), crec = dtake(RECORD_WORDS * c), cmask = dtake(CMASK_WORDS * c);
     // The static tiles' two planes (closed, then inexact), each a bit a lattice tile.
     const plane = Math.ceil(this.lattice.reduce((a, n) => a * Math.ceil(n / 4), 1) / 32);
     const closed = this.staticTiles ? dtake(2 * plane) : 0;
     // A detail engine's mask planes (brick-detail.wgsl.ts DETAIL_PLANES: on, fresh, core), each a bit a mask tile.
     const dtl = this.detail ? dtake(DETAIL_PLANES * brickDetailPlaneWords(this.detail)) : 0;
-    this.dir = { page, child, frec, crec, cmask, closed, inexact: closed + (this.staticTiles ? plane : 0), dtl, words: d };
+    this.dir = { page, child, flat, frec, crec, cmask, closed, inexact: closed + (this.staticTiles ? plane : 0), dtl, words: d };
     const fc = (n: number) => n * BRICK_STRIDE * (f + c);
     this.poolWords = { vel: fc(POOLS.vel.length), phi: fc(POOLS.phi.length), pres: fc(POOLS.pres.length), cut: POOLS.cut.length * BRICK_STRIDE * Math.max(k, 1) + Math.max(k, 1) };
     this.partsWords = 2 * particles * this.particleStride;
@@ -435,6 +438,28 @@ export class BrickLayout {
   pageIndex(px: number, py: number, pz: number): number {
     const [wx, wy, wz] = this.window, [bx, by] = this.windowBits;
     return (px & (wx - 1)) | ((py & (wy - 1)) << bx) | ((pz & (wz - 1)) << (bx + by));
+  }
+
+  /** Brick b's FLAT word (nbFlatIndex): b in the window of bricks (4 W an axis, toroidal), x fastest. */
+  flatIndex(bx: number, by: number, bz: number): number {
+    const [wx, wy, wz] = this.window, [ex, ey] = this.windowBits;
+    return this.dir.flat + ((bx & (4 * wx - 1)) | ((by & (4 * wy - 1)) << (ex + 2)) | ((bz & (4 * wz - 1)) << (ex + ey + 4)));
+  }
+
+  /** FLAT words that differ from the walk page -> child (0 when the writers kept it): brick-abi.md §3. */
+  flatMismatches(dir: Uint32Array): { count: number; first?: string } {
+    const d = this.dir, [wx, wy, wz] = this.window, [ex, ey] = this.windowBits;
+    let count = 0, first: string | undefined;
+    for (let pi = 0; pi < wx * wy * wz; pi++) {
+      const pw = dir[d.page + pi]!, px = pi & (wx - 1), py = (pi >> ex) & (wy - 1), pz = pi >> (ex + ey);
+      for (let bl = 0; bl < CHILD_WORDS; bl++) {
+        let walk = NONE;
+        if (pw < SEAM) { const ch = dir[d.child + CHILD_WORDS * pw + bl]!; if (ch < SEAM) walk = ch; }
+        const flat = dir[this.flatIndex(4 * px + (bl & 3), 4 * py + ((bl >> 2) & 3), 4 * pz + (bl >> 4))]!;
+        if (flat !== walk) { count++; first ??= `page ${pi} brick ${bl}: flat ${flat}, walk ${walk}`; }
+      }
+    }
+    return first === undefined ? { count } : { count, first };
   }
 
   /** Bytes the engine's core buffers take (set, dir, args, pools, particle banks). */
@@ -504,7 +529,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_S_ACT", s.act); for (const [name, v] of Object.entries(ACT)) c(`NB_ACT_${name}`, v); c("NB_ACT_DILATION", ACT_DILATION);
   lines.push(`const NB_S_LIST=array<u32,${LIST_SLOTS}>(${s.lists.map(u).join(",")});`);
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);
-  c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);
+  c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FLAT", d.flat); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);
   if (L.staticTiles) { c("NB_D_CLOSED", d.closed); c("NB_D_INEXACT", d.inexact); }
   if (L.detail) { c("NB_D_DTL", d.dtl); c("NB_FLAG_DTL_OUT", FLAG_DTL_OUT); }
   for (const pool of Object.keys(POOLS) as PoolName[]) {
@@ -519,6 +544,8 @@ fn nbAt(base:u32,slot:u32,local:u32)->u32{return base+NB_STRIDE*slot+local;}
 fn nbLocal(c:vec3i)->u32{return u32((c.x&7)|((c.y&7)<<3u)|((c.z&7)<<6u));}
 fn nbLocalCoord(l:u32)->vec3i{return vec3i(i32(l&7u),i32((l>>3u)&7u),i32(l>>6u));}
 fn nbBrickLocal(b:vec3i)->u32{return u32((b.x&3)|((b.y&3)<<2u)|((b.z&3)<<4u));}
+// A page's brick at brickLocal j (nbBrickLocal inverted), from the page's first brick.
+fn nbBrickOfLocal(j:u32)->vec3u{return vec3u(j&3u,(j>>2u)&3u,j>>4u);}
 fn nbKey(b:vec3i)->u32{return u32(b.x&1023)|(u32(b.y&1023)<<10u)|(u32(b.z&1023)<<20u);}
 fn nbKeyCoord(k:u32)->vec3i{return vec3i(i32(k&1023u),i32((k>>10u)&1023u),i32((k>>20u)&1023u));}
 fn nbPageIndex(p:vec3i)->u32{let q=vec3u(p)&(NB_WINDOW-vec3u(1u));return q.x|(q.y<<NB_WINDOW_BITS.x)|(q.z<<(NB_WINDOW_BITS.x+NB_WINDOW_BITS.y));}
@@ -538,7 +565,11 @@ fn nbPageWord(p:vec3i)->u32{return ${ld(D, "NB_D_PAGE+nbPageIndex(p)")};}
 // The C slot of page p, or NB_NONE (air, or a BULK16 page).
 fn nbCSlotOfPage(p:vec3i)->u32{let w=nbPageWord(p);return select(NB_NONE,w,w<NB_SEAM);}
 fn nbChild(cslot:u32,brickLocal:u32)->u32{return ${ld(D, "NB_D_CHILD+64u*cslot+brickLocal")};}
-// The F slot of brick b, or NB_NONE. Callers apply the box rule first (no negative coordinates).
+// Brick b's FLAT word: the walk nbCSlotOfPage then nbChild, resolved (brick-abi.md §3). b in the window of bricks
+// (4 NB_WINDOW an axis, toroidal as nbPageIndex), x fastest: 3 masks and 2 shifts, no page index or brickLocal.
+fn nbFlatIndex(b:vec3i)->u32{let q=vec3u(b)&(4u*NB_WINDOW-vec3u(1u));return NB_D_FLAT+(q.x|(q.y<<(NB_WINDOW_BITS.x+2u))|(q.z<<(NB_WINDOW_BITS.x+NB_WINDOW_BITS.y+4u)));}
+// The F slot of brick b, or NB_NONE: one load of FLAT, which the set's writers keep equal to the walk (setFlatCheck).
+// Callers apply the box rule first (no negative coordinates).
 fn nbFSlotOfBrick(b:vec3i)->u32{let cs=nbCSlotOfPage(b>>vec3u(2u));if(cs==NB_NONE){return NB_NONE;}return nbChild(cs,nbBrickLocal(b));}
 fn nbFSlotOfCell(c:vec3i)->u32{return nbFSlotOfBrick(c>>vec3u(3u));}
 fn nbFRec(slot:u32,k:u32)->u32{return ${ld(D, "NB_D_FREC+32u*slot+k")};}

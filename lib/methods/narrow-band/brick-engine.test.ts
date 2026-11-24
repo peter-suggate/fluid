@@ -67,9 +67,9 @@ test("brick engine: direct dispatches and buffers follow capacities, not the lat
   assert.deepEqual(B.poolWords, A.poolWords);
   assert.equal(B.partsWords, A.partsWords);
   const pages = (L: BrickLayout) => L.window[0] * L.window[1] * L.window[2];
-  // Only the page window (one word a 32^3 page) may grow.
-  assert.ok(B.dir.words - A.dir.words <= pages(B) - pages(A) + 64, `dir grows ${B.dir.words - A.dir.words} words for ${pages(B) - pages(A)} pages`);
-  assert.ok(B.bytes - A.bytes <= 4 * (pages(B) - pages(A) + 64));
+  // Only the page window may grow: its page word and its 64 FLAT words (brick-abi.md §3) a 32^3 page.
+  assert.ok(B.dir.words - A.dir.words <= 65 * (pages(B) - pages(A)) + 128, `dir grows ${B.dir.words - A.dir.words} words for ${pages(B) - pages(A)} pages`);
+  assert.ok(B.bytes - A.bytes <= 4 * (65 * (pages(B) - pages(A)) + 128));
 });
 
 test("brick engine: every kernel binds at most 8 storage buffers, and the layout check refuses a ninth", () => {
@@ -327,6 +327,9 @@ function assertConsistent(e: BrickEngine, s: BrickSnapshot, fail = 0) {
   assert.equal(hd[H.FAIL], fail, `FAIL 0x${hd[H.FAIL]!.toString(16)} info 0x${hd[H.FAIL_INFO]!.toString(16)}`);
   const slots = new Set(s.bricks.values());
   assert.equal(slots.size, s.bricks.size, "one slot a brick");
+  // FLAT is the walk page -> child resolved (brick-abi.md §3), whatever the residency did.
+  const flat = L.flatMismatches(d);
+  assert.equal(flat.count, 0, `FLAT differs from the walk at ${flat.count} bricks (${flat.first})`);
   for (const [key, slot] of s.bricks) {
     const r = L.dir.frec + 32 * slot, b = brickKeyCoord(key);
     assert.equal(d[r + REC.KEY], key);

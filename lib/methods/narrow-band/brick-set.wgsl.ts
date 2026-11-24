@@ -30,6 +30,8 @@ const bootRO: BrickBinding = { name: "boot", kind: "ro", type: "array<f32>" };
 /** The lists setLists rebuilds every step (all but the churn lists setUpdate writes). */
 export const REBUILT_LISTS: readonly number[] = Object.values(LIST).filter(k => k !== LIST.F_ENTER && k !== LIST.F_LEAVE && k !== LIST.C_ENTER && k !== LIST.C_LEAVE);
 /** Workgroups of the grid-stride candidate and churn kernels: enough to fill the GPU, bounded by the pool. */
+/** setFlatCheck's workgroups (a grid-stride over the window's pages). */
+export const FLAT_CHECK_GROUPS = 256;
 export const churnGroups = (cap: number, lanes: number) => Math.max(1, Math.min(256, Math.ceil(cap / lanes)));
 
 const kernel = (L: BrickLayout, label: string, bindings: readonly BrickBinding[], body: string, cfgZ?: readonly [number, number]): BrickKernel => {
@@ -272,6 +274,8 @@ var<workgroup> wN:atomic<u32>;
     let cs=nbPop(NB_H_TOP_C,NB_S_FREE_C,NB_CCAP,NB_H_HIGH_C,NB_H_REFUSED_C,NB_FAIL_POOL_C,key);
     if(cs==NB_NONE){atomicStore(&dir[pi],NB_NONE);continue;}
     for(var j=0u;j<64u;j++){atomicStore(&dir[NB_D_CHILD+64u*cs+j],NB_NONE);}
+    // FLAT (brick-abi.md §3) follows CHILD: no F child yet.
+    for(var j=0u;j<64u;j++){atomicStore(&dir[nbFlatIndex(4*p+vec3i(nbBrickOfLocal(j)))],NB_NONE);}
     // All-h: every tile of a resident page is h-owned, so a tile whose brick is not resident is an h region with
     // no slot (NB_PHI_FAR, faces 0: air) and C is never an authority. Tiered: CMASK is the bricks' (§2.5).
     for(var j=0u;j<16u;j++){atomicStore(&dir[NB_D_CMASK+16u*cs+j],${tiered ? "0u" : "0xffffffffu"});}
@@ -312,7 +316,7 @@ var<workgroup> wN:atomic<u32>;
     atomicStore(&nbSet[NB_S_TILE_OCC+fs],0u);atomicStore(&nbSet[NB_S_TRIG+fs],0u);atomicStore(&nbSet[NB_S_ACT+fs],0u);
     atomicAdd(&dir[NB_D_CREC+32u*cs+NB_REC_C_CHILDREN],1u);
     if(${tiered ? "h" : "false"}){nbTileMask(cs,bl,true);}
-    atomicStore(&dir[ci],fs);
+    atomicStore(&dir[ci],fs);atomicStore(&dir[nbFlatIndex(b)],fs);
     nbAppend(NB_LIST_F_ENTER,fs);
   }
 }`);
@@ -328,7 +332,7 @@ var<workgroup> wN:atomic<u32>;
   // past the mask's lower side, the bricks of the tiles it turned off.
   if(atomicExchange(&nbSet[NB_S_MARK_F+s],0u)!=0u&&nbDtlBrickKeep(nbKeyCoord(nbFRec(s,NB_REC_KEY)))){return;}` : "if(atomicExchange(&nbSet[NB_S_MARK_F+s],0u)!=0u){return;}"}
   let r=NB_D_FREC+32u*s;let cs=atomicLoad(&dir[r+NB_REC_PARENT]);let bl=(atomicLoad(&dir[r+NB_REC_MASK])>>8u)&63u;
-  atomicStore(&dir[NB_D_CHILD+64u*cs+bl],NB_NONE);
+  atomicStore(&dir[NB_D_CHILD+64u*cs+bl],NB_NONE);atomicStore(&dir[nbFlatIndex(nbKeyCoord(atomicLoad(&dir[r+NB_REC_KEY])))],NB_NONE);
   atomicSub(&dir[NB_D_CREC+32u*cs+NB_REC_C_CHILDREN],1u);
   ${tiered ? "nbTileMask(cs,bl,false);" : "// All-h: CMASK stays all-ones (setClaimPages)."}
   atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_LEAVING);
@@ -353,7 +357,10 @@ fn slpMasked(P:vec3i)->bool{
   // brick's reach covered liquid (brick-residency.wgsl.ts). FAIL.REACH with its key, never dropped as air.${L.detail ? `
   // A detail engine's page leaves with its liquid once its mask holds none of its tiles (the parent's again).` : ""}
   if(atomicLoad(&dir[r+NB_REC_C_LIQUID_TILES])!=0u${L.detail ? "&&slpMasked(nbKeyCoord(atomicLoad(&dir[r+NB_REC_KEY])))" : ""}){nbFail(NB_FAIL_REACH,atomicLoad(&dir[r+NB_REC_KEY]));}
-  atomicStore(&dir[NB_D_PAGE+nbPageIndex(nbKeyCoord(atomicLoad(&dir[r+NB_REC_KEY])))],NB_NONE);
+  let p=nbKeyCoord(atomicLoad(&dir[r+NB_REC_KEY]));
+  atomicStore(&dir[NB_D_PAGE+nbPageIndex(p)],NB_NONE);
+  // FLAT follows: no F child is left (C_CHILDREN 0), so its words are NONE already; written, not assumed.
+  for(var j=0u;j<64u;j++){atomicStore(&dir[nbFlatIndex(4*p+vec3i(nbBrickOfLocal(j)))],NB_NONE);}
   atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_LEAVING);
   nbPush(NB_H_TOP_C,NB_S_FREE_C,cs);
   nbAppend(NB_LIST_C_LEAVE,cs);
@@ -595,6 +602,20 @@ fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold
   nbPush(NB_H_TOP_K,NB_S_FREE_K,ks);
 }`, [0, 1]);
 
-  return { setMark, setMarkPages, setClaimPages, setClaimBricks, setLeave, setLeavePages, setRecords, setInit, bootPhi, setLists, setArgs, setKRelease, stepEnd };
+  // setFlatCheck (debug, never on the step's schedule): every window brick's FLAT word against the walk page -> child
+  // (brick-abi.md §3). A mismatch latches FAIL.UNSUPPORTED with info 0x464c0000 | its FLAT word's offset (low 16 bits).
+  // Grid-stride over the window's pages (FLAT_CHECK_GROUPS workgroups, a lane a brick of a page).
+  const setFlatCheck = k("setFlatCheck", [CFG, setRW, dirRO], /* wgsl */`
+@compute @workgroup_size(64) fn setFlatCheck(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) nw:vec3u,@builtin(local_invocation_index) lid:u32){
+  for(var pi=wid.x;pi<${L.window[0] * L.window[1] * L.window[2]}u;pi+=nw.x){
+    let pw=dir[NB_D_PAGE+pi];var walk=NB_NONE;
+    if(pw<NB_SEAM){let ch=dir[NB_D_CHILD+64u*pw+lid];if(ch<NB_SEAM){walk=ch;}}
+    // The page's window coordinates (nbPageIndex inverted): FLAT is toroidal by the same window.
+    let wp=vec3i(vec3u(pi&(NB_WINDOW.x-1u),(pi>>NB_WINDOW_BITS.x)&(NB_WINDOW.y-1u),pi>>(NB_WINDOW_BITS.x+NB_WINDOW_BITS.y)));
+    let at=nbFlatIndex(4*wp+vec3i(nbBrickOfLocal(lid)));
+    if(dir[at]!=walk){nbFail(NB_FAIL_UNSUPPORTED,0x464c0000u|((at-NB_D_FLAT)&0xffffu));}
+  }
+}`);
+  return { setMark, setMarkPages, setClaimPages, setClaimBricks, setLeave, setLeavePages, setRecords, setInit, bootPhi, setLists, setArgs, setKRelease, stepEnd, setFlatCheck };
 }
 
