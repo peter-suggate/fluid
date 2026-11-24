@@ -534,3 +534,57 @@ lDeferArgs costs 5 µs.
 Even with a free second pass, the main pass misses the 8% go line. lAdvect's time is not set by its thread cap.
 Inference: its time is the trace's latency per lane, not occupancy. lAdvectF runs about 100 nearly empty workgroups
 that each wait on a few full traces, a latency-bound tiny pass.
+
+## lAdvect latency attribution (lane A2, eighth task)
+
+Frozen step 100, HEAD 7ec15be9 (tree m1a2/trees/h7ec), `stepab.mts` S=5, `fluid-gpu-run.sh timing`, every run rc 0
+with no GPU errors. Scratch: fluid-scratch/gpu-shape/m1a2/t6 (mk*.py build the candidates from the schedule dumps
+h-<scene>.json; ab-*.log hold the runs). lAdvect runs one brick a 256-lane workgroup, 2 vertices a lane, cap 384, so
+one group is resident a core.
+
+Section skips. These are timing-only and inexact: the part is skipped behind a never-true cfg test, with its output
+kept live. Numbers are lAdvect's Δ, dam / paddleboats:
+
+| skipped | dam | paddleboats |
+|---|---|---|
+| everything from the foot on (the early exits stay) | −80.1% | −81.6% |
+| the trace (nbfSurfaceTrace) | −25.7% | −42.2% |
+| the departure cubic | −16.4% | −10.1% |
+| the foot (10 taps, gradient, smoothing) | −13.5% | −6.3% |
+| the corners (lCorners0 trilinear) | −7.9% | −13.7% |
+
+Chain experiments. All touch fgBrickSlotOfDir, the walk from page word to child word to slot.
+
+| variant | exact | dam | paddleboats |
+|---|---|---|---|
+| dep1: +1 dependent load per walk (the slot's FREC word) | yes | +10.0% | +11.3% |
+| dep1h: +1 dependent load per walk (the L1-hot page table) | yes | +8.4% | +7.8% |
+| vspec: the trace sample's 4 walks + HMASK/DIST hoisted ahead of its branches (private arrays) | yes | +41.5% | +29.0% |
+| vspec3: the same with no arrays | 1–33 ulp | +5.2% | |
+| privnoop: a never-true test of one var<private> word in the walk | ulp | +18.7% | |
+| memo / own / ownp: reuse via var<private> (last walk; the group's own brick and page) | ulp | +19 to +25% | +15 to +21% |
+| nopriv: lStencil's slots and lBase passed as values instead of var<private> | yes | +2.9% | +0.7% |
+| flat: the walk as one load of a flat brick → slot table (stepab-flat.mts writes it into unheld fcell slots) | yes | **−9.1%** | **−9.3%** |
+| flatall: flat in all 20 placements whose module binds fcell (rerun) | 18/20, 19/20 | lAdvect −10.1%, step Σ −0.45 ms, wall −0.49 ms (−1.5%) | lAdvect −10.2%, Σ −0.50 ms, wall −0.47 ms (−1.5%) |
+
+Findings:
+- Measured: each dependent link in the walk costs about 8% of lAdvect, even when it hits L1.
+  - Removing one link for every lane (flat) returns it symmetrically.
+  - Removing it for some lanes only (own, memo) cannot. Those lanes branch around the walk, and the SIMD still waits
+    for the lanes that walk.
+  - Any var<private> read on the walk costs about 19% on its own.
+- Measured: hoisting the walks ahead of their branches (software-pipelined lookups) gains nothing. The added
+  speculative loads cost more than the overlap buys.
+- Measured, by a SIMD probe (`mksimd*.py`; counters only):
+  - dam: 31% of the SIMD iterations reach the foot. They are 58% lane-efficient in trace stages. Compacting within a
+    SIMD would cut the busy iterations by 16–18%.
+  - paddleboats: the trace iterations are 83% lane-efficient. Compaction saves 6%.
+  - SIMD compaction therefore cannot reach 10% on paddleboats.
+- flatall's inexact placements read the table after the step's residency had changed dir, which the frozen table
+  does not follow: pSeed's parts (both scenes) and uExt4Seed's fext4 (dam).
+- Design implied (not built). Keep the table in dir as 64 words a window page, indexed by the page index × 64 plus the
+  brick's local index. It scales with the page table, not the domain. The writers of child and page words maintain it
+  in the same kernels.
+  - Then every walk is one link, in all kernels, including those that bind no fcell (pMove, uTransfer, uCache,
+    lDistance, pDeposit).
+- Not run: seep and letters.
