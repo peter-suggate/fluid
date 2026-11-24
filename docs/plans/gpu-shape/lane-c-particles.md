@@ -297,3 +297,35 @@ step 60, against the brick's 12 and 9k), so more of its piles reach the merge.
 
 Letters (brick) shows the same thing on a smaller scale (steps 150 / 200: largest 295 / 360, 82 / 95 cells over 32,
 86–92% at surface depth).
+
+### Brick vs old engine census, and where piles form (diagnosis, no change)
+
+**Whole-scene census** (diag.mts; one run each).
+
+| | records (brick / old) | mass-1 deep records | mass 2–4 | mass 5–8 |
+|---|---|---|---|---|
+| dam step 30 | 607k / 829k | 175k / 274k | 100k / 199k | 0 / 267 |
+| dam step 60 | 372k / 617k | 120k / 218k | 59k / 168k | 0 / 449 |
+| dam step 120 | 347k / 420k | 101k / 104k | 47k / 159k | 0 / 2162 |
+| letters step 150 | 671k / 927k | 199k / 243k | 171k / 321k | 0 / 6128 |
+
+The brick holds fewer mass-1 records in deep cells, not more, so there is no merge shortfall. It holds half the heavy
+records and no record of mass 5–8. On dam it holds no record deeper than −2 at all; the old engine has 120–190k at
+depth −2..−3. Letters on the brick does have that layer, so on dam it is likely the 4h tier taking the interior, which
+was not checked. The merge and split are line for line the old engine's. The one difference, the cut bound of 8 at
+depth ≤ −1.5 (lane F, 2026-11-17), bounds more tightly, not less.
+
+**Formation** (TRACK=64: a cell first over 64 records).
+
+- Steps 12–22: every new pile forms on the wall clamp plane during the wave's impact and run-up. 60–100% of the pile's
+  records sit within 1e-3 of x, y or z = 0.25 or 127.75, the sample radius in from the wall (nbfBoxEndpoint).
+  Examples: (1, 1, 127) with 64 of 70 records on the plane; (127, 22, 98) with 140 of 140.
+- From step 23 on: the piles leave the walls with the run-up sheets and travel through the surface, where nothing
+  relaxes them.
+- No pile shows seeds or heavy records. The seed count is not informative, though: a seed has already moved by the
+  frozen state.
+
+**Cause.** At splash speeds (2–5 m/s, 5–12 cells a step), a record crosses the near-wall half cell in one step, and
+the endpoint clamp collapses every arrival onto one plane. That is volume lost into a sheet of overlapping samples.
+The old engine's clamp is the same (nbTraceEndpointIn: clamp to walls ± inset), so this is not a port difference.
+Why the old engine's piles relax faster stays open.
