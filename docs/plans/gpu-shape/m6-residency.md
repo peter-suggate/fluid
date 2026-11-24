@@ -247,3 +247,25 @@ The runs used `tools/nbflip-timing-round.sh` in balanced order. Every run was rc
   - That is a failMixedFrame, and the bench does not print its message.
   - The same tree ran 300 steps in both other rounds (round 1 and the rerun above).
   - Its cause is not diagnosed: intermittent, one in three candidate fenced runs.
+
+## Save/restore gaps found by the paddleboats pin (2026-11-24, tracked, not fixed)
+
+These came up while lane B2 replayed a paddleboats kick from a saved state (scratch m6/reach/pin2.mts). None of them
+is on the live path, where each pose and velocity is consistent (one integrate per submitted step, one dt). They
+are contract gaps for save/load/undo with rigid bodies on the brick engine:
+
+- **Motor clock and drives.** `WebGPURigidBodySystem.motorTime_s` (lib/core/webgpu-rigid-body.ts:862, advanced in
+  `encode` at :1285 and sent as the integrator's motor time at :1288) and `motorDrives` (the drives' phase offsets)
+  are host state. `BrickRigidBodies.save()`/`restore()` (lib/methods/narrow-band/bodies-host.ts:193-205) copy only
+  the state buffer and zero the exchange. After a restore, `attachMotor` (lib/core/rigid-motor.ts:64-72) poses the
+  fixtures at the clock of the latest step run, not the restored one.
+- **The sync cache survives a restore.** `syncBodies` skips the upload when the roster matches its last signatures
+  (`unchangedSinceSync`, webgpu-rigid-body.ts:1080/1095). `restore()` rewrites the state buffer without invalidating
+  them, so a restored state that differs from the last upload is never corrected by an unchanged roster. This is what
+  made the first pin's replay stamp every body at the origin: its twin copy of the external buffers was invalid,
+  because `bodyCuts` has no COPY_SRC.
+- **No caller.** `BrickRigidBodies.save()`/`restore()` exist, but brick-solver.ts has no save path that calls them.
+  The engine's own `save()` excludes the external buffers by design (brick-engine.ts:344).
+- **Held bodies.** `UniformPrescribedSolidMotion.previous` (lib/methods/uniform/uniform-prescribed-solid-motion.ts:14),
+  the pose a held or fixed-prescribed body's velocity is differenced from, is host state too. It only matters for
+  held bodies, not for motor fixtures or GPU-owned bodies.
