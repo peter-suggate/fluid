@@ -1497,12 +1497,29 @@ fn cdHeld(t:vec3i)->bool{return all(t>=vec3i(${hold.lo.join(",")}))&&all(t<vec3i
 fn cdBodyHeld(t:vec3i)->bool{
   if(!pbBrickBodiesOn()){return false;}
   let rlo=(t-vec3i(1))>>vec3u(1u);
+  // Each body's first test of both rules (pbBrickCandidates' sphere and reach against a brick's box, pbBodyMarkTile's
+  // against a tile's), taken once on the union box of the 8 bricks and of the 27 tiles: a body farther than its bound
+  // from the union is farther from every box inside it (the boxes' faces are the same expressions, monotone in the
+  // cell), so neither rule can take it there and its per-box tests are skipped. CD_SLACK covers the rounding of
+  // distance (the union's distance is a lower bound of each box's in exact arithmetic).
+  let h=pbH();let cell=max(h.x,max(h.y,h.z));let horizon=pbBrickHorizon();
+  let blo=pbWorldCell(8*rlo)-0.5*h;let bhi=(pbWorldCell(8*(rlo+vec3i(1)))-0.5*h)+8.0*h;
+  let tlo=pbWorldCell(4*(t-vec3i(1)))-0.5*pbH();let thi=(pbWorldCell(4*(t+vec3i(1)))-0.5*pbH())+4.0*h;
+  var nearB=false;var nearT=false;
+  for(var i=0u;i<pbBodyCount();i++){
+    let b=bodies[i];let c=b.positionShape.xyz;let radius=max(b.dimensions.w,0.0);
+    let reach=length(2.0*h)+cell+(length(b.linearVelocity.xyz)+length(b.angularVelocity.xyz)*radius)*horizon;
+    if(b.positionShape.w<0.0||!(distance(clamp(c,blo,bhi),c)>CD_SLACK*(radius+reach))){nearB=true;}
+    let travel=length(b.linearVelocity.xyz)*horizon;
+    if(!(distance(clamp(c,tlo,thi),c)>CD_SLACK*(radius+travel+cell))){nearT=true;}
+  }
   for(var n=0u;n<8u;n++){
     let nb=rlo+vec3i(i32(n&1u),i32((n>>1u)&1u),i32(n>>2u));if(!nbBrickInRange(nb)){continue;}
     let s=nbFSlotOfBrick(nb);
     if(s<NB_SEAM&&(nbFRec(s,NB_REC_CLASS)&(NB_CLASS_NEAR_BODY|NB_CLASS_BODY_WAS))!=0u){return true;}
-    if(nbInLattice(8*nb)&&pbBrickCandidates(8*nb)!=0u){return true;}
+    if(nearB&&nbInLattice(8*nb)&&pbBrickCandidates(8*nb)!=0u){return true;}
   }
+  if(!nearT){return false;}
   for(var n=0u;n<27u;n++){
     let q=t+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);
     if(!nbTileInLattice(q)){continue;}
@@ -1511,7 +1528,97 @@ fn cdBodyHeld(t:vec3i)->bool{
   }
   return false;
 }
-` : ""}fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
+const CD_SLACK:f32=1.001;
+` : ""}// ncCurveShift and ncSurfaceQuiet at once, each of the 7 tiles' normal taken once (ncTileNormal: an h tile's VOL word, a
+// 4h tile's corner gradient) and a 4h neighbour's 4 corners on the face it shares with t read from t's: 8 + 4 corner
+// reads a 4h neighbour where the two calls read 8 a normal, 13 normals. The same values in the same order, so the same
+// answer: (!h || shift <= budget) && quiet.
+struct CdTileRef{s:u32,i:u32,kind:u32}
+fn cdTileRef(q:vec3i)->CdTileRef{
+  if(!nbTileInLattice(q)){return CdTileRef(NB_NONE,0u,0u);}
+  let s=ncPageSlot(q>>vec3u(3u));if(s==NB_NONE){return CdTileRef(NB_NONE,0u,0u);}
+  let i=ncTileLocal(q);return CdTileRef(s,i,select(2u,1u,nbTileH(s,i)));
+}
+fn cdNormalH(r:CdTileRef)->vec4f{
+  if((ncFin(r.s,r.i)&NC_CROSSES)==0u){return vec4f(0.0);}
+  let w=census[NC_S*r.s+${CENSUS.VOL}u+r.i];if(w==0u){return vec4f(0.0);}
+  return unpack4x8snorm(w);
+}
+fn cdNormal4(v:array<f32,8>)->vec4f{
+  var lo=3.0e38;var hi=-3.0e38;
+  for(var k=0u;k<8u;k++){lo=min(lo,v[k]);hi=max(hi,v[k]);}
+  if(!(lo<0.0&&hi>=0.0)){return vec4f(0.0);}
+  let g=vec3f(v[1]+v[3]+v[5]+v[7]-v[0]-v[2]-v[4]-v[6],v[2]+v[3]+v[6]+v[7]-v[0]-v[1]-v[4]-v[5],v[4]+v[5]+v[6]+v[7]-v[0]-v[1]-v[2]-v[3]);
+  let m=length(g);if(!(m>0.0)){return vec4f(0.0);}
+  return vec4f(g/m,1.0);
+}
+// The normal of q = t - e_a (u 0) or t + e_a (u 1); v holds t's corners on their shared face (bit a of k != u).
+// ncLoadCorner at a tile corner v = 4T, every corner read here: nbVertexPhi's authority over the 8 incident tiles
+// T - c taken in one pass. nbVertexCoarse gives F's vertex where the brick of v has an F slot and an incident tile is
+// h-owned; else nbVertexRead4 takes the first incident tile that is a resident 4h tile, T' = T + c - 1, whose
+// trilinear at v (weights (1 - c) exactly 1, the rest 0) is C's vertex T itself; with none, F's vertex.
+fn cdCornerPhi(T:vec3i)->f32{
+  let v=4*T;
+  if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_FAR*cH;}
+  var h=false;var c4=false;
+  for(var k=0u;k<8u;k++){
+    let q=T-vec3i(vec3u(k&1u,(k>>1u)&1u,k>>2u));
+    if(!nbTileInLattice(q)){continue;}
+    let cs=nbCSlotOfPage(q>>vec3u(3u));if(cs==NB_NONE){continue;}
+    if(nbTileH(cs,nbTileIndex(q))){h=true;}else{c4=true;}
+  }
+  if(h&&nbFSlotOfBrick(v>>vec3u(3u))<NB_SEAM){return nbFVertex(v)*cH;}
+  if(c4){return nbCVertex(T)*cH;}
+  return nbFVertex(v)*cH;
+}
+fn cdNormalOf(q:vec3i,r:CdTileRef,v:array<f32,8>,a:u32,u:u32)->vec4f{
+  if(r.kind==0u){return vec4f(0.0);}
+  if(r.kind==1u){return cdNormalH(r);}
+  var w:array<f32,8>;
+  for(var k=0u;k<8u;k++){
+    if(((k>>a)&1u)!=u){w[k]=v[k^(1u<<a)];}else{w[k]=cdCornerPhi(q+vec3i(ncCorner(k,2u)));}
+  }
+  return cdNormal4(w);
+}
+// ncNormalRate with q's normal n given (n.w set only where q holds a slot: r's).
+fn cdRate(r:CdTileRef,n:vec4f,e:vec3f)->f32{
+  if(n.w<0.5){return 0.0;}
+  let o=NC_S*r.s+${CENSUS.TC}u+16u*r.i;
+  let u=vec3f(bitcast<f32>(census[o]),bitcast<f32>(census[o+1u]),bitcast<f32>(census[o+2u]));
+  let v=dot(u,n.xyz);let d=dot(n.xyz,e);
+  if(!(abs(d)<=0.75||v*d>0.0)){return 0.0;}
+  let x=abs(v);return select(0.0,x,x<3.0e38);
+}
+fn cdQuietCurve(t:vec3i,cs:u32,i:u32)->bool{
+  let me=cdTileRef(t);
+  var need=select(0u,255u,me.kind==2u);
+  var refs:array<CdTileRef,6>;
+  for(var a=0u;a<3u;a++){
+    var e=vec3i(0);e[a]=1;
+    let lo=cdTileRef(t-e);let hi=cdTileRef(t+e);refs[2u*a]=lo;refs[2u*a+1u]=hi;
+    for(var k=0u;k<8u;k++){
+      let up=((k>>a)&1u)!=0u;
+      if((up&&hi.kind==2u)||(!up&&lo.kind==2u)){need|=1u<<k;}
+    }
+  }
+  var v:array<f32,8>;
+  for(var k=0u;k<8u;k++){if(((need>>k)&1u)!=0u){v[k]=cdCornerPhi(t+vec3i(ncCorner(k,2u)));}}
+  var n=vec4f(0.0);
+  if(me.kind==1u){n=cdNormalH(me);}else if(me.kind==2u){n=cdNormal4(v);}
+  var r=cdRate(me,n,vec3f(0.0));
+  let w=census[NC_S*cs+${CENSUS.VOL}u+i];let n0=unpack4x8snorm(w);var div=0.0;
+  for(var a=0u;a<3u;a++){
+    var e=vec3i(0);e[a]=1;let f=vec3f(e);
+    let lo=cdNormalOf(t-e,refs[2u*a],v,a,0u);let hi=cdNormalOf(t+e,refs[2u*a+1u],v,a,1u);
+    r=max(r,max(cdRate(refs[2u*a],lo,f),cdRate(refs[2u*a+1u],hi,-f)));
+    if(lo.w>0.5&&hi.w>0.5){div+=0.5*(hi[a]-lo[a]);}
+    else if(hi.w>0.5){div+=hi[a]-n0[a];}
+    else if(lo.w>0.5){div+=n0[a]-lo[a];}
+  }
+  let curve=!nbTileH(cs,i)||w==0u||abs(div)/3.0<=${UNIFORM_TILE_UPDATE_BUDGET_H};
+  return curve&&ncDt()*r/(4.0*ncH())<=${UNIFORM_TILE_UPDATE_BUDGET_H};
+}
+fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   let t=xTileOf(cs,i);
   // A tile past the box (a lattice padded to whole pages past the container's walls) is no tile, as one past the
   // lattice: it never bands, so no ring brick lies more than a brick past the walls (uCache's window, 0x55430001).
@@ -1553,7 +1660,7 @@ fn cdBodyHeld(t:vec3i)->bool{
   // A source tile is not calm: the drop's liquid arrives this step, after the certificate (lane F's M4).
   // And an h tile is calm only where its 4h-scale curvature keeps its volume within the budget (ncCurveShift).
   if(band&&head&&!source&&(ncFin(cs,i)&ncTriggerBit(NC_THIN_K))==0u&&ncCalm(t,cs,i)
-     &&(!nbTileH(cs,i)||ncCurveShift(t,cs,i)<=${UNIFORM_TILE_UPDATE_BUDGET_H})&&ncSurfaceQuiet(t)){
+     &&cdQuietCurve(t,cs,i)){
     atomicOr(&wgCalm[lane>>5u],bit);
     let known=census[o+${CENSUS.CALM_KEY}u+(i>>6u)]==nbCRec(cs,NB_REC_KEY)+1u;
     toCoarse=!nbTileH(cs,i)||(known&&(census[o+${CENSUS.CALM}u+word]&bit)!=0u);
