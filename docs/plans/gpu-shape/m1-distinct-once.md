@@ -588,3 +588,61 @@ Findings:
   - Then every walk is one link, in all kernels, including those that bind no fcell (pMove, uTransfer, uCache,
     lDistance, pDeposit).
 - Not run: seep and letters.
+
+## FLAT landed: the brick → F slot table in dir (lane A2, 2026-11-24, ninth task)
+
+FLAT is a dir region of 64 words per window page (brick-abi.md §3). It holds the walk PAGE → CHILD resolved: an F slot,
+or NONE, so BULK, NONE and a transient CLAIM all read as absent. nbFSlotOfBrick reads it in one load, and so do every
+lookup built on it (nbFSlotOfCell, fgBrickSlotOfDir, the ownerReads rewrites), fcell-binding or not.
+- The set's writers keep FLAT in the same dispatch as the PAGE or CHILD store they follow: setClaimPages,
+  setClaimBricks, setLeave and setLeavePages. No reader of FLAT shares a dispatch with them.
+- The other dir writers never touch an F slot word. The residency's rqTake and rqAppend only toggle CLAIM ↔ NONE.
+- Not converted:
+  - Lookups that already hold the C slot (they iterate a page's children, or read its tile bits first) stay one load
+    of CHILD: brick-static-need, setCommitMask, the census TRIG pass, and pressure-mgpcg's pSeamBrick and
+    pLiquidTile.
+  - The pressure ones are lane B2's files.
+
+**The index matters.** The first build indexed FLAT by page, `64 · pageIndex(b >> 2) + brickLocal(b)`, which is about
+17 integer ops on the load's critical path.
+- stepab, readers only (the base tree has the same writers and the walk readers): lAdvect −5.0% dam, −3.1% paddleboats;
+  GPU wall −1.11% and −1.23%.
+- Indexed by brick in the window instead, `(b & (4W−1))` packed with x fastest, toroidal as pageIndex (3 masks, 2
+  shifts): lAdvect −9.8% dam, −8.1% paddleboats; GPU wall −2.78% (A/A +0.02 ms) and −1.85% (A/A −0.14 ms). This is
+  the landed index, and it matches the emulation's −9%.
+
+Gates (the landed brick-window index unless marked):
+- **Guard.** setFlatCheck is a debug pass, never scheduled. It latches FAIL.UNSUPPORTED with info 0x464c0000 | offset.
+  BrickLayout.flatMismatches is the CPU check.
+  - flatcheck.mts on each of the four scenes, 134 checks: every step of 130, a save and restore, and a live fill plus
+    undo with steps after each. Result: 0 mismatches and no FAIL; the brick count changed at 95–130 of them.
+  - brick-flat.test.ts and brick-engine.test.ts (FLAT at every churn step, leaving included) pass, 27 of 28.
+  - The one failure, "the app adapter … no buffer pEnergy", fails the same way at HEAD.
+  - brick-solid-edit.test.ts carries the FLAT check, but it fails at HEAD before its undo ("the fill's reach holds
+    resident bricks"). flatcheck's edit phase covers edit plus undo instead.
+- **stepab exactness.** BASE is the same tree with the walk readers.
+  - Identical on every changed placement but one per scene: 265/266 dam, 289/290 paddleboats, 272/273 seep,
+    265/266 letters.
+  - The exception is pSeed z0: all records pair, and word 7 (the site depth) differs, 38 words over 4 ulp, max
+    1505 ulp on dam.
+  - FLAT equals the walk at pSeed's own snapshot (0 mismatches, measured), so the slots it reads are identical.
+  - Inference: this is Metal's relaxed fp math on the write pass's trilinear psDepth sum. It is the same word and the
+    same cancellation near zero as the "depth" no-go above.
+  - This corrects the flatall note above: pSeed's inexact parts are not the frozen table, since they recur with FLAT
+    equal to the walk.
+  - pmgCoarsenTop on letters (page index round) is order-dependent float atomics: base and base-again disagree on
+    the other three scenes in the same round.
+- **Timing round**, base HEAD e7a60c95 (order-balanced step time):
+  - page index, a clean round: dam −3.5%, paddleboats −1.8%, seep −2.0%, letters −1.7%.
+  - brick-window index: dam −2.8%, paddleboats −3.0%, seep −4.2%, letters −5.2%. This round ran beside another
+    session's test:unit (CPU load, its contention.log); no GPU job overlapped.
+  - No scene is slower in either round. Peak GPU memory +0.1 to +0.5 MB.
+- **Drift** (fenced/pipelined, %):
+  | scene | base | candidate |
+  |---|---|---|
+  | dam | −1.11/−1.12 | −1.05/−1.08 |
+  | paddleboats | 0.60/0.51 | 0.87/0.64 |
+  | seep | −0.68/−0.62 | −0.59/−0.58 |
+  | letters | 0.58/0.56 | 0.67/0.66 |
+  - The page index round had dam's candidate on the other side (−1.15/−1.21 against −1.11/−1.09).
+  - HEAD's own pairs span 0.41–0.92 (paddleboats) and 0.47–0.62 (letters) across the two rounds.

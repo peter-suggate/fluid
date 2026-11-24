@@ -570,7 +570,7 @@ fn nbChild(cslot:u32,brickLocal:u32)->u32{return ${ld(D, "NB_D_CHILD+64u*cslot+b
 fn nbFlatIndex(b:vec3i)->u32{let q=vec3u(b)&(4u*NB_WINDOW-vec3u(1u));return NB_D_FLAT+(q.x|(q.y<<(NB_WINDOW_BITS.x+2u))|(q.z<<(NB_WINDOW_BITS.x+NB_WINDOW_BITS.y+4u)));}
 // The F slot of brick b, or NB_NONE: one load of FLAT, which the set's writers keep equal to the walk (setFlatCheck).
 // Callers apply the box rule first (no negative coordinates).
-fn nbFSlotOfBrick(b:vec3i)->u32{let cs=nbCSlotOfPage(b>>vec3u(2u));if(cs==NB_NONE){return NB_NONE;}return nbChild(cs,nbBrickLocal(b));}
+fn nbFSlotOfBrick(b:vec3i)->u32{return ${ld(D, "nbFlatIndex(b)")};}
 fn nbFSlotOfCell(c:vec3i)->u32{return nbFSlotOfBrick(c>>vec3u(3u));}
 fn nbFRec(slot:u32,k:u32)->u32{return ${ld(D, "NB_D_FREC+32u*slot+k")};}
 fn nbCRec(slot:u32,k:u32)->u32{return ${ld(D, "NB_D_CREC+32u*slot+k")};}

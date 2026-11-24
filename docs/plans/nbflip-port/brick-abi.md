@@ -401,6 +401,7 @@ The directory lives in the `dir` buffer: `array<u32>` for readers, `array<atomic
 |---|---|---|
 | `PAGE` | `WX * WY * WZ` | one page word per window page |
 | `CHILD` | `64 * CCAP` | the F slot of each F brick of a C page, by `brickLocal`; `NONE` where not F-resident |
+| `FLAT` | `64 * WX * WY * WZ` | the walk `PAGE` → `CHILD` resolved: per brick of the window (`flatIndex(b)`), its F slot, else `NONE` |
 | `FREC` | `32 * FCAP` | F records (§4.1) |
 | `CREC` | `32 * CCAP` | C records (§4.2) |
 | `CMASK` | `16 * CCAP` | per C slot, 512 bits: bit `t` (the tile's C local) set when tile `t` is h-owned |
@@ -435,10 +436,31 @@ v    = pool[BASE[F][ch] + 520 * f + local(c & 7)]
 
 That is two dependent loads a tap: variant T2o at 1.43x dense (design §4.1).
 
+**FLAT (2026-11-24, docs/plans/gpu-shape/m1-distinct-once.md).** `nbFSlotOfBrick(b)` reads one word,
+`FLAT[flatIndex(b)]`, instead of the walk's two dependent loads. `flatIndex(b) = (b.x & (4WX-1)) | (b.y & (4WY-1))
+<< (log2 WX + 2) | (b.z & (4WZ-1)) << (log2 WX + log2 WY + 4)`: the brick in the window of bricks, toroidal as
+`pageIndex`, x fastest. (Indexed by page, `64 * pageIndex(b >> 2) + brickLocal(b)`, the same table gave half the
+gain: the index's arithmetic sits on the load's critical path.) FLAT holds only an F slot (bit 31 clear) or `NONE`: a page or child word that is `BULK`, `NONE` or a
+transient `CLAIM` resolves to `NONE`, the walk's "absent". Its words a page are the page word's, so it scales
+with the window (64 words a window page), never the lattice.
+- Its writers are the set's, each in the same dispatch as the `PAGE` or `CHILD` store it follows: `setClaimPages`
+  (a page entering: its 64 words `NONE`), `setClaimBricks` (a brick entering: its F slot), `setLeave` (a brick
+  leaving: `NONE`, by its record's key, still live there) and `setLeavePages` (a page leaving: its 64 words
+  `NONE`, already so). `rqTake`/`rqAppend` (the residency's `CLAIM` ↔ `NONE`) leave it alone: neither is an F
+  slot. Save and restore copy the whole `dir`, FLAT with it; the build fills it `NONE`.
+- The readers never see a stale word: `PAGE`/`CHILD` change only in those kernels, and every reader of FLAT
+  runs in a later dispatch. The page → C slot walk itself (`nbCSlotOfPage`, `nbChild`) stays for C
+  lookups and for `setClaimBricks`/`setLeave`'s own records.
+- The guard: `setFlatCheck` (brick-set.wgsl.ts, a debug pass, never scheduled) compares every window brick's
+  FLAT word with the walk and latches `FAIL.UNSUPPORTED`, info `0x464c0000 | offset`; on the CPU,
+  `BrickLayout.flatMismatches(dir)`. brick-flat.test.ts, brick-engine.test.ts (every churn step),
+  brick-solid-edit.test.ts (edit, undo, redo, reload) and tools/experiments/gpu-shape/flatcheck.mts (the four
+  gate scenes, every step, save and restore) hold it at 0.
+
 **Residency is the brick set.** A tap that misses (`NONE`) reads air: φ = +`PHI_AIR` (the band's
 positive bound, F's constant), and velocity by extension's air rule. By construction a
 non-resident brick is outside the CFL reach of liquid and particles, so every reader agrees on it.
-There is no second structure to disagree with.
+FLAT is the one derived copy, written with the walk's words in the same dispatches and checked against them.
 
 ## 4. Records
 

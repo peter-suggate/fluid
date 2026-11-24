@@ -245,11 +245,11 @@ const foFaces = (prefix: string, ch: string) => ownerReads(cutOwner(brickOwnerWG
   .replace(new RegExp(`\\b${prefix}(TileInLattice|TileIndex|TileOwnerH|CellOwnerH)\\b`, "g"), "fo$1"));
 const FO_VEL_WGSL = [foFaces("foU", "U"), foFaces("foP", "UP"), foFaces("foS", "US")].join("\n");
 
-/** The directory's F slot of a brick: two dependent loads (page, then child). */
+/** The directory's F slot of a brick: one load of FLAT (the walk page -> child, resolved: brick-abi.md §3). */
 const FG_BRICK_SLOT_WGSL = /* wgsl */`
 fn fgBrickSlotOfDir(b:vec3i)->u32{
  if(!nbBrickInRange(b)){return NB_NONE;}
- let s=nbFSlotOfBrick(b);return select(NB_NONE,s,s<NB_SEAM);
+ return nbFSlotOfBrick(b);
 }`;
 
 /** Cell addressing (needs `dir` and an fgBrickSlot). */
