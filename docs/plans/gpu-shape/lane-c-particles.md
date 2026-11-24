@@ -393,3 +393,9 @@ tail it removes. The heavy records' 0.78 ms bound is real work, not idle tail.
 
 pSeparateHeavy is not landed. pSeparate's remaining lever is fewer neighbours, which is physics: the parked "why
 the old engine relaxes faster" item.
+
+**pSeparate is closed.** Its mapping is already per chunk, so A2's lever 3 (spreading a brick's rounds over k
+workgroups) has nothing to spread. pSeparate is dispatched from pArgs's `P_ARGS_RECORDS`: `ceil(n / 128)` groups, and
+record `i = nbGroup(wid)·128 + lid` of the cell-sorted bank. That is one record a lane, with no per-brick loop and no
+rounds. A heavy cell's records already occupy many groups in parallel, so the tail is each record's own neighbour chain
+(its w adds), which is serial by the exact sum.
