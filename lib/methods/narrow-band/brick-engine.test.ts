@@ -32,6 +32,7 @@ import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, nbEngine, nbEngineChoice, nbEngineStatusText } from "./brick-method";
 import { BRICK_OPEN_TOP_HEADROOM, BRICK_SPLASH_DROP, brickInitialExtent, brickPoolRule, brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
+import { P_ENERGY_BUFFER } from "./particles-kernels.wgsl";
 import { brickField, pressureOracle, residencyOracle } from "./brick-oracle";
 import { keyOf, readChannel, snapshot, type BrickSnapshot } from "./brick-readback";
 import { validateScene, type SceneDescription } from "../../core/model";
@@ -550,7 +551,9 @@ test("brick engine (GPU): the app adapter steps, reports, and presents the pool 
     const setup: BrickSceneSetup = { sceneId: "test", lattice: [64, 32, 64], h_m: H_M, dt_s: DT, gravity_mps2: [0, -G, 0], density_kg_m3: 1000, viscosity_Pa_s: 0, surfaceTension_N_m: 0,
       capacities: { f: 400, c: 16, b: 0, k: 0, particles: 1024 }, particleBandDepth: 3, liquid: [sheet(20, 10.3, 20)], origin_m: [0, 0, 0] };
     const far = 2;
-    const solver = await BrickNBFlipSolver.create(device, { setup, stages: bringUpStages, solver: L => bringUpCG(L), values: {}, quality: "balanced", farPhi_m: far });
+    // The particle layer binds the fluid stages' pEnergy (c7a73d57: the Motion view); the bring-up stages declare it.
+    const stages = (c: Parameters<typeof bringUpStages>[0]) => { const b = bringUpStages(c); return { ...b, buffers: { ...b.buffers, [P_ENERGY_BUFFER]: c.layout.cap.particles } }; };
+    const solver = await BrickNBFlipSolver.create(device, { setup, stages, solver: L => bringUpCG(L), values: {}, quality: "balanced", farPhi_m: far });
     assert.equal(solver.advanceTo(0.5 * DT, []), false, "no partial step");
     assert.equal(solver.advanceTo(DT, []), true);
     await solver.awaitFrameCompletion();
