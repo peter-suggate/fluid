@@ -2,7 +2,7 @@
 // reads the GPU's state before it (the chain lcClear, lcAdvect, lcCouple, lcClear, lcRetire, lcPublish, lcAdvect: the
 // advects read the far-air gate the clear before them wrote). The state is the column boot's tiers and residency with
 // an analytic φ on every owned vertex, a constant u* on every stored face and hashed lane F tile, cell and vertex
-// words; two pages are COLD. Every non-owned φ copy (F copies of C or hanging vertices, C copies no 4h tile owns)
+// words; two pages are still (COLD and STILL). Every non-owned φ copy (F copies of C or hanging vertices, C copies no 4h tile owns)
 // holds a NaN payload: no kernel may read it into a result or write it. After each kernel the whole φ pool must equal
 // the state before it except the C vertices the kernel owns, the set except lcClear's gate words (by the oracle), and
 // at the end the velocity pool, fcell and dir must be untouched. A BULK16 page word then latches lcAdvect's
@@ -18,6 +18,7 @@ import { bringUpStages } from "./brick-stages";
 import { brickTransferKernels } from "./brick-transfer.wgsl";
 import { FT, FTF, fluidLayout } from "./fluid-grid.wgsl";
 import { LC_ADVECT_GROUPS, LC_GROUPS, LC_RETIRE_ARGS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
+import { levelSetKernels } from "./levelset-kernels.wgsl";
 import { FH, velocityKernels } from "./velocity-kernels.wgsl";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
@@ -77,6 +78,9 @@ class World {
   readonly dt = f32(1 / 60); readonly hm = f32(1 / N);
   phi!: Float32Array; // the phi pool (f32 view)
   constructor(readonly L: BrickLayout, readonly dir: Uint32Array, public set: Uint32Array, readonly fcell: Uint32Array) { this.F = fluidLayout(L, { tiered: true }); }
+  /** fgPack / fgUnpack (fluid-grid.wgsl.ts, 71dfbdf3): a cell in the window's bits plus 5 a side, not 10. */
+  pack(c: V) { const [bx, by] = this.L.windowBits.map(n => n + 5) as [number, number]; return (c[0] | (c[1] << bx) | (c[2] << (bx + by))) >>> 0; }
+  unpack(k: number): V { const [bx, by] = this.L.windowBits.map(n => n + 5) as [number, number]; return [k & ((1 << bx) - 1), (k >>> bx) & ((1 << by) - 1), k >>> (bx + by)]; }
   base(kind: "F" | "C", ch: string) { return this.L.base("phi", kind, ch); }
   cslotOfPage(P: V) { const w = this.dir[this.L.dir.page + this.L.pageIndex(P[0], P[1], P[2])]!; return w < SEAM ? w : NONE; }
   fslotOfBrick(b: V) { const cs = this.cslotOfPage(shr(b, 2)); if (cs === NONE) return NONE; return this.dir[this.L.dir.child + 64 * cs + ((b[0] & 3) | ((b[1] & 3) << 2) | ((b[2] & 3) << 4))]!; }
@@ -163,7 +167,8 @@ class World {
     return (end - start) >>> 0;
   }
   // tiers
-  tileCold(t: V) { const cs = this.cslotOfPage(shr(t, 3)); return cs !== NONE && (this.dir[this.L.dir.crec + 32 * cs + REC.CLASS]! & F_CLASS.COLD) !== 0; }
+  // Deviation 5 since still-tank A (eddd223e): the page's STILL bit (setLists' still page), not COLD.
+  tileCold(t: V) { const cs = this.cslotOfPage(shr(t, 3)); return cs !== NONE && (this.dir[this.L.dir.crec + 32 * cs + REC.CLASS]! & F_CLASS.STILL) !== 0; }
   cellStored(c: V) { return inLattice(c) && this.cslotOfPage(shr(c, 5)) !== NONE; }
   /** nbrTileReach: tile t's spread reach word (REACH1), saturated where no page holds t or REACH_STEP is not the run's
    * ring step's (e.run binds ring slot 0). */
@@ -519,7 +524,7 @@ function coupleOracle(W: World, slots: number[], tally: Tally): Map<string, numb
     if (band < 0 && s !== NONE && !W.tileFresh(shr(c, 2)) && W.nearKnown(c)) {
       const reached = W.reach1(c);
       let nearest = NONE; if (reached) nearest = W.fcell[W.F.fcell.NEAR + W.fgCell(s, c)]!;
-      bulk = bulkDepth(band, q, reached, nearest !== NONE, [nearest & 1023, (nearest >>> 10) & 1023, nearest >>> 20], travel);
+      bulk = bulkDepth(band, q, reached, nearest !== NONE, W.unpack(nearest), travel);
     } else if (band < 0) bump(tally, "guard unknown");
     if (!((W.flags(c) & FTF.SURFACE_TILE) !== 0 && bulk > -2)) { out.set(key, bulk); bump(tally, "bulk"); continue; }
     const vs = W.fgSlot(v);
@@ -590,7 +595,7 @@ function retireOracle(W: World, slots: number[], tally: Tally): Map<string, numb
     if (W.reach1(c)) { const s = W.fgSlot(c); if (s !== NONE && W.nearKnown(c)) nearest = W.fcell[W.F.fcell.NEAR + W.fgCell(s, c)]!; }
     let distance = Math.max(Math.abs(initial), 5);
     if (nearest !== NONE) {
-      const base: V = [nearest & 1023, (nearest >>> 10) & 1023, nearest >>> 20], cv: number[] = [];
+      const base = W.unpack(nearest), cv: number[] = [];
       for (let k = 0; k < 8; k++) cv.push(W.vertexPhi("PHI", add(base, corner(k))));
       const cand = cellDistance(sub(v, base), cv); if (cand >= 0) { distance = cand; bump(tally, "crossing cell"); }
     }
@@ -665,6 +670,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     assert.equal(slots.length, s0.pages.size, "C_ALL lists every page");
     // ---- lane F's words: hashed tile flags, distances and heats; crossing cells; splat keys; bounds; bins.
     const fcell = new Uint32Array(F.fcell.words), set = new Uint32Array(s0.set);
+    const packCell = (c: V) => World.prototype.pack.call({ L } as World, c);
     for (const [bk, fs] of s0.bricks) {
       const b = brickKeyCoord(bk) as V;
       for (let t = 0; t < 8; t++) {
@@ -689,7 +695,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
         // redistance would), a quarter a hashed cell near them, a quarter none.
         const zero = Math.floor(21.3 - (2.2 * Math.sin(0.19 * c[0] + 0.4) * Math.cos(0.23 * c[2]) + 0.05 * (c[0] - 30)) / 0.45);
         const near: V = r(1) < 0.5 ? [c[0], clamp(zero, 0, N - 1), c[2]] : clampV(add(c, [Math.floor(5 * r(2)) - 2, Math.floor(5 * r(3)) - 2, Math.floor(5 * r(4)) - 2]), 0, N - 1);
-        fcell[F.fcell.NEAR + 512 * fs + l] = r(9) < 0.75 ? (near[0] | (near[1] << 10) | (near[2] << 20)) >>> 0 : NONE;
+        fcell[F.fcell.NEAR + 512 * fs + l] = r(9) < 0.75 ? packCell(near) : NONE;
         if (r(5) < 0.6) fcell[F.fcell.KEY + 512 * fs + l] = (~fbits(f32(4.5 * r(6)))) >>> 0;
         if (r(7) < 0.5) fcell[F.fcell.HOT + 512 * fs + l] = (~fbits(f32(4 * r(8)))) >>> 0;
       }
@@ -703,10 +709,13 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
         if (hash(T[0], T[1], T[2], 40) < 0.1) fcell[F.fcell.DIL4 + 512 * cs + i] = (FTF.CROSSING << 24) >>> 0;
       }
     }
-    // ---- two COLD pages: (1, 0, 1) on the floor away from the column, (0, 1, 1) in the air above the surface.
+    // ---- two still pages (regionStill's COLD page, setLists' STILL): (1, 0, 1) on the floor away from the column, (0, 1,
+    // 1) in the air above the surface. The engine's setLists takes a STILL page off C_ACT; the fixture keeps the boot's
+    // C_ACT (every page), so the kernels also run the held pages' own vertices and their cold paths are covered.
     const dir = new Uint32Array(s0.dir), coldSlots = fx.cold.map(k => s0.pages.get(k)).filter(cs => cs !== undefined);
     if (fx.full) assert.equal(coldSlots.length, fx.cold.length, "the COLD pages are resident");
-    for (const cs of coldSlots) dir[L.dir.crec + 32 * cs + REC.CLASS]! |= F_CLASS.COLD;
+    for (const cs of coldSlots) dir[L.dir.crec + 32 * cs + REC.CLASS]! |= F_CLASS.COLD | F_CLASS.STILL;
+    assert.deepEqual(s0.list(LIST.C_ACT), slots, "the boot's C_ACT lists every page");
     // ---- φ: analytic on owned vertices, NaN payloads on every other copy; u* = U on every stored face.
     const phiWords = new Uint32Array(await e.read("phi")), W = new World(L, dir, set, fcell);
     W.phi = new Float32Array(phiWords.buffer);
@@ -745,6 +754,13 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     assert.ok(uCache, "tiered velocity kernels define uCache");
     await e.run([{ kernel: uCache, dispatch: { indirect: ARGS.FC_G1 } }, { kernel: velocityKernels(L, F).uCache4!, dispatch: { indirect: 12 * LIST.C_ALL } }]);
     const fcellCached = new Uint32Array(await e.read("fcell"));
+    // lResolve where the engine runs it (brick-fluid-stages.ts: after each C PHI writer, so before lcAdvect, after
+    // lcCouple and after the analysis's lcClear): lcAdvect's taps (0346d057) and lcRetire's samples read the PHI word of
+    // a vertex in an F-held brick, which lResolve sets to its owner-resolved value at the non-owned vertices (their NaN
+    // payloads until then). PHI1's non-owned F copies keep theirs.
+    const lResolve = levelSetKernels(L, F).lResolve;
+    assert.ok(lResolve, "tiered level-set kernels define lResolve");
+    const resolve = () => e.run([{ kernel: lResolve, dispatch: { indirect: 12 * LIST.F_ALL } }]);
     console.log(`levelset-coarse: ${s0.bricks.size} F, ${s0.pages.size} C pages, ${lanes(W, slots).length} C vertices, COLD pages ${coldSlots.map(cs => brickKeyCoord(dir[L.dir.crec + 32 * cs + REC.KEY]!).join(",")).join(" ")}; poisoned ${poisonF} F and ${poisonC} C copies (${poisonCIn} of them lattice vertices F owns)`);
 
     // ---- one kernel: run, then the φ pool differs from before only at the expected C words, by the oracle's values,
@@ -810,10 +826,13 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     const cover = (name: string, t: Tally, keys: string[]) => { if (fx.full) for (const k of keys) assert.ok((t[k] ?? 0) > 0, `${name} path ${k} covered`); };
     // The chain: the gate is clear until the first lcClear (zeroed at setClaimPages), which writes it for advect.
     const tL0 = await step("lcClear", "PHI", (W, t, sw) => clearOracle(W, slots, t, sw), rel(0));
+    await resolve();
     const tA = await step("lcAdvect", "PHI1", (W, t) => advectOracle(W, slots, t, fatal), rel(2e-4));
     assert.ok(mirrors === 0 || ((tL0["mirror copied"] ?? 0) === mirrors && (tA["mirror copied"] ?? 0) === mirrors), `mirrored corners ${mirrors}: lcClear copied ${tL0["mirror copied"]}, lcAdvect ${tA["mirror copied"]}`);
     const tC = await step("lcCouple", "PHI", (W, t) => coupleOracle(W, slots, t), rel(2e-4));
+    await resolve();
     const tL = await step("lcClear", "PHI", (W, t, sw) => clearOracle(W, slots, t, sw), rel(0));
+    await resolve();
     const tR = await step("lcRetire", "PHI1", (W, t) => retireOracle(W, slots, t), rel(2e-4));
     // lcPublish: PHI takes PHI1 at every C vertex.
     await step("lcPublish", "PHI", W => {
@@ -822,6 +841,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
       return m;
     }, rel(0));
     // The next step's advect reads the gate the last lcClear wrote.
+    await resolve();
     const tA2 = await step("lcAdvect", "PHI1", (W, t) => advectOracle(W, slots, t, fatal), rel(2e-4));
     assert.equal(fatal.n, 0);
     cover("advect", sum(tA, tA2), ["cold hold", "far air", "full path", "wall full path", "foot", "smoothing", "cubic", "wall contact"]);
