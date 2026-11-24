@@ -170,3 +170,84 @@ which is a latency bet. It needs a new kernel, a list region and an args word (a
 prototype a new placement. Its bound is the site-loop column above minus about 6 µs for the two extra dispatches,
 and it holds only if the global loop's own chain is short. A brick-level go list would address part of "the rest"
 (65–81% of launched bricks have go = 0); that was not measured.
+
+### The restructure tax, attributed offline (regprobe and psoinfo)
+
+The +43.5% is register pressure. HEAD's pSeed sits at Metal's 512-thread cap with under 4 registers of headroom
+(regprobe: 4 pinned registers drop it). S_list0 compiles to 448: for 256-lane groups that is one group a core instead
+of two. Each piece alone (the list's declarations, the split loop, the barrier, the push) stays at 512, so no one
+piece is the cause: the combined two-phase body crosses the step. Not the barrier, and not workgroup memory (HEAD
+holds about 3.3 KB, the list 3 KB more; psoinfo's static length reads 0 because Dawn passes it as an argument).
+
+## Landed: a73871bb, pSeed tests a site a lane
+
+The site loop's serial chain moved to one (cell, j) a lane. Phase A runs every cell's gates (two cells a lane) and
+lists a looping cell with its goal − n0 sites (one packed atomicAdd: cells low 16 bits, pairs high). Phase B runs one
+site a lane and sets its bit in the cell's workgroup mask with atomicOr; the mask is order-free and the held skip
+depends on j alone, so it is exact. The count and write passes read the masks. The deep cell's uncovered is taken up
+front, where nbfSeedSiteOk would have read the loop's value. The register cap rises 512 → 576, and workgroup memory
+grows by about 10 KB.
+
+stepab against af235dd9 (pSeed in step, min over S=7): set identical and parts identical up to order on all four.
+
+| scene | pSeed | GPU wall |
+|---|---|---|
+| dam | 1.034 → 0.964 ms (−6.8%) | |
+| letters | 2.079 → 1.905 ms (−8.4%) | −0.79% |
+| paddleboats | 0.615 → 0.556 ms (−9.7%) | −0.42% |
+| seep | 0.408 → 0.383 ms (−6.2%) | −0.11% |
+
+A lazy-uncovered variant (S_site2: uncovered computed in phase B) was faster still (dam −17%, letters −18%) but not
+exact: z0 records differ (360–112754 f32 words). The deep cell's uncovered must be the loop's value, so it is not
+landed.
+
+## pSeparate's heavy groups: how often (coordinator item, 2026-11-24)
+
+pSeparate and pMove run one record a lane, 128 records a group, over the cell-sorted bin. A "heavy brick" is a
+crowded cell: each of its records scans the 8 runs of its 2x2x2 cells in order (sepSum), so the per-lane serial
+chain is the neighbour count w, and the cell's few groups form the tail.
+
+**Crowding is persistent on dam.** freq.mts (fluid-scratch/gpu-shape/lane-c/freq) read every step's bins over 300
+steps. Dam's largest cell run is 309 records at the median (mean 361, max 1242). Cells over 32 records: 150 at the
+median (max 1884). Letters: 157 / 87. Paddleboats: 26 / 1. Seep: 49 / 5.
+
+**The bound, at frozen states.** stepab P_cut128: a record with w > 128 skips its scan (timing only). The cut adds the
+8-run w scan to every record, about +0.04 ms on dam, so the figures below understate the bound by that much.
+
+| dam step | 30 | 45 | 60 | 80 | 100 | 120 | 150 | 180 | 240 | 300 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| pSeparate (ms) | 2.75 | 1.33 | 1.88 | 2.28 | 1.17 | 3.27 | 3.49 | 1.57 | 0.86 | 0.88 |
+| heavy records' share (ms) | 0.85 | −0.05 | 0.69 | 1.03 | 0.16 | 2.17 | 2.49 | 0.58 | −0.05 | −0.06 |
+
+That is a mean of 0.78 ms over the 10 states, held through the splash (steps 30–180) and gone by step 240. A2's 72%
+tail (step 100) matches the heaviest states (66–71%). States differ run to run: the record order is atomic, so the
+splash's crowding is chaotic, and stepab's base at step 100 ranged 0.94–1.53 ms across runs.
+
+Elsewhere the same cut does not pay at step 100: letters +6.8%, paddleboats +9.5%, seep +2.7%. The w scan costs more
+than the skipped work saves.
+
+Per-step in-run replays were not usable as a bound. A replay of the next step from a saved state, base against cut,
+moved ±1–2 ms single-shot and ±1 ms as a minimum of 4. Their run means (−0.17 / +0.09 ms) are noise. The min-of-4 dam
+run also overlapped another lane's tsc.
+
+**Tiling: no-go.** P_tile stages the union of a heavy group's 2x2x2 cells, 128 records at a time, in workgroup memory,
+in (z, y, x) order: that is every base's c order, so the result is exact. Results, from one gate each:
+
+| variant | dam | letters |
+|---|---|---|
+| P_tile64 (heavy groups staged) | +17% | +20% |
+| P_tile0 (never heavy: the restructure alone) | +7.6% | +18% |
+
+The barriers, workgroup memory and uniform control flow cost more than the shorter latency saves, and a heavy group
+still runs the full chain of w adds.
+
+**The shape that remains: spread the chain.**
+1. pSeparate skips records over a threshold and lists them, using the record's own cell run as the test (one fgRun,
+   not the 8-run w scan the cut paid for).
+2. pSeparateHeavy runs one heavy record a subgroup. The 32 lanes stride the concatenated 8 runs in order, and each
+   lane computes one neighbour's term.
+3. The terms are added in j order. A ballot of the passing lanes, then subgroupShuffle adds in lane order: the same
+   nbfSeparationAdd terms in the same order, so it is exact.
+
+This needs a list region and an indirect args word (the ABI change the coordinator OK'd at ≥0.5 ms average on dam;
+the bound measured here is 0.78 ms). Not built yet.
