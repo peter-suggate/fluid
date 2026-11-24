@@ -173,7 +173,7 @@ const LAST_LIST = 18;
 
 /** Indirect arguments: 12 words a list (G1, G8, G64, X8: eight workgroups an entry), then FC_* at 384 (F_ALL's bricks, then
  * C_ALL's pages), FA_* at 400 (F_ACT's bricks, then C_ALL's pages) and FCA_* at 412 (F_ALL's bricks, then C_ACT's
- * pages), FCA2_G1 at 421 (C_ACT's pages twice, then F_ALL's bricks: uTransfer's pages first, a page over two
+ * pages), FCA2_G1 at 421 (C_ACT's pages twice, then F_ALL's bricks: uAdvect's and uTransfer's pages first, a page over two
  * workgroups), C_ACT4_G1 at 424 (C_ACT's pages four times: uExt4Seed, a page over four workgroups) and C_ALL2_G1
  * at 427 (C_ALL's pages twice: pressureRowsC, a page over two) and C_ACT2_G1 at 430 (C_ACT's pages twice: lcAdvect,
  * a page over two workgroups of four z planes). Lanes: P from 512, F from 2048. */

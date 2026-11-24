@@ -400,6 +400,8 @@ fn fsUnitAbsent(c:vec3i,a:u32)->f32{return 0.0;}
 fn vLive(c:vec3i)->bool{if(fgCellCoarse(c)){return vLive4(c>>vec3u(2u));}return nbInWallBox(c)&&fgCentrePhi(c)<0.0;}
 // A C page (tiered, FC list): the departure of each whole 4h face (umUnitMomentumValue at width 4: culled where
 // neither owner is live, else the trace from the face's centre, umFaceCenter), into UP.
+// A page over two workgroups (FCA2_G1, the pages first: GPU-shape A2, 2026-11-24): half sub's tiles. Launched after
+// the F bricks, the pages ran alone at the pass's end (24-42% of it); every face's trace is its own, so exact.
 // The traced faces of a workgroup (S2p's compaction): a lane marks its faces, culled ones take 0 at once, and the
 // traces run from the list, so whole SIMD groups trace instead of the lanes whose cells hold liquid.
 const A_LANES:u32=${A_LANES}u;
@@ -407,8 +409,8 @@ var<workgroup> wTrace:array<u32,1536>;
 var<workgroup> wTraced:atomic<u32>;
 var<workgroup> sTraced:u32;
 fn vTraceAdd(e:u32){wTrace[atomicAdd(&wTraced,1u)]=e;}
-fn vcAdvectPage(slot:u32,lid:u32,dt:f32,h:vec3f){
- for(var r=0u;r<512u/A_LANES;r++){
+fn vcAdvectPage(slot:u32,lid:u32,dt:f32,h:vec3f,sub:u32){
+ for(var r=sub;r<512u/A_LANES;r+=2u){
   let j=lid+A_LANES*r;let T=vcTile(slot,j);let live=vLive4(T);
   for(var a=0u;a<3u;a++){
    if(!vcFace(T,a)){continue;}
@@ -427,7 +429,7 @@ fn vcAdvectPage(slot:u32,lid:u32,dt:f32,h:vec3f){
  }
 }
 var<workgroup> sSplit:u32;
-fn vcAdvectPageOf(slot:u32,lid:u32){vcAdvectPage(slot,lid,vDt(),vH());}
+fn vcAdvectPageOf(slot:u32,lid:u32,sub:u32){vcAdvectPage(slot,lid,vDt(),vH(),sub);}
 // vLive of an F brick's cells and their face neighbours: a coarse cell's is its tile's vLive4 (eight C corners and
 // the centre), staged once for the 27 tiles about the brick in place of once a cell and once a face.
 var<workgroup> wLive4:array<u32,27>;
@@ -461,7 +463,7 @@ fn vLiveF(c:vec3i)->bool{
 ${stagedHead("vcAdvectPageOf", -1, A_LANES, `
  vRingMark(o,lid,true);workgroupBarrier();
  if(lid==0u){sRing=select(0u,1u,vRingOf(true));}
- if(workgroupUniformLoad(&sRing)!=0u&&g!=0u){return;}`)}
+ if(workgroupUniformLoad(&sRing)!=0u&&g!=0u){return;}`, 2)}
  vLive4Low=(o>>vec3u(2u))-vec3i(1);
  if(FG_TIERED&&lid<27u){let T=vLive4Low+vec3i(i32(lid%3u),i32((lid/3u)%3u),i32(lid/9u));wLive4[lid]=select(0u,1u,!foCellOwnerH(4*T)&&vLive4(T));}
  workgroupBarrier();

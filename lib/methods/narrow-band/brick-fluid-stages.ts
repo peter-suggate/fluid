@@ -21,7 +21,8 @@
  *   US), then the rebin of the seeds into bank 0 (cfg.z = 1: the move files each record unchanged).
  *
  * Tiered (fluidStagesAt(true)): uAdvect, uViscous, uTransfer, uKick and vGauge run over FC_G1 (F_ALL's bricks, then
- * C_ALL's pages), their 4h faces or tiles in the h pass; lane E's 4h corner kernels (levelset-coarse.wgsl.ts) and the
+ * C_ALL's pages; uAdvect and uTransfer over FCA2_G1, C_ACT's pages first, a page over two workgroups), their 4h faces
+ * or tiles in the h pass; lane E's 4h corner kernels (levelset-coarse.wgsl.ts) and the
  * 4h extension (uExt4Seed, uExt4, before uExtend) run on C_ALL.
  *
  * Banks: a step of parity y moves bank y into bank y ^ 1 (part 1); part 2 reads bank y ^ 1. The boot seeds into
@@ -102,7 +103,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
     [T.levelAnalysis, [...analysis, ...coarse("lcRetire")]],
     [T.levelPublish, [at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all), ...(l.lWall ? [at(l.lWall, all)] : [])]],
   ]);
-  const velocity = runs([[T.velocityAdvect, [at(v.uAdvect, bothAct)]], [T.velocityDeposit, [at(v.pDeposit, all)]],
+  const velocity = runs([[T.velocityAdvect, [at(v.uAdvect, tiered ? { indirect: ARGS.FCA2_G1 } : all)]], [T.velocityDeposit, [at(v.pDeposit, all)]],
     [T.velocityViscous, v.viscous ? [at(v.uViscous, bothAct)] : []], [T.velocityTransfer, [at(v.uTransfer, tiered ? { indirect: ARGS.FCA2_G1 } : all)]]]);
   const tail = runs([[T.tailExtend, [...ext4, at(v.uExtend, all)]], [T.tailParticles, [args(0, 1), at(p.pJoin, records), at(p.pDelta, records)]]]);
   const stages: BrickStages = {
