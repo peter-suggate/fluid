@@ -274,12 +274,20 @@ has the same gate (uniform-narrow-band-flip.ts), so the brick port is faithful.
 The constraint averaging divides by the overlap count (500–1000 here), so inside a pile the push cancels. The piles
 are not compressive: radial velocity about the centroid is within ±0.2, for both the records' own velocity and the
 grid's. They travel as coherent clumps instead. One clump went 911 → 919 → 1088 records over steps 118–120, moving
-about a cell a step. Its records' FLIP velocity is about (0.5, 0.5, 0.3); the grid's at the same records is
-(−0.1, −0.1, 0). A corner sheet at (127, y, 0) climbs 3–4 cells a step at v_y ≈ 1.5 while the grid has −0.17.
+about a cell a step, at its records' velocity: the centroid moved (0.8, 2.0, 0.3) and (1.1, 1.1, −0.2) cells a step
+at v ≈ (0.5, 0.5, 0.3) m/s, with dt/h ≈ 2.3 cells per m/s. A corner sheet at (127, y, 0) climbs 4.1 then 3.4 cells a
+step at v_y = 1.75 → 1.59 → 1.41, which is exactly −g·dt a step.
+
+Correction (2026-11-24): an earlier note here read before.xyz as the grid's velocity and called the piles
+"decoupled". before.xyz at a frozen state is the last projection's FLIP delta d (nbfG2P), and d_y ≈ −0.16 = −g·dt.
+Coupled records drift with the grid's velocity (nbfDrift takes pic), and the piles move at v·dt/h, so the grid
+carries them. They are free-surface sheets and clumps with no pressure response, which is physical. Their density is
+passively advected: a divergence-free flow neither builds a pile nor relaxes one.
 
 **Against the old engine (dam, same steps).** Both engines crowd at the splash. The old engine relaxes; the brick
-engine holds and grows its piles. The decoupling of record and grid velocity is a second lead, not yet confirmed as
-the reason the brick's piles persist.
+engine holds and grows its piles. Both share the depth gate and the surface projection; the difference is one run
+each and not yet explained. The old engine's crowded cells hold more heavy and deep records (1911 heavy, 21k deep at
+step 60, against the brick's 12 and 9k), so more of its piles reach the merge.
 
 | | old engine: largest / cells over 32 | brick: largest / cells over 32 |
 |---|---|---|
