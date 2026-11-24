@@ -523,33 +523,10 @@ fn pHist(k:u32,rmax:u32){
 `;
   // (A v)(c) at a fine row, v given by an expression of (slot, local); a native neighbour's value
   // by nat(C slot, tile index), or 0 when nat is omitted (pre-smoothing: native rows are carried at 0).
-  // (A v)(c) at h row c (slot s, local l). eager (pmgUpdate): every coupling (K, and RKU, pmgSetupF's upper
-  // couplings) and every neighbour value is loaded in one round, before any test on a loaded value, so a lane's chain
-  // is one load deep rather than D, then K, then the value (Update 218 -> 183 us a call on the tiered dam). The other
-  // callers keep the tested form: eager in pmgSetupF and pmgDown0, heavier kernels, measured 852 -> 1453 and 90 -> 128
-  // us. Both forms sum the same terms in the same order (a zero coupling or a missing neighbour adds nothing).
-  const fineApply = (name: string, v: (s: string, l: string) => string, nat?: (cs: string, i: string) => string, eager = false) => eager ? /* wgsl */`
-fn ${name}(b:vec3i,c:vec3i,s:u32,l:u32)->f32{
-  let d=pDiag(s,l);let v0=${v("s", "l")};let ra=P_RKU+3u*NB_STRIDE*s+l;
-  var kl=vec3f(0.0);var ku=vec3f(0.0);var vl=vec3f(0.0);var vu=vec3f(0.0);var hl=vec3<bool>(false);var hu=vec3<bool>(false);
-  for(var a=0u;a<3u;a++){
-    let e=pUnit(a);
-    kl[a]=pK(a,s,l);
-    let cn=c-e;let nn=pNatAt(b,cn);
-    if(nn!=NB_NONE){${nat ? `hl[a]=true;vl[a]=${nat("nn", "nbLocal(cn>>vec3u(2u))")};` : ""}}
-    else{let sn=pSlotAt(b,cn);if(sn!=NB_NONE){let ln=nbLocal(cn);hl[a]=true;vl[a]=${v("sn", "ln")};}}
-    let cu=c+e;let nu=pNatAt(b,cu);
-    if(nu!=NB_NONE){${nat ? `hu[a]=true;ku[a]=pmgF[ra+a*NB_STRIDE];vu[a]=${nat("nu", "nbLocal(cu>>vec3u(2u))")};` : ""}}
-    else{let su=pSlotAt(b,cu);if(su!=NB_NONE){let lu=nbLocal(cu);hu[a]=true;ku[a]=pmgF[ra+a*NB_STRIDE];vu[a]=${v("su", "lu")};}}
-  }
-  if(d<=0.0){return 0.0;}
-  var r=d*v0;
-  for(var a=0u;a<3u;a++){
-    if(kl[a]!=0.0&&hl[a]){r-=kl[a]*vl[a];}
-    if(hu[a]&&ku[a]!=0.0){r-=ku[a]*vu[a];}
-  }
-  return r;
-}` : /* wgsl */`
+  // (A v)(c) at h row c (slot s, local l), the tested form: a neighbour's value is read only where its coupling is
+  // nonzero and the neighbour exists. (pmgUpdate's residual is a tile stencil instead; pmgSetupF and pmgDown0 measured
+  // slower with every load issued first, 852 -> 1453 and 90 -> 128 us.)
+  const fineApply = (name: string, v: (s: string, l: string) => string, nat?: (cs: string, i: string) => string) => /* wgsl */`
 fn ${name}(b:vec3i,c:vec3i,s:u32,l:u32)->f32{
   let d=pDiag(s,l);if(d<=0.0){return 0.0;}
   var r=d*(${v("s", "l")});
@@ -1966,15 +1943,61 @@ ${head}
   const xF = (s: string, l: string) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]+pAlpha*pres[NB_PRES_F_D+NB_STRIDE*${s}+${l}]`;
   const xN = (cs: string, i: string) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]+pAlpha*pres[NB_PRES_C_D+NB_STRIDE*${cs}+${i}]`;
   const update = fusedFC("pmgUpdate",
-    `var<private> pAlpha:f32;var<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", xF, xN, true) + MB, alphaHead, /* wgsl */`
+    `var<private> pAlpha:f32;var<workgroup> wAlpha:f32;\n` + MB + (bodies ? /* wgsl */`
+// The bodies' W_x + alpha W_d (lin, ang; 6 a body) and centres (4 a body), staged once a workgroup as mbApply forms them.
+var<workgroup> wMB:array<f32,${10 * NB}>;
+fn mbStage(lid:u32,alpha:f32){
+  for(var i=lid;i<${10 * NB}u;i+=512u){
+    if(i<${6 * NB}u){let bi=i/6u;let j=i%6u;let base=MB_W+18u*bi;wMB[i]=mbF(base+MB_WX+j)+alpha*mbF(base+MB_WD+j);}
+    else{wMB[i]=mbF(MB_Q+i-${6 * NB}u);}
+  }
+  workgroupBarrier();
+}
+// mbApply(k,l,c,MB_WX,alpha,MB_WD) from the staged bodies.
+fn mbApplyW(k:u32,l:u32,c:vec3i)->f32{
+  if(k==NB_NONE){return 0.0;}
+  let h=nbRingF(cfg.x,NB_RING_H);var s=0.0;
+  for(var t=0u;t<2u;t++){
+    let w=mbWord(k,l,t);let ib=(w>>12u)&31u;if(ib==0u){continue;}
+    let i=ib-1u;let a=mbArea(w)*(h*h);let q=${6 * NB}u+4u*i;let arm=h*vec3f(c)+vec3f(wMB[q],wMB[q+1u],wMB[q+2u]);
+    let lin=vec3f(wMB[6u*i],wMB[6u*i+1u],wMB[6u*i+2u]);let ang=vec3f(wMB[6u*i+3u],wMB[6u*i+4u],wMB[6u*i+5u]);
+    s+=dot(a,lin)+dot(cross(arm,a),ang);
+  }
+  return s/h;
+}` : ""), alphaHead, /* wgsl */`
+  // x + alpha p on the brick and its one-cell halo (h rows from F, native rows from C; 0 off the band) in the tile, the
+  // values pApplyR's eager gather read, so the residual is a tile stencil and the group holds 96 in flight, not 64. The
+  // row's couplings load beside the tile and the smoothing reuses them. A missing neighbour reads 0 (its RKU is 0); the
+  // couplings are still tested, as nothing keeps a non-row cell's x + alpha p finite (untested, paddleboats diverged).
   let l=lid;let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
-  let d=pDiag(slot,l);var r=0.0;
-  if(d>0.0){r=pP(NB_PRES_F_RHS,slot,l)-pApplyR(b,c,slot,l)${bodies ? "-mbApply(mbBrick(slot),l,c,MB_WX,pAlpha,MB_WD)" : ""};}
+  ${bodies ? "mbStage(lid,pAlpha);" : ""}
+  for(var t=lid;t<1000u;t+=512u){
+    let q=pTileQ(o,t);var v=0.0;let nq=pNatAt(b,q);
+    if(nq!=NB_NONE){v=${xN("nq", "nbLocal(q>>vec3u(2u))")};}
+    else{let sq=pSlotAt(b,q);if(sq!=NB_NONE){v=${xF("sq", "nbLocal(q)")};}}
+    tp[t]=v;
+  }
+  ${bodies ? /* wgsl */`workgroupBarrier();
+  let mb=mbApplyW(mbBrick(slot),l,c);
+  let d=pDiag(slot,l);let kl=vec3f(pK(0u,slot,l),pK(1u,slot,l),pK(2u,slot,l));
+  let ra=P_RKU+3u*NB_STRIDE*slot+l;let ku=vec3f(pmgF[ra],pmgF[ra+NB_STRIDE],pmgF[ra+2u*NB_STRIDE]);` : /* wgsl */`let d=pDiag(slot,l);let kl=vec3f(pK(0u,slot,l),pK(1u,slot,l),pK(2u,slot,l));
+  let ra=P_RKU+3u*NB_STRIDE*slot+l;let ku=vec3f(pmgF[ra],pmgF[ra+NB_STRIDE],pmgF[ra+2u*NB_STRIDE]);
+  workgroupBarrier();`}
+  var r=0.0;
+  if(d>0.0){
+    var ax=d*tp[ti];
+    for(var a=0u;a<3u;a++){
+      let off=select(select(100u,10u,a==1u),1u,a==0u);
+      if(kl[a]!=0.0){ax-=kl[a]*tp[ti-off];}
+      if(ku[a]!=0.0){ax-=ku[a]*tp[ti+off];}
+    }
+    r=pP(NB_PRES_F_RHS,slot,l)-ax${bodies ? "-mb" : ""};
+  }
   pres[NB_PRES_F_R+NB_STRIDE*slot+l]=r;
   let rmax=pMax512(lid,abs(r));
   if(lid==0u){atomicMax(&nbSet[PH_RMAX],bitcast<u32>(rmax));}
   pTileZero(lid);
-  let row=pRow(b,c);
+  var row=PRow(0.0,vec3f(0.0),vec3f(0.0));if(d>0.0){row.d=d;row.kl=kl;row.ku=ku;}
   pSmooth(row,c,ti,r,false);
   if(row.d>0.0){pmgF[P_W0+NB_STRIDE*slot+l]=tp[ti];}`, /* wgsl */`
   let T=8*p+nbLocalCoord(lid);

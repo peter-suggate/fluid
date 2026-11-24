@@ -25,7 +25,7 @@ test("monolithic coupling: no bodies frame, no body term", () => {
   for (const { all, buffers } of [placements(false), placements(true, false)]) {
     for (const p of all) {
       assert.ok(!/pmgBody/.test(p.kernel.label), `no body kernel (${p.kernel.label})`);
-      assert.ok(!/\bmbApply\b|\bpmgB\b/.test(p.kernel.code), `no body term in ${p.kernel.label}`);
+      assert.ok(!/\bmbApplyW?\b|\bmbStage\b|\bpmgB\b/.test(p.kernel.code), `no body term in ${p.kernel.label}`);
     }
     assert.ok(!("pmgB" in buffers), "no pmgB buffer");
   }
@@ -38,7 +38,7 @@ test("monolithic coupling: a bodies frame adds J, Z, the fold and the operator's
   const code = all.map(p => p.kernel.code).join("\n");
   assert.ok(code.includes("-mbApply(mbBrick(slot),l,c,MB_WX,0.0,MB_WX)"), "setupF: r = b - A x - B x");
   assert.ok(code.includes("+mbApply(mbBrick(slot),l,c,MB_WZ,0.0,MB_WZ)"), "direction: q = A z + B z");
-  assert.ok(code.includes("-mbApply(mbBrick(slot),l,c,MB_WX,pAlpha,MB_WD)"), "update: r -= B (x + alpha d)");
+  assert.ok(code.includes("mbStage(lid,pAlpha);") && code.includes("let mb=mbApplyW(mbBrick(slot),l,c);") && code.includes("-ax-mb;"), "update: r -= B (x + alpha d), the bodies staged");
   for (const p of all) {
     const storage = p.kernel.bindings.filter(b => b.kind !== "uniform").length;
     assert.ok(storage <= 8, `${p.kernel.label}: ${storage} storage buffers`);
