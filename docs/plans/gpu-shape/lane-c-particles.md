@@ -117,3 +117,56 @@ The bound is at most 3% everywhere (within A/A on most), far below the 15% thres
 scatter would add 7 dispatches at about 3 µs each (about 21 µs) to save at most about 0 µs from the flush. The
 D_perm result above agrees: spreading the SIMD's lanes across cells, which removes same-word collisions within a
 SIMD, did not help either. pDeposit's time is the scatter's arithmetic and window traffic, not serialisation.
+
+## pSeed: does it pay for cells that cannot seed? (coordinator item, 2026-11-24)
+
+**Counters.** Counters were added to set words 202–211 at the frozen state. stepab's exactness mode prints the base
+and candidate values, and their difference is the count (variants SC1 and SC2). The table is for the step's main
+seed (z0, cfg.w = 0). "Launched" cells are 512 for each live F_ALL brick.
+
+| scene | live bricks | (a) go bricks | (b) past psCellGate | n0 < goal, held < 8 | (c) site loop | (d) ≥ 1 seed | SIMD rounds with a loop cell |
+|---|---|---|---|---|---|---|---|
+| dam | 2063 | 35% | 6.2% | 4.2% | 1.03% | 0.68% | 23% of go bricks' |
+| letters | 3217 | 31% | 7.5% | 4.6% | 1.59% | 1.21% | 31% |
+| paddleboats | 1695 | 28% | 5.0% | 3.1% | 0.76% | 0.55% | 20% |
+| seep | 1258 | 19% | 1.9% | 1.8% | 0.09% | 0.04% | 4% |
+
+The cells that pass n0 < goal and held < 8 but do not reach the loop are the covered shallow cells. Each of them
+takes pUncovered (27 run walks) and psSeam before it returns.
+
+**Time split** (ms in the step; deltas of S_noloop and S_nocount, each measured against its own base):
+
+| scene | site loop | gates and early-outs | the rest (prologue, staging, go = 0 bricks) |
+|---|---|---|---|
+| dam | 0.446 | 0.312 | 0.268 |
+| letters | 0.820 | 0.771 | 0.400 |
+| paddleboats | 0.164 | 0.188 | 0.244 |
+| seep | 0.053 | 0.151 | 0.185 |
+
+**Prototype.** (c) is far under the 25% go line on every scene, so the compaction was prototyped in-workgroup
+(S_list), which keeps the brick's staging and needs no new pass:
+- Phase A runs every cell's gates up to the loop and pushes a looping cell to a workgroup list (local index, n0,
+  held, d and the known, uncovered and covered bits; at most 256 entries, and any overflow loops in place).
+- After a barrier, phase B runs the list one cell a lane, then counts and writes that cell.
+
+Result: exact on all four scenes (set identical, parts identical up to order), but slower:
+
+| scene | pSeed |
+|---|---|
+| dam | +49.6% |
+| letters | +33.4% |
+| paddleboats | +49.6% |
+| seep | +57.3% |
+
+The same text with nothing pushed (S_list0, dam) is +43.5%. So the restructure costs about 44% on its own (cap 512 →
+448; the list, the barrier and the split loop), and the compaction itself adds +0.013 ms on top of it.
+
+Packing the looping cells into fewer SIMDs buys nothing. The idle lanes of a sparse SIMD are not what the loop
+costs: the loop's cost is each looping lane's serial chain of sites, which stretches its brick's workgroup.
+
+**Verdict: no-go** for packed seed groups. Untested: a split kernel that moves the site loop out of the brick
+workgroups altogether. The loop would run over a global list in its own dispatch, so the brick groups end sooner,
+which is a latency bet. It needs a new kernel, a list region and an args word (an ABI change), and stepab cannot
+prototype a new placement. Its bound is the site-loop column above minus about 6 µs for the two extra dispatches,
+and it holds only if the global loop's own chain is short. A brick-level go list would address part of "the rest"
+(65–81% of launched bricks have go = 0); that was not measured.
