@@ -170,3 +170,51 @@ Paddleboats shows the same shape. Direction and update are 392 µs of a 1463 µs
    splitting the reductions out of the hot loop. Plus longest-first group order against the 13–52 µs tails.
 2. The smoothers' load chain: issue the row's operator loads (diag, K, RKU, rhs) before the tile barrier, so the two
    global-load phases overlap. Exact.
+
+## 7. Levers built (round 1 and 2, m7ab, PCG range)
+
+m7ab, with A as HEAD and B as the candidate in one process. Every buffer is compared word for word after the range, and
+the range is timed interleaved. Δ is the change in the minimum, against A's own A/A spread. Flags are in the scratch
+tree `fluid-scratch/gpu-shape/m8/tree-c8`. Register headroom comes from `m8/regprobe.py`: R pinned registers are
+injected, and headroom is the largest R at which psoinfo's thread cap stays 1024. The calibration: ≥ 26 gives 3 groups of
+512 lanes a core (96 in flight); ≤ 22 gives 2 (64).
+
+| variant | dam | paddleboats | verdict |
+|---|---|---|---|
+| update: x+αp tile, coupling-only tests (+ bodies' W staged in 960 B wgmem) | exact, −277 µs (A/A −9) | exact, −145 µs (A/A −9) | landed; seep exact −84 µs (A/A −8), letters exact −298 µs (A/A 5) |
+| direction: F/C split dispatch + z tile, coupling-only tests | exact, +11 µs (A/A 39) | exact, +41 µs (A/A −11) | no-go |
+| direction split alone | exact, +11 µs | exact, +64 µs | no-go |
+| smoothers: row operator and rhs loads before the tile barrier | exact, +295 µs | exact, +169 µs | no-go |
+| update tile, no neighbour tests | exact, −200 µs | **inexact** | no-go (below) |
+
+- **Update.**
+  - HEAD's limiter was registers, not wgmem. The eager 21-load gather left 6 registers of headroom, so 64 in flight.
+    The tile stencil (x+αp on the 10³ halo, the couplings loaded beside it and reused by the first smoothing) has 26 on dam.
+  - Paddleboats' mbApply cost 8–12 more registers. Staging the bodies' W_x + αW_d and centres in workgroup memory, with
+    the body term formed after the barrier, recovers most of it: headroom 24 offline, 22–24 with the full neighbour
+    tests.
+  - The pApplyR eager form is gone. Every remaining fineApply caller is the tested form.
+  - In situ on paddleboats (slot audit, `m8/p1-paddleboats.txt` vs `h0`): pmgUpdate peaks at 96 in flight, against
+    HEAD's 63. That is 81 on average, against 47. Timed alone, the pass takes 140 µs, against 189, and its clock tail is
+    9 µs, against 49. So headroom 24 does give 3 groups a core; the ≥ 26 calibration line was conservative.
+- **Direction.** Its limiter is the C half's seam loop (headroom 16). The F half reaches 28 with a z tile and
+  coupling-only tests, but only once split into its own dispatch, and the split costs more than the tile wins.
+- **Smoothers.** Already at 96 in flight (headroom 26–30). Hoisting the row loads above the barrier drops them to 18–22,
+  which is 64 in flight, and costs more than the overlap gains. Hoisting the rhs alone still costs 4–6 registers.
+- **Tails.** Much of the 13–52 µs per-workgroup clock "tail" is an artifact of clock mode. Dam's update spans 149 µs on
+  the clock against 126 µs timed alone; stragglers start late only with the clock on (inference). Longest-first
+  ordering was not built.
+- **Top cycle.** Already red-black (parity colouring, 1024 lanes, rows ≤ 512 in workgroup memory). Its 25 µs is about
+  20 dependent barriered passes at about 1.3 µs each, which is a barrier floor, not serial GS. Not worth a
+  multi-colour or Chebyshev rebuild.
+
+**Latent hazard: non-row cells' iterate (report only, not fixed).**
+- HEAD's residual and A z read neighbour values only behind tests: kl ≠ 0, ku ≠ 0, and the neighbour existing.
+- HEAD's former eager update form loaded every existing neighbour's x+αd, including diag-0 (non-row) cells, and relied
+  on the coupling test alone to keep them out of the sum.
+- Measured: dropping the tests (0 × value for a zero coupling) left dam exact but made paddleboats diverge, with
+  differences up to about 1.7e9 ulp in pres, pmgF and pmgC after one range.
+- Inferred: diag-0 cells inside row bricks, or native non-rows, hold non-finite x or d in normal runs.
+  pressureRowsZero clears only the zero-list bricks, and nothing found keeps a diag-0 cell's X finite.
+- The landed update keeps the coupling tests for this reason. Any future test-free stencil must zero or keep finite
+  those cells first.
