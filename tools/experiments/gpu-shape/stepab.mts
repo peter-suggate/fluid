@@ -33,6 +33,13 @@
 //              Anything else (set, dir, args, census, fcell, pmgTop, cut's BMASK, and pmgC, which stores u32
 //              patterns as bitcast f32 in its PDELTA words) stays exact. An order-dependent particle buffer
 //              cancels its identical records and pairs the rest by their exact words and quantized floats.
+//              Near zero, where relaxed math's cancellation makes ulp meaningless (pSeed's site depth, 2026-11-24), an
+//              f32 word also passes if |Δ| ≤ 1e-6 × its channel's typical scale (absFloor): h for distances and φ, which
+//              the engine stores in h (phi's PHI and PHI1, a particle's position.xyz and site depth velocity.w,
+//              fext4's distance), and 1 m/s for velocities (vel, a particle's velocity.xyz, before.xyz and affine
+//              rows cx..cz in m/s per h, fext4's value and prior): both 1e-6 in stored units. Channels without a
+//              scale of their own keep the ulp test alone: pres, pmgF, pmgRed, xfer, pEnergy, a particle's heat
+//              (position.w).
 //   SCENE=seep|dam|letters|paddleboats|<id> STEPS=100 BASE=tree CAND=tree [S=9] [R=4] [OUT=x.jsonl] [NOEXACT=1] [NOTIME=1] [TOL=ulp4]
 //   tools/gpu/fluid-gpu-run.sh timing node --import tsx tools/experiments/gpu-shape/stepab.mts
 // A tree is a checkout or a read-only export (tools/nbflip-export.sh). BASE defaults to this checkout; CANDTEXT=file
@@ -159,12 +166,22 @@ const floatWords = (name: string, type: string | undefined): ((k: number) => boo
   if (F32_BUFFERS.has(name) && type === "array<f32>") return () => true;
   return null;
 };
+/** The absolute floor of an f32 word (0: the ulp test alone); see the header. Words in stored units. */
+const ABS_FLOOR = 1e-6;
+const absFloor = (name: string): ((k: number) => number) => {
+  if (PARTICLE_BUFFERS.has(name)) { const st = e.layout.particleStride; return k => (k % st === 3 ? 0 : ABS_FLOOR); }
+  if (name === "phi" || name === "vel" || name === "fext4") return () => ABS_FLOOR;
+  return () => 0;
+};
 const f32v = new Float32Array(1), u32v = new Uint32Array(f32v.buffer);
+const asF32 = (w: number) => { u32v[0] = w; return f32v[0]!; };
+/** Within the tier: ≤ ULP ulp, or |Δ| ≤ floor (a NaN never). */
+const within = (a: number, b: number, floor: number) => ulps(a, b) <= ULP || (floor > 0 && Math.abs(asF32(a) - asF32(b)) <= floor);
 const ordered = (w: number) => (w & 0x80000000) ? 0x80000000 - (w & 0x7fffffff) : 0x80000000 + w; // monotone in the float
 const ulps = (a: number, b: number) => { u32v[0] = a; if (Number.isNaN(f32v[0])) return Infinity; u32v[0] = b; if (Number.isNaN(f32v[0])) return Infinity; return Math.abs(ordered(a >>> 0) - ordered(b >>> 0)); };
 // An order-dependent record buffer under the tier: cancel bit-identical records, then pair the rest sorted by their
 // exact words and their floats with the low 8 bits cleared, and compare each pair within ULP.
-const tolerantBag = (a: Uint32Array, c: Uint32Array, stride: number, isF: (k: number) => boolean) => {
+const tolerantBag = (a: Uint32Array, c: Uint32Array, stride: number, isF: (k: number) => boolean, floorOf: (k: number) => number) => {
   const key = (w: Uint32Array, r: number) => { let h1 = 0x811c9dc5, h2 = 0x9e3779b9; for (let k = 0; k < stride; k++) { const x = w[r + k]!; h1 = Math.imul(h1 ^ x, 0x01000193); h2 = Math.imul((h2 ^ x) + k, 0x85ebca6b); h2 ^= h2 >>> 13; } return (h1 >>> 0) * 2097152 + ((h2 >>> 0) & 0x1fffff); };
   const left = new Map<number, number[]>();
   for (let r = 0; r + stride <= a.length; r += stride) { const h = key(a, r); const l = left.get(h); if (l) l.push(r); else left.set(h, [r]); }
@@ -176,14 +193,15 @@ const tolerantBag = (a: Uint32Array, c: Uint32Array, stride: number, isF: (k: nu
   const cmp = (x: number[], y: number[]) => { for (let k = 0; k < x.length; k++) if (x[k] !== y[k]) return x[k]! - y[k]!; return 0; };
   const sa = aOnly.map(r => [sortKey(a, r), r] as const).sort((x, y) => cmp(x[0], y[0]));
   const sc = cOnly.map(r => [sortKey(c, r), r] as const).sort((x, y) => cmp(x[0], y[0]));
-  let maxU = 0, words = 0, over = 0, exact = 0; const at = new Map<number, number>();
+  let maxU = 0, words = 0, over = 0, floored = 0, exact = 0; const at = new Map<number, number>();
   for (let i = 0; i < sa.length; i++) for (let k = 0; k < stride; k++) {
     const x = a[sa[i]![1] + k]!, y = c[sc[i]![1] + k]!; if (x === y) continue;
     if (!isF(k)) { exact++; continue; }
-    const u = ulps(x, y); words++; maxU = Math.max(maxU, u); if (u > ULP) { over++; at.set(k, (at.get(k) ?? 0) + 1); }
+    const u = ulps(x, y); words++;
+    if (u <= ULP) maxU = Math.max(maxU, u); else if (within(x, y, floorOf(k))) floored++; else { over++; at.set(k, (at.get(k) ?? 0) + 1); }
   }
   const where = [...at].map(([k, n]) => `word ${k}: ${n}`).join(", ");
-  const note = `${sa.length} records paired, ${words} f32 words differ (max ${maxU} ulp${over ? `, ${over} over ${ULP}: ${where}` : ""})${exact ? `, ${exact} exact words differ` : ""}`;
+  const note = `${sa.length} records paired, ${words} f32 words differ (max ${maxU} ulp within ${ULP}${floored ? `, ${floored} over ${ULP} ulp within the ${ABS_FLOOR} floor` : ""}${over ? `, ${over} over both: ${where}` : ""})${exact ? `, ${exact} exact words differ` : ""}`;
   return { ok: !over && !exact, note };
 };
 if (!process.env.NOEXACT) {
@@ -199,20 +217,24 @@ if (!process.env.NOEXACT) {
     for (const b of written) {
       const a = A[b]!, a2 = A2[b]!, c = B[b]!;
       if (equal(a, a2)) {
-        const isF = ULP ? floatWords(b, typeOf(b)) : null;
-        let d = 0, tol = 0, maxU = 0;
+        const isF = ULP ? floatWords(b, typeOf(b)) : null, floorOf = absFloor(b);
+        let d = 0, tol = 0, maxU = 0, floored = 0;
         for (let k = 0; k < a.length; k++) if (a[k] !== c[k]) {
-          if (isF?.(k)) { const u = ulps(a[k]!, c[k]!); if (u <= ULP) { tol++; maxU = Math.max(maxU, u); continue; } }
+          if (isF?.(k)) {
+            const u = ulps(a[k]!, c[k]!); if (u <= ULP) { tol++; maxU = Math.max(maxU, u); continue; }
+            if (within(a[k]!, c[k]!, floorOf(k))) { floored++; continue; }
+          }
           d++; if (ex.length < 4) ex.push(`${b}[${k}] ${a[k]}/${c[k]}`);
         }
-        verdict[b] = d ? `${d} words differ${tol ? ` (and ${tol} f32 within ${ULP} ulp)` : ""}` : tol ? `within ${ULP} ulp (${tol} f32 words differ, max ${maxU} ulp)` : "identical"; if (d) bad++;
+        const fl = floored ? `, ${floored} over ${ULP} ulp within the ${ABS_FLOOR} floor` : "";
+        verdict[b] = d ? `${d} words differ${tol || floored ? ` (and ${tol} f32 within ${ULP} ulp${fl})` : ""}` : tol || floored ? `within the tier (${tol} f32 words within ${ULP} ulp, max ${maxU}${fl})` : "identical"; if (d) bad++;
       } else {
         const stride = b === "parts" ? e.layout.particleStride : 1, ha = bag(a, stride);
         if (!sameBag(ha, bag(a2, stride))) verdict[b] = "order-dependent, base vs base again differ as a multiset too: NOT JUDGED";
         else if (sameBag(ha, bag(c, stride))) verdict[b] = "identical up to order";
         else {
           const isF = ULP && stride > 1 ? floatWords(b, typeOf(b)) : null;
-          const t = isF ? tolerantBag(a, c, stride, isF) : null;
+          const t = isF ? tolerantBag(a, c, stride, isF, absFloor(b)) : null;
           if (t?.ok) verdict[b] = `up to order, ${t.note}`; else { verdict[b] = `DIFFERS as a multiset${t ? ` (${t.note})` : ""}`; bad++; }
         }
       }
@@ -221,7 +243,7 @@ if (!process.env.NOEXACT) {
     console.log(`exact #${i} ${p.kernel.label}${p.z !== undefined ? ` z${p.z}` : ""}: ${bad ? "DIFFERS" : "ok"}: ${written.map(b => `${b} ${verdict[b]}`).join(", ")}${ex.length ? ` e.g. ${ex.join(" ")}` : ""}`);
     emit({ kind: "exact", placement: i, label: p.kernel.label, z: p.z, written, verdict, examples: ex });
   }
-  console.log(`exactness${ULP ? ` (ulp tier, f32 within ${ULP} ulp)` : ""}: ${changed.length - exactFail} of ${changed.length} changed placements ${ULP ? "pass" : "identical"}${exactFail ? `; ${exactFail} DIFFER` : ""}`);
+  console.log(`exactness${ULP ? ` (ulp tier, f32 within ${ULP} ulp or the ${ABS_FLOOR} floor)` : ""}: ${changed.length - exactFail} of ${changed.length} changed placements ${ULP ? "pass" : "identical"}${exactFail ? `; ${exactFail} DIFFER` : ""}`);
 }
 
 // ---- timing: the whole step from S0, interleaved ----
