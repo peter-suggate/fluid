@@ -130,3 +130,43 @@ On dam, flag by flag, top alone is −31.6 µs (A/A +5.1) and down3 alone is −
 **c2, no-go (up3 fused into up2):** not exact as built (pmgC differs from the first fused up2 on) and not faster: dam
 +41.3 µs (A/A −34.1). The fused 512-lane pass's extra L3 phase (4 barriered passes, about 256 lanes of recompute) costs
 about the dispatch it saves. I did not chase the inexactness, since there is no time win to keep.
+
+## 6. One live slot, attributed by pass (slot 0, in situ)
+
+Measured: each pass is timed alone in situ, plus a per-workgroup clock. The data is the M6 audit at b786aff5
+(`m7/a-dam.txt`, `m7/a-paddleboats.txt`); the PCG F kernels have not changed since. Bytes are compulsory f32 traffic
+(the brick's channels, contiguous by slot), not counted DRAM traffic.
+
+| class | dam (µs, share of the Σ) | paddleboats (µs, share) |
+|---|---|---|
+| F passes (preS/U, down0/1, up1, postU/S/Z, direction, update, wallsF, bodyZ) | 706 (69%) | 1056 (72%) |
+| C passes (native ×4, down1C/2/3, up3/2, wallsC) | 257 (25%) | 340 (23%) |
+| top | 56 (6%) | 67 (5%) |
+
+| F pass (dam) | µs | groups | bytes / group | GB/s | groups in flight avg / peak | group p50 | tail |
+|---|---|---|---|---|---|---|---|
+| pmgUpdate (r = b − A(x+αp), max \|r\|, the first smoothing into W0) | 134 | 591 | ≈ 25.6 KB | ≈ 90 | 45 / 63 | 12.7 µs | 29 µs |
+| pmgDirection (x += αd, d = z + βd, q = Az + βq, p.q) | 120 | 591 | ≈ 30 KB | ≈ 115 | 53 / 64 | 11.2 µs | 13.5 µs |
+| pmgPreS / pmgPostS (shifted 8³ blocks, 6 red-black passes) | 70 / 69 | 712 | ≈ 22.4 KB | ≈ 230 | 72–76 / 96 | 6.9–7.5 µs | 8–13 µs |
+| pmgPostZ (+ the z.r dot) | 71 | 476 | ≈ 22.4 KB | ≈ 150 | 82 / 96 | 7.8 µs | 1.6 µs |
+| pmgDown0 (residual, restrict, L1 smoothing) | 67 | 476 | ≈ 18 KB | ≈ 130 | 91 / 96 | 11.3 µs | 0.7 µs |
+| pmgPreU / pmgPostU | 47 / 55 | 476 | ≈ 22.4 KB | ≈ 190–225 | 85 / 96 | 7.1 µs | 1.8 µs |
+
+Paddleboats shows the same shape. Direction and update are 392 µs of a 1463 µs Σ (27%), with tails of 16 and 52 µs.
+
+**Verdict: latency- and tail-bound, not bandwidth-bound.**
+
+- The best pass reaches about 58% of 400 GB/s by compulsory bytes; most reach 25–55%.
+- The smoothers sit at the occupancy cap (96 groups of 512 lanes, 72–91 in flight). Each group is a dependent chain:
+  stage → slot → tile loads → barrier → the row's 7 operator loads → 6 barriered red-black passes → store.
+- Direction and update are capped at 64 groups in flight (registers), with long tails.
+- f16 for the preconditioner's internal vectors only is out. Those vectors are the W0/W1 tile loads and the smoother
+  write: about 8 of the smoothers' ≈ 44 B a cell, and none of direction/update's. Even with perfect bandwidth scaling,
+  that is ≤ about 6% of the PCG range, under the 10% gate. Not built.
+
+**The matching levers**, proposals only:
+
+1. pmgUpdate and pmgDirection occupancy, from 64 to 96 in flight, via a register cap (the regcap.sh loop) or by
+   splitting the reductions out of the hot loop. Plus longest-first group order against the 13–52 µs tails.
+2. The smoothers' load chain: issue the row's operator loads (diag, K, RKU, rhs) before the tile barrier, so the two
+   global-load phases overlap. Exact.
