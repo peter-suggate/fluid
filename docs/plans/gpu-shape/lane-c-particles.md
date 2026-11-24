@@ -329,3 +329,31 @@ depth ≤ −1.5 (lane F, 2026-11-17), bounds more tightly, not less.
 the endpoint clamp collapses every arrival onto one plane. That is volume lost into a sheet of overlapping samples.
 The old engine's clamp is the same (nbTraceEndpointIn: clamp to walls ± inset), so this is not a port difference.
 Why the old engine's piles relax faster stays open.
+
+### Reflecting wall clamp prototype: no-go (2026-11-24)
+
+**The prototype.** nbfBoxEndpoint and the old engine's nbTraceEndpointIn (fixed box) mirror an overshoot past the
+inset plane back inside: x' = 2a − x, then clamped. The velocity rule is unchanged: an axis the clamp moved loses its
+velocity, the same as the old engine's nbFinish.
+- Patch: fluid-scratch/gpu-shape/lane-c/reflect/reflect.patch.
+- Trees: exports of 97f01512, base and candidate.
+- The runs: reflect/freq2.mts, dam 180 steps with a timed replay every 10 steps, and reflect/diag2.mts TRACK=64. One
+  run each, all rc 0.
+
+**Result.**
+
+| dam step | 30 | 60 | 120 | 180 |
+|---|---|---|---|---|
+| largest cell, base → candidate | 361 → 347 | 348 → 691 | 250 → 454 | 193 → 300 |
+| cells over 64, base → candidate | 299 → 298 | 140 → 159 | 51 → 103 | 62 → 60 |
+
+- pSeparate's mean over the sampled steps rises from 2.12 to 2.56 ms. pMove (1.38 → 1.40) and pDeposit (0.78 →
+  0.79) do not move.
+- The plane stacking is gone: in the new piles, 0–4 records sit on the clamp plane, where before it was 60–100% of
+  them.
+- The early piles (steps 12–15) are gone too. But from step 16 the piles form anyway, in the wall-adjacent cells (x or
+  z = 126–127). Their records sit at depth −0.6 to +1.3 and travel at 2–8 m/s up the wall.
+- So the clamp plane was where the compression landed, not its cause. The cause is the run-up sheet: the flow
+  converges into the wall, and the sheet's records all lie at surface depth, where neither the projection, nor
+  merge, nor separation (tangential only) holds their spacing.
+- The drift and timing round was not run, since the piles did not go.
