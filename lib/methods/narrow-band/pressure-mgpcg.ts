@@ -703,8 +703,10 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
   let o=nbFOrigin(slot);let b=o>>vec3u(3u);`;
   // A page of C_ALL. "all" keeps every page; "rows" returns when the page has no rows (L5 D 0);
   // "native" when it has no native rows (L5 KU0, the count coarsenC writes).
-  const pageHead = (keep: "all" | "rows" | "native" = "rows", skip = "") => /* wgsl */`
-  if(lid==0u){wCount=nbListCount(NB_LIST_C_ALL);}
+  const capDirect = L.cap.c <= 1024;
+  // direct: dispatched at the C capacity (capDirect), not the C gate's indirect args: a closed slot (PH_OPEN 0) keeps no page.
+  const pageHead = (keep: "all" | "rows" | "native" = "rows", skip = "", direct = false) => /* wgsl */`
+  if(lid==0u){wCount=${direct ? "select(0u,nbListCount(NB_LIST_C_ALL),atomicLoad(&nbSet[PH_OPEN])!=0u)" : "nbListCount(NB_LIST_C_ALL)"};}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,g);
   ${keep === "all" ? "" : `if(lid==0u){wKids=select(0u,1u,pmgC[pL5(${keep === "rows" ? "CH_D" : "CH_KU"},cs)]>0.0);}if(workgroupUniformLoad(&wKids)==0u){${skip}return;}`}
@@ -1511,7 +1513,7 @@ var<workgroup> wR:array<f32,512>;var<workgroup> wE:array<f32,64>;
   // the 8 cells' 170-odd scattered loads (fill-the-GPU: the gather moves onto the pages' workgroups).
   const down3 = kernel("pmgDown3", CB, ["cstage"], V3 + V4 + /* wgsl */`
 var<workgroup> wR:array<f32,64>;var<workgroup> wE:array<f32,8>;
-@compute @workgroup_size(64) fn pmgDown3(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead()}
+@compute @workgroup_size(64) fn pmgDown3(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead("rows", "", capDirect)}
   let c3=4*p+pC1(lid);let D3=pmgC[pL3(CH_D,cs,lid)];
   var r=0.0;
   if(D3>0.0){
@@ -1647,8 +1649,9 @@ fn l4Nbr(cs:u32,k:u32,a:u32,up:bool)->vec2u{
   return vec2u(select(u32(v),NB_NONE,v<0.0),pI4(d));
 }
 @compute @workgroup_size(1024) fn pmgTopCycle(@builtin(local_invocation_index) t:u32){
-  if(t==0u){wN5=min(atomicLoad(&nbSet[PH_N5]),NB_CCAP);wN6=min(atomicLoad(&nbSet[PH_N6]),P_ROWS6);wN7=min(atomicLoad(&nbSet[PH_N7]),P_ROWS7);}
-  let n5=workgroupUniformLoad(&wN5);let n6=workgroupUniformLoad(&wN6);let n7=workgroupUniformLoad(&wN7);
+  // A direct dispatch (one workgroup, no indirect validation): a closed slot (PH_OPEN 0) returns, wN5 NB_NONE.
+  if(t==0u){wN5=select(NB_NONE,min(atomicLoad(&nbSet[PH_N5]),NB_CCAP),atomicLoad(&nbSet[PH_OPEN])!=0u);wN6=min(atomicLoad(&nbSet[PH_N6]),P_ROWS6);wN7=min(atomicLoad(&nbSet[PH_N7]),P_ROWS7);}
+  let n5=workgroupUniformLoad(&wN5);if(n5==NB_NONE){return;}let n6=workgroupUniformLoad(&wN6);let n7=workgroupUniformLoad(&wN7);
 ${topLinks(5, "n5", "par5(i)")}
 ${topLinks(6, "n6", "par6(i)")}
   // L4's residual into each L5 row: the page's own part and its face neighbours' (pmgDown3's CH4R; a page across
@@ -1749,7 +1752,7 @@ ${l4Cached ? /* wgsl */`
   const up3 = kernel("pmgUp3", CB, ["cstage"], V3 + V4 + /* wgsl */`
 var<workgroup> wE:array<f32,64>;
 fn pEntry3(p:vec3i,c:vec3i)->f32{return pV3(p,c,CH_EPRE)+pV4(p,c>>vec3u(1u),CH_EPOST);}
-@compute @workgroup_size(64) fn pmgUp3(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead()}
+@compute @workgroup_size(64) fn pmgUp3(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead("rows", "", capDirect)}
   let c3l=pC1(lid);let c3=4*p+c3l;let par=pPar(c3);
   let D=pmgC[pL3(CH_D,cs,lid)];let b3=pmgC[pL3(CH_B,cs,lid)];
   wE[lid]=pmgC[pL3(CH_EPRE,cs,lid)]+pmgC[pL4(CH_EPOST,cs,pI4(c3l>>vec3u(1u)))];
@@ -2179,6 +2182,10 @@ var<workgroup> wAlpha:f32;
   const list = (k: number) => ({ indirect: ARGS.PER_LIST * k + ARGS.G1 });
   const gF = (kernel: BrickKernel, z: number): BrickPlacement => ({ kernel, dispatch: { indirect: MG_GATE.F }, z });
   const gC = (kernel: BrickKernel, z: number): BrickPlacement => ({ kernel, dispatch: { indirect: MG_GATE.C }, z });
+  // A 64-lane C page pass (pmgDown3, pmgUp3) direct at the C capacity while that is at most 1024 pages: Dawn validates
+  // every indirect dispatch with a dispatch of its own (≈ 5 us), more than ≤ 1024 empty 64-lane workgroups cost
+  // (docs/plans/gpu-shape/m7-dispatch.md); its pageHead gates on PH_OPEN instead.
+  const cCap = (kernel: BrickKernel, z: number): BrickPlacement => capDirect ? { kernel, dispatch: { direct: [Math.min(L.cap.c, FOLD), Math.ceil(L.cap.c / FOLD), 1] }, z } : gC(kernel, z);
   const gFC = (kernel: BrickKernel, z: number): BrickPlacement => ({ kernel, dispatch: { indirect: MG_GATE.FC }, z });
   const gS = (kernel: BrickKernel, z: number): BrickPlacement => ({ kernel, dispatch: { indirect: MG_GATE.S }, z });
   // ---- the region pressure change (lane E's region heat, brick-abi.md "PDELTA") ----------------------------------
@@ -2270,9 +2277,9 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
     // closes the finish (before the engine's project, pressureProjectRest: the F_ALL path's order).
     setup: lv ? [...lv.args, ...lv.rows, ...core.setup] : core.setup,
     slot: (k: number) => [
-      gS(preS, k), ...(bsb ? [gF(preU, k)] : []), gC(nativePre0, k), gF(down0, k), gC(nativePre1, k), gF(down1, k), gC(down1C, k), gC(down2, k), gC(down3, k),
-      { kernel: top, dispatch: { indirect: MG_GATE.ONE }, z: k },
-      gC(up3, k), gC(up2, k), gC(nativePost1, k), gF(up1, k), gC(nativePost0, k), ...(bsb ? [gF(postU, k)] : []), gS(postS, k), gF(postZ, k),
+      gS(preS, k), ...(bsb ? [gF(preU, k)] : []), gC(nativePre0, k), gF(down0, k), gC(nativePre1, k), gF(down1, k), gC(down1C, k), gC(down2, k), cCap(down3, k),
+      { kernel: top, dispatch: { direct: [1, 1, 1] }, z: k },
+      cCap(up3, k), gC(up2, k), gC(nativePost1, k), gF(up1, k), gC(nativePost0, k), ...(bsb ? [gF(postU, k)] : []), gS(postS, k), gF(postZ, k),
       ...(bodyZ && bodyFold ? [{ kernel: bodyZ, dispatch: list(LIST.F_BODY), z: k }, { kernel: bodyFold, dispatch: { direct: [NB, 1, 1] as [number, number, number] }, z: k }] : []),
       gFC(direction, k), gFC(update, k),
       // A slot that can never decide encodes no walls: with wallLoose Infinity, slot k decides exactly when k < wallDecisions
