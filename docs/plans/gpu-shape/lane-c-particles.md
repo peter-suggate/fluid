@@ -251,3 +251,41 @@ still runs the full chain of w adds.
 
 This needs a list region and an indirect args word (the ABI change the coordinator OK'd at ≥0.5 ms average on dam;
 the bound measured here is 0.78 ms). Not built yet.
+
+### Why dam's cells crowd (diagnosis, no change; crowd/diag.mts)
+
+Read from records at frozen states, one run per engine. The run is chaotic, so the exact cells differ from run to run.
+
+**Who is in the top cells.** Brick dam's top cells (steps 60 / 120 / 150) hold 296–1088 records each. All are unit
+mass, coupled (ballistic ≤0.3%), with a surface depth: median −0.2 to −0.8, at most 0.4. They sit on walls and
+corners (x=0, z=0, x≈123, z≈120–127) and in surface clumps.
+
+| | cells over 32 records | their records | their records with depth < −1 |
+|---|---|---|---|
+| step 60 | 737 | 43.7k | 21% |
+| step 120 | 287 | 18.8k | 5% |
+| step 150 | 250 | 15.9k | 6.5% |
+
+**Why merge does not bound them: the depth gate.** pMove's merge and its cell-mass cut (Ferstl et al. 2016 §3.3, the
+2n = 16 unit bound) run only where the cell-centre depth is under −1. Every surface cell is unbounded. The old engine
+has the same gate (uniform-narrow-band-flip.ts), so the brick port is faithful.
+
+**Why separation does not spread them.** pSurfaceShift keeps only the tangential part of the push in a surface cell.
+The constraint averaging divides by the overlap count (500–1000 here), so inside a pile the push cancels. The piles
+are not compressive: radial velocity about the centroid is within ±0.2, for both the records' own velocity and the
+grid's. They travel as coherent clumps instead. One clump went 911 → 919 → 1088 records over steps 118–120, moving
+about a cell a step. Its records' FLIP velocity is about (0.5, 0.5, 0.3); the grid's at the same records is
+(−0.1, −0.1, 0). A corner sheet at (127, y, 0) climbs 3–4 cells a step at v_y ≈ 1.5 while the grid has −0.17.
+
+**Against the old engine (dam, same steps).** Both engines crowd at the splash. The old engine relaxes; the brick
+engine holds and grows its piles. The decoupling of record and grid velocity is a second lead, not yet confirmed as
+the reason the brick's piles persist.
+
+| | old engine: largest / cells over 32 | brick: largest / cells over 32 |
+|---|---|---|
+| step 60 | 357 / 1174 | 530 / 737 |
+| step 120 | 169 / 94 | 816 / 287 |
+| step 150 | 78 / 42 | 436 / 250 |
+
+Letters (brick) shows the same thing on a smaller scale (steps 150 / 200: largest 295 / 360, 82 / 95 cells over 32,
+86–92% at surface depth).
