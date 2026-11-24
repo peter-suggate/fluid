@@ -40,7 +40,9 @@ test("brick solid walk: pSolid and phiSolid join F's stage set only with statics
     assert.deepEqual(solid.dispatch, pmove.dispatch, "pSolid dispatches over the records' arguments, as pMove");
     const ls = on.levelSet.map(p => p.kernel.label);
     assert.equal(ls[ls.indexOf("lAdvect") + 1], "phiSolid", "phiSolid follows lAdvect");
-    assert.deepEqual(on.levelSet.find(p => p.kernel.label === "phiSolid")!.dispatch, { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 }, "phiSolid runs over F_ALL (its NEAR_SOLID bricks and the far vertices)");
+    // Two workgroups a brick (a vertex a lane), as lAdvect: F_ALL's X8, the halves its first two (LADVECT_HEAD_WGSL).
+    assert.deepEqual(on.levelSet.find(p => p.kernel.label === "phiSolid")!.dispatch, { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.X8 }, "phiSolid runs over F_ALL (its NEAR_SOLID bricks and the far vertices)");
+    assert.deepEqual(on.levelSet.find(p => p.kernel.label === "lAdvect")!.dispatch, { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.X8 }, "lAdvect runs over F_ALL's X8");
     // Both bind pMove's buffers alone (8 storage buffers, the limit).
     assert.deepEqual(placements(on).find(p => p.kernel.label === "pSolid")!.kernel.bindings, placements(on).find(p => p.kernel.label === "pMove")!.kernel.bindings);
     // pMove skips a NEAR_SOLID brick's records and keeps the ring; pSolid takes exactly those, and walks them. The
@@ -60,8 +62,8 @@ test("brick solid walk: pSolid and phiSolid join F's stage set only with statics
     // lAdvect skips the NEAR_SOLID bricks; phiSolid walks the trace and keeps a buried vertex.
     const a = code(on, "lAdvect"), p = code(on, "phiSolid");
     assert.match(a, /if\(psNearSolid\(slot\)\)\{return;\}/); assert.doesNotMatch(a, /psWalkPhi\(foot/);
-    assert.ok(a.includes(">=8.0){psFar=true;return 0.0;}") && a.includes("if(psFar){phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]=PS_PHI_FAR;continue;}"), "lAdvect leaves a trace that leaves the ring to phiSolid");
-    assert.ok(p.includes("if(!near&&phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]!=PS_PHI_FAR){continue;}") && !p.includes("psFar=true"), "phiSolid takes the far vertices and walks them");
+    assert.ok(a.includes(">=8.0){psFar=true;return 0.0;}") && a.includes("if(psFar){phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]=PS_PHI_FAR;return;}"), "lAdvect leaves a trace that leaves the ring to phiSolid");
+    assert.ok(p.includes("if(!near&&phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]!=PS_PHI_FAR){return;}") && !p.includes("psFar=true"), "phiSolid takes the far vertices and walks them");
     assert.match(p, /fn phiSolid\(/); assert.match(p, /let near=psNearSolid\(slot\);/);
     // The old solid rules of umVertexFoot and umAdvected (2026-11-19): the open point cell, the buried cubic taps'
     // trilinear, the foot's closed taps and slide, the smoothing's bits; the trace walked from the foot.

@@ -336,7 +336,9 @@ export function brickSeedBlockedWGSL(body: string): string {
 }
 
 const LADVECT_HEAD = "fn lAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){";
-const LIST_HEAD = " let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_F_ALL)){return;}\n let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);";
+/** lAdvect's head (and phiSolid's, its text): F_ALL's X8, a brick's two halves (half 0, 1) its first two workgroups. */
+export const LADVECT_HEAD_WGSL = "\n let g8=nbGroup(wid);let g=g8>>3u;let half=g8&7u;if(g>=nbListCount(NB_LIST_F_ALL)||half>=2u){return;}\n let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);";
+const LIST_HEAD = LADVECT_HEAD_WGSL.slice(1);
 const LADVECT_TRACE = "let traced=nbfSurfaceTrace(foot,dt,h,wall);";
 const LADVECT_VERTEX = "if(lVertexIn(v)){value=lAdvected(v,dt,h);}";
 const LADVECT_FOOT_TAPS = "for(var a=0u;a<3u;a++){let e=vec3f(fgUnit(a));at[2u*a]=fgHeld(p-e);at[2u*a+1u]=fgHeld(p+e);}";
@@ -363,7 +365,7 @@ export function brickLevelSetDeferWGSL(body: string): string {
  // phiSolid advects a NEAR_SOLID brick, with the walk and the burial (brick-solid-walk.wgsl.ts, lane E).
  if(psNearSolid(slot)){return;}`, "lAdvect");
   entry = once(entry, LADVECT_VERTEX, `psFar=false;${LADVECT_VERTEX}
-  if(psFar){phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]=PS_PHI_FAR;continue;}`, "lAdvect");
+  if(psFar){phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]=PS_PHI_FAR;return;}`, "lAdvect");
   return head + entry;
 }
 
@@ -390,7 +392,7 @@ export function brickPhiSolidWGSL(body: string): string {
   entry = once(entry, LADVECT_HEAD, LADVECT_HEAD.replace("fn lAdvect(", "fn phiSolid("), "lAdvect");
   entry = once(entry, LIST_HEAD, `${LIST_HEAD}
  let near=psNearSolid(slot);`, "lAdvect");
-  entry = once(entry, LADVECT_VERTEX, `if(!near&&phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]!=PS_PHI_FAR){continue;}
+  entry = once(entry, LADVECT_VERTEX, `if(!near&&phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]!=PS_PHI_FAR){return;}
   if(lVertexIn(v)&&!psBuried(v)){value=lAdvected(v,dt,h);}`, "lAdvect");
   return head + entry;
 }

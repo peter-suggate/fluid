@@ -57,6 +57,8 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const p = particleKernels(L, F, { bandDepth: context.particles?.bandDepth ?? NBF_PARTICLE_SETTINGS.particleBandDepth, statics, ...(context.staticWalls ? { staticWalls: context.staticWalls } : {}) }), l = levelSetKernels(L, F, { statics, ...(context.staticWalls ? { staticWalls: context.staticWalls } : {}) }), v = velocityKernels(L, F, physics);
   const list = (k: number, g: "G1" | "G8" | "G64" | "X8"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
   const all = list(LIST.F_ALL, "G1"), all8 = list(LIST.F_ALL, "G8"), pages = list(LIST.C_ALL, "G1");
+  // lAdvect and phiSolid: two workgroups a brick over F_ALL's X8 (LADVECT_HEAD_WGSL).
+  const allX8 = list(LIST.F_ALL, "X8");
   // Tiered, a pass over both tiers (the FC list: F_ALL's bricks, then C_ALL's pages, a workgroup each): the kernels
   // that hold a C page body (uAdvect, uTransfer, uKick, vGauge) run their 4h faces or tiles in their h pass.
   const both: BrickDispatch = tiered ? { indirect: ARGS.FC_G1 } : all;
@@ -95,7 +97,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const move = runs([[T.moveCaches, [...resolve, ...cache]],
     [T.move, [at(p.pLiquid, all), ...(tiered ? [at(p.pSeed, all, 1, 2)] : []), args(0, 0), at(p.pSeparate, records), at(p.pMove, records), ...(p.pSolid ? [at(p.pSolid, records)] : [])]]]);
   const levelSet = runs([
-    [T.levelAdvect, [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...(l.phiSolid ? [at(l.phiSolid, all)] : []), ...coarse("lcAdvect")]],
+    [T.levelAdvect, [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, allX8), ...(l.phiSolid ? [at(l.phiSolid, allX8)] : []), ...coarse("lcAdvect")]],
     [T.levelUnion, [at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"), ...resolve]],
     [T.levelAnalysis, [...analysis, ...coarse("lcRetire")]],
     [T.levelPublish, [at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all), ...(l.lWall ? [at(l.lWall, all)] : [])]],

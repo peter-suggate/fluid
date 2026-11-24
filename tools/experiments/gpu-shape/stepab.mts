@@ -59,7 +59,11 @@ const N = Number(process.env.STEPS ?? 100), SAMPLES = Number(process.env.S ?? 9)
 const emit = (o: Record<string, unknown>) => { if (OUT) appendFileSync(OUT, JSON.stringify({ scene: sceneKey, ...o }) + "\n"); };
 
 type Text = { label: string; entry: string; bindings: unknown; dispatch: unknown; z?: number; w?: number; code: string };
-const shape = (t: Text) => JSON.stringify([t.label, t.entry, t.bindings, t.dispatch, t.z ?? 0, t.w ?? 0]);
+// An indirect dispatch may move to another args word of the same buffer (lAdvect's G1 -> X8, 2026-11-24): the
+// candidate's placement then runs with its own dispatch, and the exactness check judges it (a missed workgroup's words
+// stay base's prior state and differ). A direct dispatch, or indirect against direct, stays structural.
+const dispatchShape = (d: any) => (d && typeof d === "object" && "indirect" in d ? "indirect" : d);
+const shape = (t: Text) => JSON.stringify([t.label, t.entry, t.bindings, dispatchShape(t.dispatch), t.z ?? 0, t.w ?? 0]);
 const textOf = (p: any): Text => ({ label: p.kernel.label, entry: p.kernel.entry, bindings: p.kernel.bindings, dispatch: p.dispatch, z: p.z, w: p.w, code: p.kernel.code });
 
 // The candidate's schedule, before this process takes the GPU (the child builds its own device and exits).
@@ -120,9 +124,10 @@ if (mismatch >= 0) throw new Error(`stepab: placement ${mismatch} (${basePl[mism
 // One candidate kernel object per distinct (base kernel, text), so a kernel placed many times compiles once.
 const memo = new Map<string, any>();
 const candPl = basePl.map((p, i) => {
-  const code = cand![i]!.code; if (code === p.kernel.code) return p;
-  const key = `${p.kernel.label}\n${code}`; if (!memo.has(key)) memo.set(key, { ...p.kernel, code });
-  return { ...p, kernel: memo.get(key) };
+  const code = cand![i]!.code, dispatch = cand![i]!.dispatch, moved = JSON.stringify(dispatch) !== JSON.stringify(p.dispatch);
+  if (code === p.kernel.code && !moved) return p;
+  const key = `${p.kernel.label}\n${code}`; if (!memo.has(key)) memo.set(key, code === p.kernel.code ? p.kernel : { ...p.kernel, code });
+  return { ...p, kernel: memo.get(key), ...(moved ? { dispatch } : {}) };
 });
 const changed = basePl.map((p, i) => candPl[i] !== p ? i : -1).filter(i => i >= 0);
 const changedLabels = [...new Set(changed.map(i => basePl[i].kernel.label as string))];

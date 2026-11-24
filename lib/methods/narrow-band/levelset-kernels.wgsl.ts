@@ -38,7 +38,7 @@ import { nbfCubicLimitedWGSL, nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhi
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 import { CENSUS } from "./brick-census.wgsl";
 import { brickSourceWGSL } from "./brick-source.wgsl";
-import { BRICK_SOLID_LEVEL_SET_WGSL, brickLevelSetDeferWGSL, brickPhiSolidWGSL } from "./brick-solid-walk.wgsl";
+import { BRICK_SOLID_LEVEL_SET_WGSL, brickLevelSetDeferWGSL, brickPhiSolidWGSL, LADVECT_HEAD_WGSL } from "./brick-solid-walk.wgsl";
 import { brickStaticWGSL, type BrickStaticWalls } from "./brick-static.wgsl";
 
 const LS_SET_WGSL = /* wgsl */`
@@ -247,16 +247,17 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
  // The source writes the level set after advection (umAdvected: the union with this step's drop, then the smoothing).
  return nbSourcePhi(p,value)+nbfMovedSmoothing(smoothing,p,q,1u);
 }
-@compute @workgroup_size(256) fn lAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
+// A vertex a lane: two workgroups a brick (its halves l < 256 and l >= 256), dispatched over F_ALL's X8 (eight
+// workgroups an entry, the six past the halves empty, which cost nothing measurable). A lane's two vertices in turn
+// made its trace one chain twice as long (GPU-shape, lane A2, 2026-11-24: -10% on lAdvect, the same per vertex).
+@compute @workgroup_size(256) fn lAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${LADVECT_HEAD_WGSL}
  let dt=lDt();let h=lH();
- for(var r=0u;r<2u;r++){
-  let l=lid+256u*r;let v=o+nbLocalCoord(l);
-  // Tiered, a vertex F does not own is the 4h corners' (lcAdvect): no trace (lSetPhi writes only owned vertices).
-  if(FG_TIERED&&!fgVertexOwned(v)){continue;}
-  var value=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]);
-  if(lVertexIn(v)){value=lAdvected(v,dt,h);}
-  lSetPhi(NB_PHI_F_PHI1,slot,l,value);
- }
+ let l=lid+256u*half;let v=o+nbLocalCoord(l);
+ // Tiered, a vertex F does not own is the 4h corners' (lcAdvect): no trace (lSetPhi writes only owned vertices).
+ if(FG_TIERED&&!fgVertexOwned(v)){return;}
+ var value=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]);
+ if(lVertexIn(v)){value=lAdvected(v,dt,h);}
+ lSetPhi(NB_PHI_F_PHI1,slot,l,value);
 }`;
   // Statics (lane E, brick-solid-walk.wgsl.ts): lAdvect skips the NEAR_SOLID bricks, which phiSolid advects with
   // lAdvect's text, the trace walked and a buried vertex kept.
