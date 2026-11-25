@@ -5,9 +5,11 @@
 //
 // GPU: a still tank (32 x 64 x 32 cells, tiered, liquid y < 17) under two solid blocks over x, z 8..16: a shelf at
 // y 19..23, just over the surface, whose cut bricks hold the surface band; and a block at y 40..48, dry and far above it.
-// Then a deep tank (liquid y < 48) over a block on its floor (y 0..4, x, z 20..28), 44 cells under the surface: the
+// Then a deep tank (liquid y < 48) over a block on its floor (y 0..4, x, z 21..29), 44 cells under the surface: the
 // boot's census runs before its setMark, so that brick is wet by its F vertices alone (alpine-lake's ground and
 // sphere-jet's padded corner, 2026-11-18: their tiles went 4h at the boot's commit and the kick's solve latched).
+// The block sits one cell off the 4h tiles: the rule is per tile (bb2dfdd7) and never promotes an exact tile, so a
+// tile-aligned block (closed tiles, exact neighbours) has nothing to promote; this one has a closed tile and inexact ones.
 // Neither meets the liquid: a liquid row in a static solid cell latches 0xa2 in the operator until phiSolid and pSolid
 // keep liquid out of solid cells (E, next). 30 steps (under the 60-step probe). Each step must hold:
 // - no FAIL latch (before the rule, the census latched any tiered static cut, 0x63000000 / 0x63000004);
@@ -89,7 +91,7 @@ function shelfTank(surface = 17, solids = SHELF_SOLIDS): { options: BrickEngineO
   };
 }
 
-for (const [name, surface, solids] of [["a still tank under a solid shelf", 17, SHELF_SOLIDS], ["a deep tank over a floor block", 48, [{ lo: [20, 0, 20] as Vec3, hi: [28, 4, 28] as Vec3 }]]] as const)
+for (const [name, surface, solids] of [["a still tank under a solid shelf", 17, SHELF_SOLIDS], ["a deep tank over a floor block", 48, [{ lo: [21, 0, 21] as Vec3, hi: [29, 4, 29] as Vec3 }]]] as const)
 test(`brick static need (GPU): ${name} keeps its wet cut bricks h from the boot and a dry block's 4h, no latch, 30 steps`, GPU, async t => {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   const { options } = shelfTank(surface, [...solids]);
