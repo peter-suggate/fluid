@@ -150,11 +150,12 @@ test("composite live lists (GPU): the rows, setup, finish and projection over HB
     e.write("pmgC", M.L2, junk(M.L3 - M.L2));
     // The garbage breaks the certificates' premise (only P writes those rows): none holds.
     e.write("pmgTop", M.top.ZS, new Uint32Array(2 * L.cap.f));
-    // The lists' own words (pmgF HBL..; the args HB, HP) are the live path's alone. coarsenTop appends the row bricks
+    // The lists' own words (pmgF HBL..; the args HB, HP; pmgTop DRYN, the count projectF appends projectDry's list
+    // DRYL by) are the live path's alone. coarsenTop appends the row bricks
     // (pmgTop RB, SB) by a workgroup atomic, in an order that varies run to run: compared as sets.
     const T = M.top, F = L.cap.f;
     const own = (name: string, i: number) => (name === "pmgF" && i >= M.HBL) || (name === "args" && i >= MG_GATE.HB && i < MG_GATE.ZL + 3)
-      || (name === "pmgTop" && i >= T.ZK && i < T.ZK + 4 * F)
+      || (name === "pmgTop" && i >= T.ZK && i < T.ZK + 4 * F) || (name === "pmgTop" && i === T.DRYN)
       || (name === "pmgTop" && ((i >= T.RB && i < T.RB + F) || (i >= T.SB && i < T.SB + 4 * F)));
     const sets = (w: Uint32Array) => [[T.RB, w[T.RBN]!], [T.SB, w[T.SBN]!]].map(([at, n]) => [...w.subarray(at!, at! + n!)].sort((x, y) => x - y).join());
     const same = async (label: string, from: Awaited<ReturnType<typeof e.save>>, pathF: BrickPlacement[], pathL: BrickPlacement[]) => {
