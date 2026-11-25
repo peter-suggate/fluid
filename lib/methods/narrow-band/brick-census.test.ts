@@ -79,7 +79,7 @@ export interface CensusResult {
   /** Thin-alone tiles of F bricks (FIN's criteria exactly the thin bit), and those the need rule heats. */ thinAlone: { tiles: number; heated: number };
   /** tuDeformation's branches on the thin-alone tiles: stale key, width <= 0, valid and heated, valid and not. */ defBranches: Record<"key" | "width" | "heated" | "cool", number>;
   band: Map<number, boolean>; demoted: Set<number>; calmNow: Set<number>; held: Set<number>;
-  /** Calm band tiles R2's thin guard kept (a thin trigger in FIN). */ shaped: Set<number>;
+  /** Calm band tiles R2's shape and thin guard kept (a shape or thin trigger in FIN). */ shaped: Set<number>;
   /** Calm band h tiles R2's curvature test kept (shift > 0.08), the VOL word (the packed mean normal) of every h tile at
    * a head, and the curvature shift of every band h tile tested. */ volumeKept: Set<number>; vol: Map<number, number>; shift: Map<number, number>;
   /** Band tiles calm on velocity and curvature that R2's importance (ncSurfaceQuiet) kept. */ loud: Set<number>;
@@ -571,7 +571,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     const e = fromBits((s.tc ? s.tc(cs, tileIndex(p)) : [])[15] ?? 0); return e < PLAN_MAX && fr(fr(dt * e) / h) <= fr(0.08);
   };
   const demoted = new Set<number>(), calmNow = new Set<number>(), held = new Set<number>();
-  // R2's thin guard: calm means 4h holds the geometry (no thin trigger in FIN).
+  // R2's shape and thin guard: calm means 4h holds the geometry (no shape or thin trigger in FIN).
   const shaped = new Set<number>(), loud = new Set<number>();
   // R2's curvature test: VOL, censusFine's packed mean normal of an h tile (0 without a crossing cell), and the shift.
   const volumeKept = new Set<number>(), vol = new Map<number, number>(), shift = new Map<number, number>();
@@ -627,7 +627,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     const band = decideBand(p, sc, i);
     // censusFine writes VOL for every h tile, band or not: the oracle's packed normal of each, compared word for word.
     if (head && tileH(p)) vol.set(key(p), volOf(p));
-    if (band && head && ((sc.fin[i]! & trig(1)) >>> 0) !== 0) { if (calm(p)) shaped.add(key(p)); return band; }
+    if (band && head && ((sc.fin[i]! & (trig(0) | trig(1))) >>> 0) !== 0) { if (calm(p)) shaped.add(key(p)); return band; }
     if (band && head && tileH(p)) { const d = curveShift(p); shift.set(key(p), d); if (!(d <= 0.08)) { if (calm(p)) volumeKept.add(key(p)); return band; } }
     if (!(band && head && calm(p))) return band;
     if (!quiet(p)) { loud.add(key(p)); return band; }

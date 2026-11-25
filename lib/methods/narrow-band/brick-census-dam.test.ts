@@ -355,7 +355,7 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     }
     // R2 (lane E, a stated deviation; 2026-11-23 at the 4h owner's scale): at a step's head a band tile is 4h where its
     // certificate copy (the supplied DEF words) is valid and either saw no liquid or dt e / h <= 0.08 on TC word 15
-    // (ncCalm); no thin trigger in this census's FIN; an h tile's curvature shift (4/3) h div n of the tile mean normals
+    // (ncCalm); no shape or thin trigger in this census's FIN; an h tile's curvature shift (4/3) h div n of the tile mean normals
     // <= 0.08 (ncCurveShift: an h tile's normal its VOL word, which brick-census.test.ts pins, a 4h tile's the gradient
     // of its 8 stored corners); and dt |u.n| / 4h <= 0.08 over the tile and the faces whose surface runs on into it or moves towards it
     // (ncSurfaceQuiet).
@@ -364,7 +364,7 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       if (cens[o + 2] !== pageKeys.get(cs)! + 1 || !(f32w(cens[o + 3]!) > 0)) return false;
       if ((cens[S * cs + CENSUS.TC + 16 * l + 8]! & 1) === 0) return true;
       const e = f32w(cens[S * cs + CENSUS.TC + 16 * l + 15]!); return e < 3.402823e38 && fr(fr(fr(meta.dt) * e) / fr(meta.h)) <= fr(0.08); };
-    const thin = (cs: number, l: number) => (rCensus[S * cs + CENSUS.FIN + l]! & (1 << 17)) !== 0;
+    const thin = (cs: number, l: number) => (rCensus[S * cs + CENSUS.FIN + l]! & (3 << 16)) !== 0;
     const unpack = (w: number) => [0, 8, 16, 24].map(b => Math.max(((((w >>> b) & 255) << 24) >> 24) / 127, -1));
     const corner = (q: V3) => { const v = cBuf.get("PHI")![BRICK_STRIDE * s.pages.get(key(shr(q, 3)))! + local8(q)]!; return fr(v * h); };
     const tileNormal = (q: V3): number[] => {

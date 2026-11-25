@@ -1654,12 +1654,14 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   // Refining has none: a tile that is not calm bands at once.
   // Calm means 4h represents the tile's velocity (ncCalm) and its surface's curvature (ncCurveShift), the surface about
   // it is quiet (ncSurfaceQuiet), and it carries no thin trigger, so R2 never demotes a sheet 4h cannot carry
-  // (falling-water-torus lost all its liquid by step 10 without this, 2026-11-17). The max-norm shape trigger is not
-  // read: it measures the h surface's cell-scale roughness, which the h particles make themselves.
+  // (falling-water-torus lost all its liquid by step 10 without this, 2026-11-17), and no shape trigger (4h misses the
+  // h surface by more than the tolerance): a sheet sliding along itself (the pour's stream) is calm on every measure
+  // above (no second difference of its tile means, |u.n| about 0, flat tile normals), so without this guard R2 demotes
+  // the surface 4h cannot hold and the sheet loses its particles, which live only in h bricks (brick-census-jet.test.ts).
   var toCoarse=false;
   // A source tile is not calm: the drop's liquid arrives this step, after the certificate (lane F's M4).
   // And an h tile is calm only where its 4h-scale curvature keeps its volume within the budget (ncCurveShift).
-  if(band&&head&&!source&&(ncFin(cs,i)&ncTriggerBit(NC_THIN_K))==0u&&ncCalm(t,cs,i)
+  if(band&&head&&!source&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&ncCalm(t,cs,i)
      &&cdQuietCurve(t,cs,i)){
     atomicOr(&wgCalm[lane>>5u],bit);
     let known=census[o+${CENSUS.CALM_KEY}u+(i>>6u)]==nbCRec(cs,NB_REC_KEY)+1u;
