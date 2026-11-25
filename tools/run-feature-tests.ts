@@ -21,7 +21,10 @@ const files = (await Promise.all(["tests", "lib", "advance-lab"].map(discover)))
 if (process.argv.includes("--list")) {
   process.stdout.write(files.join("\n") + "\n");
 } else {
-  const child = spawn(process.execPath, ["--import", "tsx", "--test", ...process.argv.slice(2), ...files], {
+  // GPU runs take one test file at a time: node --test defaults to cores - 1 files at once (9 here), a GPU file alone
+  // peaks near 7.8 GB, and 9 of them on a 32 GB Mac hung the GPU. The plain (CPU) gate stays parallel.
+  const serial = process.env.WEBGPU_NODE_MODULE && !process.argv.some(a => a.startsWith("--test-concurrency")) ? ["--test-concurrency=1"] : [];
+  const child = spawn(process.execPath, ["--import", "tsx", "--test", ...serial, ...process.argv.slice(2), ...files], {
     stdio: "inherit", env: process.env,
   });
   child.once("error", error => { console.error(error); process.exitCode = 1; });
