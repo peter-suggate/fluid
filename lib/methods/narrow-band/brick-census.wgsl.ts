@@ -824,11 +824,15 @@ fn ncCellKind(c:vec3i)->u32{if(!nbInWallBox(c)){return 2u;}return select(0u,1u,n
 fn ncTileState(q:vec3i)->u32{if(!nbTileInLattice(q)){return 2u;}return select(0u,1u,ncPageSlot(q>>vec3u(3u))==NB_NONE);}
 fn ncCellOwnerH(c:vec3i)->bool{return nbCellOwnerH(c);}
 fn ncObstacleAt(q:vec3i)->bool{return false;}
-// umWallBeyond (l.1732): the page across direction k outside the lattice is the wall.
+// umWallBeyond (l.1732): the tiles from p to the wall across direction k, the wall within a page of p (no wall
+// further). The wall is the box's (cdTile's test), not the lattice's: a lattice padded to whole pages past the
+// container's walls has its high walls inside its last page, and the impact and run-up triggers see them there.
+// An unpadded lattice's box is the lattice: the page across outside it, as before.
 fn ncWallBeyond(p:vec3i,k:u32)->u32{
-  let a=k%3u;let high=k>=3u;var page=p>>vec3u(3u);page[a]+=select(-1,1,high);
-  if(ncPageIn(page)){return NC_NO_WALL;}
-  let l=vec3u(p&vec3i(7));return select(l[a],7u-l[a],high);
+  let a=k%3u;let high=k>=3u;
+  let box=${BOX_TOKEN};let d=select(p[a],(box[a]+3)/4-1-p[a],high);
+  if(d<0||d>7){return NC_NO_WALL;}
+  return u32(d);
 }
 // umWideVertexSlot (l.310): a lattice page whose closure holds wide vertex v is resident.
 fn ncWidePresent(v:vec3i)->bool{

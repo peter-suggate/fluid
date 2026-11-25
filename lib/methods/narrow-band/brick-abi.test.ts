@@ -109,6 +109,9 @@ test("brick ABI: the box hook (M3 padding): walls at the box, an unpadded text u
   const code = (label: string) => kernels.find(k => k.label === label)!.code;
   assert.match(code("setInit"), /NB_FLAG_OPEN,nbInBox\(o\+nbLocalCoord\(l\)\)\)/);
   assert.match(code("censusFine"), /fn ncCellKind\(c:vec3i\)->u32\{if\(!nbInBox\(c\)\)/);
+  // The impact and run-up triggers' wall (ncWallBeyond) is the box's, as cdTile's tile test: a padded lattice's high
+  // walls are inside its last page, not at its edge.
+  for (const label of ["censusFine", "censusDecide"]) assert.match(code(label), /fn ncWallBeyond\(p:vec3i,k:u32\)->u32\{\n  let a=k%3u;let high=k>=3u;\n  let box=NB_BOX;/, label);
   assert.match(code("setTransferFaces"), /let wall=c\[a\]\+1==NB_BOX\[a\];/);
   // The C level set (levelset-coarse, lc*): both owner instances and the kernels' own walls, holds and domains read
   // the box (the padded tank's creation guard named lcClear, lcAdvect, lcCouple, lcRetire and lcPublish); storage
