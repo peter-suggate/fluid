@@ -65,10 +65,12 @@ test("brick particle banks (GPU): a move over an empty source bank empties its d
     try {
       await e.fence();
       const part1 = e.schedule.part1, at = part1.findIndex(p => label(p) === "pMove" && (p.z ?? 0) === 0);
-      assert.ok(at > 0 && label(part1[at - 1]!) === "pArgs");
+      // pSeparate (395a590b) sits between the move's arguments and the move, over the same arguments.
+      const args = at - (at > 0 && label(part1[at - 1]!) === "pSeparate" ? 2 : 1);
+      assert.ok(args >= 0 && label(part1[args]!) === "pArgs");
       // run() binds ring slot 0: pSrc = 0 at z = 0, so bank 0 is the source and bank 1 the destination.
       e.write("set", H.PCOUNT0, Uint32Array.of(0, 777));
-      await e.run([part1[at - 1]!, part1[at]!]);
+      await e.run(part1.slice(args, at + 1));
       const h = await e.read("set", 0, 256);
       assert.equal(h[H.PCOUNT0], 0, "the source stays empty");
       assert.equal(h[H.PCOUNT1], 0, "the destination's stale count is gone though the move dispatched no workgroup");
