@@ -354,16 +354,17 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       if ((m === 1) !== modeR.has(rKey(R))) modeWrong++;
     }
     // R2 (lane E, a stated deviation; 2026-11-23 at the 4h owner's scale): at a step's head a band tile is 4h where its
-    // certificate copy (the supplied DEF words) is valid and either saw no liquid or dt e / h <= 0.08 on TC word 15
+    // certificate copy (the supplied DEF words) is valid and either saw no liquid or dt e / h <= 0.08 on its DEF error (an h tile: and TC word 15)
     // (ncCalm); no shape or thin trigger in this census's FIN; an h tile's curvature shift (4/3) h div n of the tile mean normals
     // <= 0.08 (ncCurveShift: an h tile's normal its VOL word, which brick-census.test.ts pins, a 4h tile's the gradient
     // of its 8 stored corners); and dt |u.n| / 4h <= 0.08 over the tile and the faces whose surface runs on into it or moves towards it
     // (ncSurfaceQuiet).
     const f32w = (u: number) => new Float32Array(new Uint32Array([u]).buffer)[0]!;
-    const calm = (cs: number, l: number) => { const o = S * cs + CENSUS.DEF + 4 * l;
+    const calm = (cs: number, l: number, fine: boolean) => { const o = S * cs + CENSUS.DEF + 4 * l;
       if (cens[o + 2] !== pageKeys.get(cs)! + 1 || !(f32w(cens[o + 3]!) > 0)) return false;
       if ((cens[S * cs + CENSUS.TC + 16 * l + 8]! & 1) === 0) return true;
-      const e = f32w(cens[S * cs + CENSUS.TC + 16 * l + 15]!); return e < 3.402823e38 && fr(fr(fr(meta.dt) * e) / fr(meta.h)) <= fr(0.08); };
+      const e = fine ? Math.max(f32w(cens[o + 1]!), f32w(cens[S * cs + CENSUS.TC + 16 * l + 15]!)) : f32w(cens[o + 1]!);
+      return e < 3.402823e38 && fr(fr(fr(meta.dt) * e) / fr(meta.h)) <= fr(0.08); };
     const thin = (cs: number, l: number) => (rCensus[S * cs + CENSUS.FIN + l]! & (3 << 16)) !== 0;
     const unpack = (w: number) => [0, 8, 16, 24].map(b => Math.max(((((w >>> b) & 255) << 24) >> 24) / 127, -1));
     const corner = (q: V3) => { const v = cBuf.get("PHI")![BRICK_STRIDE * s.pages.get(key(shr(q, 3)))! + local8(q)]!; return fr(v * h); };
@@ -397,7 +398,7 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       const t = coord(i), cs = s.pages.get(key(shr(t, 3)))!, l = local8(t);
       const want = (rSet[L.set.want + 16 * cs + (l >> 5)]! >>> (l & 31)) & 1;
       // The hysteresis: a calm h tile only at its second calm head (calmPrev), a calm 4h tile at once.
-      const calmRaw = fx.decided[i] && calm(cs, l), notThin = calmRaw && !thin(cs, l), flat = notThin && (!hOld(t) || curveShift(t, cs, l) <= 0.08), isCalm = flat && quiet(t);
+      const calmRaw = fx.decided[i] && calm(cs, l, hOld(t)), notThin = calmRaw && !thin(cs, l), flat = notThin && (!hOld(t) || curveShift(t, cs, l) <= 0.08), isCalm = flat && quiet(t);
       if (calmRaw && !notThin) shapeGuarded++; if (notThin && !flat) curveKept++; if (flat && !isCalm) loudKept++;
       const expected = isCalm && (!hOld(t) || calmPrev(cs, l)) ? 0 : fx.decided[i];
       if (expected !== fx.decided[i]) calmDemoted++; else if (isCalm) calmHeld++;

@@ -88,7 +88,7 @@ export interface CensusResult {
 
 /** The oracle. deep: tiles taking the last census's decision (the old deep COLD branch, l.2852), for the D test.
  * head: a tiered step head with the real D, where R2 (lane E, a stated deviation) makes a calm band tile 4h:
- * dt e / h <= 0.08 on TC word 15 under valid DEF words (ncCalm; an unknown copy is never calm, a dry one is calm), an h
+ * dt e / h <= 0.08 on the DEF error (an h tile: and TC word 15) under valid DEF words (ncCalm; an unknown copy is never calm, a dry one is calm), an h
  * tile only at its second consecutive calm head (calmPrev; the hysteresis), a 4h tile at once; an h tile only where its
  * 4h-scale curvature shift (4/3) h div n of the tile mean normals is <= 0.08 (ncCurveShift; VOL the packed normal); and
  * only where the surface's normal speed about the tile, dt |u.n| / 4h, is <= 0.08 (ncSurfaceQuiet: its own, and each
@@ -568,7 +568,8 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     const w = s.def ? s.def(cs, tileIndex(p)) : [0, 0, 0, 0];
     if (w[2] !== slotKey.get(cs)! + 1 || !(fromBits(w[3]!) > 0)) return false;
     if (!(s.wet?.(cs, tileIndex(p)) ?? false)) return true;
-    const e = fromBits((s.tc ? s.tc(cs, tileIndex(p)) : [])[15] ?? 0); return e < PLAN_MAX && fr(fr(dt * e) / h) <= fr(0.08);
+    const e = tileH(p) ? Math.max(fromBits(w[1]!), fromBits((s.tc ? s.tc(cs, tileIndex(p)) : [])[15] ?? 0)) : fromBits(w[1]!);
+    return e < PLAN_MAX && fr(fr(dt * e) / h) <= fr(0.08);
   };
   const demoted = new Set<number>(), calmNow = new Set<number>(), held = new Set<number>();
   // R2's shape and thin guard: calm means 4h holds the geometry (no shape or thin trigger in FIN).

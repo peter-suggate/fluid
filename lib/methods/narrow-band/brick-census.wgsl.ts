@@ -1050,16 +1050,19 @@ fn ncCurveShift(t:vec3i,s:u32,i:u32)->f32{
   return abs(div)/3.0;
 }
 fn ncCalm(t:vec3i,s:u32,i:u32)->bool{
-  // Tier-invariant and at the 4h owner's scale (2026-11-23): both tiers read TC word 15, the second difference of the
-  // tile mean velocities 4h apart (certError's), the interpolation error of the 4h model itself. Each mean averages the
-  // tile's samples, so the h particles' cell-scale velocity noise (which the largest of 64 per-cell defects read as
-  // error, keeping flat water h) does not count. A tile whose valid certificate saw no liquid (a dry band tile above
-  // the surface) has no velocity of its own to represent: it is calm on the velocity test, and the caller's surface
-  // importance (ncSurfaceQuiet, over its neighbours) decides it. No certificate is never calm.
+  // Each tier reads its certificate error (the DEF word, certError's tileErrorOf): an h tile's per-cell defect (the
+  // velocity inside the tile its trilinear field misses), a 4h tile's enclosing constant model (half its velocity span
+  // across the tile) and second difference. An h tile also reads TC word 15, the second difference of the tile mean
+  // velocities 4h apart, the error it would meet as 4h. Word 15 alone (2026-11-23) cannot see velocity that varies
+  // within a tile: sheared flow went and stayed 4h, and sparse-cm12-long-dam-break kept 36-75k of its ~115k particles
+  // (either tier's error alone: 52-53k at step 100; brick-census-jet.test.ts). A tile whose valid certificate saw no
+  // liquid (a dry band tile above the surface) has no velocity of its own to represent: it is calm on the velocity
+  // test, and the caller's surface importance (ncSurfaceQuiet, over its neighbours) decides it. No certificate is
+  // never calm.
   var e=ncError(t,s,i);
   if(!(e<NC_PLAN_MAX)){return false;}
   if((census[NC_S*s+${CENSUS.TC}u+16u*i+8u]&1u)==0u){return true;}
-  e=bitcast<f32>(census[NC_S*s+${CENSUS.TC}u+16u*i+15u]);
+  if(nbTileH(s,i)){e=max(e,bitcast<f32>(census[NC_S*s+${CENSUS.TC}u+16u*i+15u]));}
   return e<NC_PLAN_MAX&&ncDt()*e/ncH()<=${UNIFORM_TILE_UPDATE_BUDGET_H};
 }
 `;
