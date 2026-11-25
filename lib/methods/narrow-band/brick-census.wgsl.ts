@@ -1638,7 +1638,8 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   // is static whatever its surface, deep COLD or not.
   // The nozzle's tiles band as the old "unresolved" sources rule's (umSourceBand: 65536 and inflowNeedsFine); a drop's
   // always (the port's drop rule).
-  let source=!ncJoined(t)&&(nbDropOn()||nbInflowNeedsFine())&&nbSourceTile(t);
+  // sourceTile: the drop's or the nozzle's tile, joined or not (R2 never demotes it); source: one not joined already.
+  let sourceTile=(nbDropOn()||nbInflowNeedsFine())&&nbSourceTile(t);let source=!ncJoined(t)&&sourceTile;
   let joined=ncJoined(t)||source;let word=i>>5u;let bit=1u<<(i&31u);
   // decideTile (l.2849): a deep COLD tile keeps the last census's decision and its static bit (a join or a source
   // still bands it); every other tile clears both, its band sets CC_DECIDED and its join CC_STATIC.
@@ -1662,9 +1663,11 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   // above (no second difference of its tile means, |u.n| about 0, flat tile normals), so without this guard R2 demotes
   // the surface 4h cannot hold and the sheet loses its particles, which live only in h bricks (brick-census-jet.test.ts).
   var toCoarse=false;
-  // A source tile is not calm: the drop's liquid arrives this step, after the certificate (lane F's M4).
+  // A source tile is not calm: the drop's liquid arrives this step, after the certificate (lane F's M4). That holds for
+  // a joined source tile too: the nozzle's tiles are joined once its plug has filled them, and while 4h they hold no
+  // particles, so the stream's lip at the nozzle went 4h (8-11 of the pour's 454 nozzle tiles at every step; 0 now).
   // And an h tile is calm only where its 4h-scale curvature keeps its volume within the budget (ncCurveShift).
-  if(band&&head&&!source&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&ncCalm(t,cs,i)
+  if(band&&head&&!sourceTile&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&ncCalm(t,cs,i)
      &&cdQuietCurve(t,cs,i)){
     atomicOr(&wgCalm[lane>>5u],bit);
     let known=census[o+${CENSUS.CALM_KEY}u+(i>>6u)]==nbCRec(cs,NB_REC_KEY)+1u;

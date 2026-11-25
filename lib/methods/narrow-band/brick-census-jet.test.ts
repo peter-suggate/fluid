@@ -11,6 +11,9 @@
 //   velocity that varies within a tile, which a 4h tile's trilinear field cannot hold; an h tile's per-cell defect
 //   (certFine, the DEF word) does. With TC word 15 alone the run held 36-75k particles at steps 100-300; with the
 //   per-cell defect 117-119k (before 35eb7ee3, 111-114k). At step 100 both banks hold at least 90k.
+// - The nozzle: nbflip-figure-7-pour's inflow tiles. Once the plug has filled a nozzle tile it is joined, and R2 read
+//   only an unjoined source tile as a source, so 8-11 of the 454 nozzle tiles were 4h at every step (the lip at the
+//   nozzle held no particles and drew ragged). A source tile is never calm, joined or not: at step 60 none is 4h.
 // GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -78,5 +81,35 @@ test("R2 (GPU): the long dam's sheared flow stays h (an h tile's per-cell defect
     const hdr = await s.brickEngine.read("set", 0, 32), counts = [hdr[H.PCOUNT0]!, hdr[H.PCOUNT1]!];
     console.log(`long dam step 100: particles ${counts.join(" / ")}`);
     assert.ok(Math.min(...counts) >= 90000, `the flow keeps its particles: ${counts.join(" / ")} (at least 90k)`);
+  });
+});
+
+test("R2 (GPU): the pour's nozzle tiles stay h (a joined source tile is still a source)", GPU, async () => {
+  await runScene("nbflip-figure-7-pour", 60, async s => {
+    const e = s.brickEngine, L = e.layout, dt = 1 / 60;
+    const inflow = (s as unknown as { options: { setup: { sources?: { inflow?: { outlet: number[]; radius: number; velocity_mps: number[]; speed: number } } } } }).options.setup.sources?.inflow;
+    assert.ok(inflow, "the pour has a nozzle");
+    // nbSourceTile (brick-source.wgsl.ts) for a running nozzle at full strength: its plug's distance at the tile centre
+    // within half the tile diagonal and two cells.
+    const speed = Math.hypot(...inflow.velocity_mps), dir = inflow.velocity_mps.map(v => v / speed), sweep = inflow.speed * dt;
+    const plug = (p: number[]) => {
+      const d = p.map((x, k) => x - inflow.outlet[k]!), axial = d[0]! * dir[0]! + d[1]! * dir[1]! + d[2]! * dir[2]!;
+      const side = Math.hypot(...d.map((x, k) => x - axial * dir[k]!)) - inflow.radius, cap = Math.max(-axial, axial - sweep - 2);
+      return cap <= 0 ? side : Math.max(side, cap);
+    };
+    const snap = await snapshot(e);
+    let nozzle = 0; const coarse: string[] = [];
+    for (const [key, cs] of snap.pages) {
+      const P = brickKeyCoord(key);
+      for (let i = 0; i < 512; i++) {
+        const t = [8 * P[0]! + (i & 7), 8 * P[1]! + ((i >> 3) & 7), 8 * P[2]! + (i >> 6)];
+        if (plug(t.map(c => 4 * c + 2)) > 0.5 * Math.sqrt(48) + 2) continue;
+        nozzle++;
+        if (!((snap.dir[L.dir.cmask + 16 * cs + (i >> 5)]! >>> (i & 31)) & 1)) coarse.push(t.join(","));
+      }
+    }
+    console.log(`pour step 60: ${nozzle} resident nozzle tiles, ${coarse.length} 4h`);
+    assert.ok(nozzle > 100, `the nozzle's tiles are resident: ${nozzle}`);
+    assert.equal(coarse.length, 0, `nozzle tiles 4h: ${coarse.slice(0, 8).join(" ")}`);
   });
 });
