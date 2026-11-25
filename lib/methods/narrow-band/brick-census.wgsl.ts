@@ -74,9 +74,9 @@
  *   budget, dt error / h <= UNIFORM_TILE_UPDATE_BUDGET_H; ncCurveShift, the shift a 4h surface's curvature makes,
  *   (4/3) h div n of the tile mean normals, within the same budget (the coordinator's ruling 2026-11-17 and lane F's
  *   oracle: a plane 0, a ball of radius r (16/12)(2/r) cells; the probe's ball, r 14.42, lost 4.3% in 10 steps at
- *   rest without it); ncSurfaceQuiet, the surface's normal speed about the tile within the budget of a 4h cell a step
- *   (the importance: only moving surface, a wave's faces or a splash, is worth h); and no thin trigger (4h cannot
- *   hold a sheet: falling-water-torus lost all its liquid by step 10 without it, 2026-11-17).
+ *   rest without it); and no shape or thin trigger (4h cannot hold a sheet: falling-water-torus lost all its liquid by
+ *   step 10 without it, 2026-11-17). No importance test: how fast the surface moves says nothing of whether 4h holds
+ *   it (ncSurfaceQuiet, 2026-11-23 to 2026-11-26, made the long dam's overturning bore 4h; cdTile).
  * - Counters: the old census words that feed no decision are not kept; the kept ones are H.CENSUS_*.
  */
 import { ARGS, BOX_TOKEN, BrickLayout, H, LIST, brickAbiWGSL, resolveBox } from "./brick-abi";
@@ -1018,29 +1018,6 @@ fn ncTileNormal(q:vec3i)->vec4f{
   let m=length(g);if(!(m>0.0)){return vec4f(0.0);}
   return vec4f(g/m,1.0);
 }
-// The surface's normal speed at tile q (m/s) seen from the tile across direction e (unit, from q towards it): |its mean
-// velocity (TC, the certificate's) . its mean normal| where the surface runs on into that tile (|n . e| <= 3/4: a
-// crest's faces cover the crest) or moves towards it ((u . n)(n . e) > 0: a rising surface covers the air above, a
-// falling one the liquid below); 0 otherwise, and where no surface crosses q. e = 0 is q itself. Still or sliding flat
-// water reads 0; a passing wave's faces read c times their slope; a rippled sheet's surface does not cover the air
-// above where it falls away from it.
-fn ncNormalRate(q:vec3i,e:vec3f)->f32{
-  let n=ncTileNormal(q);if(n.w<0.5){return 0.0;}
-  let s=ncPageSlot(q>>vec3u(3u));let o=NC_S*s+${CENSUS.TC}u+16u*ncTileLocal(q);
-  let u=vec3f(bitcast<f32>(census[o]),bitcast<f32>(census[o+1u]),bitcast<f32>(census[o+2u]));
-  let v=dot(u,n.xyz);let d=dot(n.xyz,e);
-  if(!(abs(d)<=0.75||v*d>0.0)){return 0.0;}
-  let r=abs(v);return select(0.0,r,r<3.0e38);
-}
-// R2's importance (2026-11-23, the user's "only the wave should have fine particles"): a tile is calm only where the
-// surface about it moves along its normal by at most the transport budget of its 4h owner's cell a step: its own rate
-// and its 6 face neighbours' towards it (ncNormalRate). A long swell's surface rises and falls slowly (c times a small
-// slope); a wave's faces move 4h-cell fractions a step.
-fn ncSurfaceQuiet(t:vec3i)->bool{
-  var r=ncNormalRate(t,vec3f(0.0));
-  for(var a=0u;a<3u;a++){var e=vec3i(0);e[a]=1;let f=vec3f(e);r=max(r,max(ncNormalRate(t-e,f),ncNormalRate(t+e,-f)));}
-  return ncDt()*r/(4.0*ncH())<=${UNIFORM_TILE_UPDATE_BUDGET_H};
-}
 fn ncCurveShift(t:vec3i,s:u32,i:u32)->f32{
   let w=census[NC_S*s+${CENSUS.VOL}u+i];if(w==0u){return 0.0;}
   let n0=unpack4x8snorm(w);var div=0.0;
@@ -1539,10 +1516,9 @@ fn cdBodyHeld(t:vec3i)->bool{
   return false;
 }
 const CD_SLACK:f32=1.001;
-` : ""}// ncCurveShift and ncSurfaceQuiet at once, each of the 7 tiles' normal taken once (ncTileNormal: an h tile's VOL word, a
-// 4h tile's corner gradient) and a 4h neighbour's 4 corners on the face it shares with t read from t's: 8 + 4 corner
-// reads a 4h neighbour where the two calls read 8 a normal, 13 normals. The same values in the same order, so the same
-// answer: (!h || shift <= budget) && quiet.
+` : ""}// ncCurveShift's test, each neighbour's normal taken once (ncTileNormal: an h tile's VOL word, a 4h tile's corner
+// gradient) and a 4h neighbour's 4 corners on the face it shares with t read from t's: 4 corner reads a 4h neighbour,
+// not 8. The same values in the same order, so the same answer: !h || shift <= budget.
 struct CdTileRef{s:u32,i:u32,kind:u32}
 fn cdTileRef(q:vec3i)->CdTileRef{
   if(!nbTileInLattice(q)){return CdTileRef(NB_NONE,0u,0u);}
@@ -1590,18 +1566,10 @@ fn cdNormalOf(q:vec3i,r:CdTileRef,v:array<f32,8>,a:u32,u:u32)->vec4f{
   }
   return cdNormal4(w);
 }
-// ncNormalRate with q's normal n given (n.w set only where q holds a slot: r's).
-fn cdRate(r:CdTileRef,n:vec4f,e:vec3f)->f32{
-  if(n.w<0.5){return 0.0;}
-  let o=NC_S*r.s+${CENSUS.TC}u+16u*r.i;
-  let u=vec3f(bitcast<f32>(census[o]),bitcast<f32>(census[o+1u]),bitcast<f32>(census[o+2u]));
-  let v=dot(u,n.xyz);let d=dot(n.xyz,e);
-  if(!(abs(d)<=0.75||v*d>0.0)){return 0.0;}
-  let x=abs(v);return select(0.0,x,x<3.0e38);
-}
-fn cdQuietCurve(t:vec3i,cs:u32,i:u32)->bool{
-  let me=cdTileRef(t);
-  var need=select(0u,255u,me.kind==2u);
+fn cdCurve(t:vec3i,cs:u32,i:u32)->bool{
+  if(!nbTileH(cs,i)){return true;}
+  let w=census[NC_S*cs+${CENSUS.VOL}u+i];if(w==0u){return true;}
+  var need=0u;
   var refs:array<CdTileRef,6>;
   for(var a=0u;a<3u;a++){
     var e=vec3i(0);e[a]=1;
@@ -1613,20 +1581,15 @@ fn cdQuietCurve(t:vec3i,cs:u32,i:u32)->bool{
   }
   var v:array<f32,8>;
   for(var k=0u;k<8u;k++){if(((need>>k)&1u)!=0u){v[k]=cdCornerPhi(t+vec3i(ncCorner(k,2u)));}}
-  var n=vec4f(0.0);
-  if(me.kind==1u){n=cdNormalH(me);}else if(me.kind==2u){n=cdNormal4(v);}
-  var r=cdRate(me,n,vec3f(0.0));
-  let w=census[NC_S*cs+${CENSUS.VOL}u+i];let n0=unpack4x8snorm(w);var div=0.0;
+  let n0=unpack4x8snorm(w);var div=0.0;
   for(var a=0u;a<3u;a++){
-    var e=vec3i(0);e[a]=1;let f=vec3f(e);
+    var e=vec3i(0);e[a]=1;
     let lo=cdNormalOf(t-e,refs[2u*a],v,a,0u);let hi=cdNormalOf(t+e,refs[2u*a+1u],v,a,1u);
-    r=max(r,max(cdRate(refs[2u*a],lo,f),cdRate(refs[2u*a+1u],hi,-f)));
     if(lo.w>0.5&&hi.w>0.5){div+=0.5*(hi[a]-lo[a]);}
     else if(hi.w>0.5){div+=hi[a]-n0[a];}
     else if(lo.w>0.5){div+=n0[a]-lo[a];}
   }
-  let curve=!nbTileH(cs,i)||w==0u||abs(div)/3.0<=${UNIFORM_TILE_UPDATE_BUDGET_H};
-  return curve&&ncDt()*r/(4.0*ncH())<=${UNIFORM_TILE_UPDATE_BUDGET_H};
+  return abs(div)/3.0<=${UNIFORM_TILE_UPDATE_BUDGET_H};
 }
 fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   let t=xTileOf(cs,i);
@@ -1663,19 +1626,23 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   // The hysteresis (coordinator 2026-11-16, "the shortest hysteresis that doesn't flicker"): an h tile (CMASK) is 4h
   // only at its second consecutive calm head (CALM, valid under its workgroup's CALM_KEY); a 4h tile calm now stays 4h.
   // Refining has none: a tile that is not calm bands at once.
-  // Calm means 4h represents the tile's velocity (ncCalm) and its surface's curvature (ncCurveShift), the surface about
-  // it is quiet (ncSurfaceQuiet), and it carries no thin trigger, so R2 never demotes a sheet 4h cannot carry
+  // Calm means 4h represents the tile's velocity (ncCalm) and its surface's curvature (ncCurveShift), and it carries no
+  // thin trigger, so R2 never demotes a sheet 4h cannot carry
   // (falling-water-torus lost all its liquid by step 10 without this, 2026-11-17), and no shape trigger (4h misses the
   // h surface by more than the tolerance): a sheet sliding along itself (the pour's stream) is calm on every measure
-  // above (no second difference of its tile means, |u.n| about 0, flat tile normals), so without this guard R2 demotes
+  // above (no second difference of its tile means, flat tile normals), so without this guard R2 demotes
   // the surface 4h cannot hold and the sheet loses its particles, which live only in h bricks (brick-census-jet.test.ts).
+  // No importance test: ncSurfaceQuiet (2026-11-23 to 2026-11-26) kept h only where the surface about the tile moved
+  // along its normal by more than the budget a step, but a smooth, slow surface still carries a crest about to
+  // overturn, which 4h cannot hold: sparse-cm12-long-dam-break's returning bore at 2 s was a smooth glassy hump, not
+  // bfca93e0's overturning, fragmented crest (crossing tiles 4h at step 150 4.4%, the A/A 0.2-2.8%).
   var toCoarse=false;
   // A source tile is not calm: the drop's liquid arrives this step, after the certificate (lane F's M4). That holds for
   // a joined source tile too: the nozzle's tiles are joined once its plug has filled them, and while 4h they hold no
   // particles, so the stream's lip at the nozzle went 4h (8-11 of the pour's 454 nozzle tiles at every step; 0 now).
   // And an h tile is calm only where its 4h-scale curvature keeps its volume within the budget (ncCurveShift).
   if(band&&head&&!sourceTile&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&ncCalm(t,cs,i)
-     &&cdQuietCurve(t,cs,i)){
+     &&cdCurve(t,cs,i)){
     atomicOr(&wgCalm[lane>>5u],bit);
     let known=census[o+${CENSUS.CALM_KEY}u+(i>>6u)]==nbCRec(cs,NB_REC_KEY)+1u;
     toCoarse=!nbTileH(cs,i)||(known&&(census[o+${CENSUS.CALM}u+word]&bit)!=0u);

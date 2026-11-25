@@ -82,17 +82,14 @@ export interface CensusResult {
   /** Calm band tiles R2's shape and thin guard kept (a shape or thin trigger in FIN). */ shaped: Set<number>;
   /** Calm band h tiles R2's curvature test kept (shift > 0.08), the VOL word (the packed mean normal) of every h tile at
    * a head, and the curvature shift of every band h tile tested. */ volumeKept: Set<number>; vol: Map<number, number>; shift: Map<number, number>;
-  /** Band tiles calm on velocity and curvature that R2's importance (ncSurfaceQuiet) kept. */ loud: Set<number>;
   counters: Record<keyof typeof CENSUS_H, number>; failed: number;
 }
 
 /** The oracle. deep: tiles taking the last census's decision (the old deep COLD branch, l.2852), for the D test.
  * head: a tiered step head with the real D, where R2 (lane E, a stated deviation) makes a calm band tile 4h:
- * dt e / h <= 0.08 on the DEF error (an h tile: and TC word 15) under valid DEF words (ncCalm; an unknown copy is never calm, a dry one is calm), an h
+ * dt e / h <= 0.08 on the DEF error (an h tile: and TC word 15) under valid DEF words (ncCalm; an unknown copy is never calm, nor a dry one), an h
  * tile only at its second consecutive calm head (calmPrev; the hysteresis), a 4h tile at once; an h tile only where its
- * 4h-scale curvature shift (4/3) h div n of the tile mean normals is <= 0.08 (ncCurveShift; VOL the packed normal); and
- * only where the surface's normal speed about the tile, dt |u.n| / 4h, is <= 0.08 (ncSurfaceQuiet: its own, and each
- * face neighbour's whose surface runs on into it or moves towards it). */
+ * 4h-scale curvature shift (4/3) h div n of the tile mean normals is <= 0.08 (ncCurveShift; VOL the packed normal). */
 export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; decided: (t: V3) => boolean }, head = false): CensusResult {
   const { N, h, dt } = s;
   const pageKey = (q: V3) => key(q);
@@ -574,7 +571,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   };
   const demoted = new Set<number>(), calmNow = new Set<number>(), held = new Set<number>();
   // R2's shape and thin guard: calm means 4h holds the geometry (no shape or thin trigger in FIN).
-  const shaped = new Set<number>(), loud = new Set<number>();
+  const shaped = new Set<number>();
   // R2's curvature test: VOL, censusFine's packed mean normal of an h tile (0 without a crossing cell), and the shift.
   const volumeKept = new Set<number>(), vol = new Map<number, number>(), shift = new Map<number, number>();
   const snorm = (x: number) => Math.round(Math.min(Math.max(x, -1), 1) * 127) & 255;
@@ -611,20 +608,6 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     }
     return Math.abs(div) / 3;
   };
-  // e: the unit direction from q towards the tile asking (0: q itself); counted where the surface runs on into it or
-  // moves towards it (ncNormalRate).
-  const normalRate = (q: V3, e: V3 = [0, 0, 0]) => {
-    const n = tileNormal(q); if (n[3] < 0.5) return 0;
-    const cs = pageSlot(shr(q, 3))!, w = s.tc ? s.tc(cs, tileIndex(q)) : [];
-    const v = fromBits(w[0] ?? 0) * n[0] + fromBits(w[1] ?? 0) * n[1] + fromBits(w[2] ?? 0) * n[2], d = n[0] * e[0] + n[1] * e[1] + n[2] * e[2];
-    if (!(Math.abs(d) <= 0.75 || v * d > 0)) return 0;
-    const r = Math.abs(v); return r < 3e38 ? r : 0;
-  };
-  const quiet = (p: V3) => {
-    let r = normalRate(p);
-    for (let a = 0; a < 3; a++) { const e: V3 = [0, 0, 0]; e[a] = 1; r = Math.max(r, normalRate(add(p, e.map(x => -x) as V3), e), normalRate(add(p, e), e.map(x => -x) as V3)); }
-    return dt * r / (4 * h) <= 0.08;
-  };
   const decide = (p: V3, sc: Scratch, i: number) => {
     const band = decideBand(p, sc, i);
     // censusFine writes VOL for every h tile, band or not: the oracle's packed normal of each, compared word for word.
@@ -632,7 +615,6 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     if (band && head && ((sc.fin[i]! & (trig(0) | trig(1))) >>> 0) !== 0) { if (calm(p)) shaped.add(key(p)); return band; }
     if (band && head && tileH(p)) { const d = curveShift(p); shift.set(key(p), d); if (!(d <= 0.08)) { if (calm(p)) volumeKept.add(key(p)); return band; } }
     if (!(band && head && calm(p))) return band;
-    if (!quiet(p)) { loud.add(key(p)); return band; }
     calmNow.add(key(p));
     const cs = s.pages.get(pageKey(shr(p, 3)))!;
     if (!tileH(p) || (s.calmPrev?.(cs, tileIndex(p)) ?? false)) { demoted.add(key(p)); return false; }
@@ -685,7 +667,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
       trigOut.set(fs, bits >>> 0); counters.CENSUS_TRIGGERED += [...Array(8).keys()].filter(j => (bits >> j) & 1).length;
     }
   }
-  return { scratch, want, trig: trigOut, cand, band, demoted, calmNow, held, shaped, volumeKept, vol, shift, loud, counters, failed, thinAlone, defBranches };
+  return { scratch, want, trig: trigOut, cand, band, demoted, calmNow, held, shaped, volumeKept, vol, shift, counters, failed, thinAlone, defBranches };
 }
 
 // ---- The frozen scene: a pool whose surface rolls across h and 4h tiles, a falling drop above it, a run-out
@@ -763,7 +745,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
           defWords[CENSUS.STRIDE * cs + CENSUS.TC + 16 * i + 8] = (r >>> 5) & 3 ? 1 : 0; // TC's wet bit: 3/4 wet
           // TC word 15 (R2's velocity test, the second difference of the tile means): a factor 2 either side of the
           // budget on an independent bit; the mean velocity (words 0..2): still in alternate 4-tile blocks along x, else
-          // vertical at twice the importance budget (dt |u| / 4h = 0.16), so quiet tiles lie inside still blocks.
+          // vertical at dt |u| / 4h = 0.16 (R2 reads no mean velocity: the moving blocks demote as the still ones).
           const tc = CENSUS.STRIDE * cs + CENSUS.TC + 16 * i, t = add(scale3(pageCoord.get(cs)!, 8), [i & 7, (i >> 3) & 7, i >> 6]);
           defWords[tc + 15] = bitsOf(fr(detail * ((r >>> 7) & 1 ? 0.5 : 2) * (1 + 0.3 * u)));
           const loud = ((t[0] >> 2) & 1) === 1;
@@ -921,9 +903,9 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
       }
       assert.equal(volBad, 0, `VOL: ${volBad} tiles off the oracle; ${volMiss.join("; ")}`);
       const shifts = [...withDeep.shift.values()];
-      const hyst = { calm: withDeep.calmNow.size, held: withDeep.held.size, demotedH, demoted4: withDeep.demoted.size - demotedH, thinGuarded: withDeep.shaped.size, loud: withDeep.loud.size, normals, curvatureTested: shifts.length, curvatureKept: withDeep.volumeKept.size, shiftMax: Math.max(...shifts, 0), shiftOver: shifts.filter(d => d > 0.08).length };
+      const hyst = { calm: withDeep.calmNow.size, held: withDeep.held.size, demotedH, demoted4: withDeep.demoted.size - demotedH, thinGuarded: withDeep.shaped.size, normals, curvatureTested: shifts.length, curvatureKept: withDeep.volumeKept.size, shiftMax: Math.max(...shifts, 0), shiftOver: shifts.filter(d => d > 0.08).length };
       // The curvature test measures the scene's curved surface (a plane's shift is 0): it is exercised on both sides.
-      assert.ok(normals > 50 && hyst.shiftOver > 0 && hyst.shiftOver < shifts.length && hyst.loud > 0, JSON.stringify(hyst));
+      assert.ok(normals > 50 && hyst.shiftOver > 0 && hyst.shiftOver < shifts.length, JSON.stringify(hyst));
       console.log("setCensus hysteresis:", JSON.stringify(hyst));
       assert.ok(hyst.held > 0 && hyst.demotedH > 0 && hyst.demoted4 > 0, JSON.stringify(hyst));
       // The shape guard's branch is reached on the old dam's census (brick-census-dam.test.ts); here it must agree.
