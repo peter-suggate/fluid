@@ -97,8 +97,11 @@ test("brick solid walk: setMark keeps NEAR_SOLID, solidStamp marks it", () => {
 // path is the voxel gates' work). Each step must hold: no FAIL latch; no live particle in a closed cell (a mask voxel);
 // no vertex whose eight cells are all mask voxels reads liquid (φ < 0). Over the run, live records must sit in NEAR_SOLID
 // bricks (pSolid's).
-// 1. The shelf: the static-need tank (liquid y < 17, a shelf at y 19..23 over x, z 8..16, a dry block at y 40..48). The
-//    liquid does not meet a solid: its NEAR_SOLID bricks' records are walked without a hit.
+// 1. The shelf: the static-need tank (liquid y < 17, a shelf at y 19..23 over x, z 8..16, a dry block at y 40..48), with
+//    a blob (x 18..26, z 8..16, y 28..34) dropped into it beside the shelf. The liquid does not meet a solid: its
+//    NEAR_SOLID bricks' records are walked without a hit. The blob is the motion: pSeed seeds only a tile the census
+//    heats (FT_T > 0, as the old engine), and a calm tank has none. Its h tiles by the shelf are h by the static need
+//    alone, and since a47cda09's corner authority no spurious TRIG heats them.
 // 2. The ledge: a blob (x, z 8..16, y 30..38) falls onto a block (x, z 4..20, y 0..12) and spreads over it. Its records
 //    hit the block's top and stop at it.
 // The contacts run with P's 0xa2 fix (84b5ecb3: a static solid cell is no pressure row): every step must hold, no latch.
@@ -182,7 +185,7 @@ async function tankRun(t: { diagnostic(s: string): void }, label: string, solids
 }
 
 test("brick solid walk (GPU): the shelf tank's records near the shelf are walked, none in a solid, 30 steps", GPU, async t => {
-  await tankRun(t, "solid walk shelf", [{ lo: [8, 19, 8], hi: [16, 23, 16] }, { lo: [8, 40, 8], hi: [16, 48, 16] }], [{ lo: [0, 0, 0], hi: [32, 17, 32] }], 30, false);
+  await tankRun(t, "solid walk shelf", [{ lo: [8, 19, 8], hi: [16, 23, 16] }, { lo: [8, 40, 8], hi: [16, 48, 16] }], [{ lo: [0, 0, 0], hi: [32, 17, 32] }, { lo: [18, 28, 8], hi: [26, 34, 16] }], 30, false);
 });
 
 test("brick solid walk (GPU): a blob falls onto a ledge and its records stop at the ledge's top, 40 steps", GPU, async t => {
