@@ -206,15 +206,18 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     const defWords = new Uint32Array(await e.read("census"));
     for (let i = 0; i < n; i++) {
       const t = coord(i), k = key(shr(t, 3)), cs = s.pages.get(k)!, at = CENSUS.STRIDE * cs + CENSUS.DEF + 4 * local8(t), c = defCase(i);
-      // The fixture holds no certificate error word (R2's input): the deformation stands in, so R2 demotes a mix.
-      defWords[at] = bitsOf(planDeformation(t)); defWords[at + 1] = bitsOf(planDeformation(t)); defWords[at + 2] = (c === "key" ? k + 2 : k + 1) >>> 0;
+      // The fixture holds no certificate error word (R2's input): the deformation stands in, so R2 demotes a mix; on a
+      // hashed half of the tiles the error is 0 (calm on velocity), so wet crossing tiles reach R2's curvature and
+      // importance tests (a dry tile is never calm).
+      const still = (Math.imul(i + 3, 0xc2b2ae35) >>> 31) === 0, err = still ? 0 : planDeformation(t);
+      defWords[at] = bitsOf(planDeformation(t)); defWords[at + 1] = bitsOf(err); defWords[at + 2] = (c === "key" ? k + 2 : k + 1) >>> 0;
       defWords[at + 3] = bitsOf(c === "width" ? 0 : c === "negative" ? -4 : hOld(t) ? 1 : 4);
       // TC's wet bit (R2 demotes only a tile its certificate saw liquid in): on a hashed 3/4 of the tiles.
       defWords[CENSUS.STRIDE * cs + CENSUS.TC + 16 * local8(t) + 8] = (Math.imul(i + 1, 0x9e3779b1) >>> 29) & 3 ? 1 : 0;
       // TC word 15 (R2's velocity test; the deformation stands in again) and the mean velocity (R2's importance): still,
       // but vertical at twice the importance budget (dt |u| / 4h = 0.16) on a hashed 1/8 of the tiles.
       const tc = CENSUS.STRIDE * cs + CENSUS.TC + 16 * local8(t), r = Math.imul(i + 7, 0x85ebca6b) >>> 0;
-      defWords[tc + 15] = bitsOf(planDeformation(t)); defWords[tc] = bitsOf(0); defWords[tc + 2] = bitsOf(0);
+      defWords[tc + 15] = bitsOf(err); defWords[tc] = bitsOf(0); defWords[tc + 2] = bitsOf(0);
       defWords[tc + 1] = bitsOf((r >>> 29) === 0 ? fr(0.16 * 4 * h / dt) : 0);
     }
     e.write("census", 0, defWords);
@@ -354,7 +357,7 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       if ((m === 1) !== modeR.has(rKey(R))) modeWrong++;
     }
     // R2 (lane E, a stated deviation; 2026-11-23 at the 4h owner's scale): at a step's head a band tile is 4h where its
-    // certificate copy (the supplied DEF words) is valid and either saw no liquid or dt e / h <= 0.08 on its DEF error (an h tile: and TC word 15)
+    // certificate copy (the supplied DEF words) is valid, saw liquid (TC's wet bit), and dt e / h <= 0.08 on its DEF error (an h tile: and TC word 15)
     // (ncCalm); no shape or thin trigger in this census's FIN; an h tile's curvature shift (4/3) h div n of the tile mean normals
     // <= 0.08 (ncCurveShift: an h tile's normal its VOL word, which brick-census.test.ts pins, a 4h tile's the gradient
     // of its 8 stored corners); and dt |u.n| / 4h <= 0.08 over the tile and the faces whose surface runs on into it or moves towards it
@@ -362,7 +365,7 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     const f32w = (u: number) => new Float32Array(new Uint32Array([u]).buffer)[0]!;
     const calm = (cs: number, l: number, fine: boolean) => { const o = S * cs + CENSUS.DEF + 4 * l;
       if (cens[o + 2] !== pageKeys.get(cs)! + 1 || !(f32w(cens[o + 3]!) > 0)) return false;
-      if ((cens[S * cs + CENSUS.TC + 16 * l + 8]! & 1) === 0) return true;
+      if ((cens[S * cs + CENSUS.TC + 16 * l + 8]! & 1) === 0) return false;
       const e = fine ? Math.max(f32w(cens[o + 1]!), f32w(cens[S * cs + CENSUS.TC + 16 * l + 15]!)) : f32w(cens[o + 1]!);
       return e < 3.402823e38 && fr(fr(fr(meta.dt) * e) / fr(meta.h)) <= fr(0.08); };
     const thin = (cs: number, l: number) => (rCensus[S * cs + CENSUS.FIN + l]! & (3 << 16)) !== 0;

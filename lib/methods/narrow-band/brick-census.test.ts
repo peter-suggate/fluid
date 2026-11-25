@@ -567,7 +567,8 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     const cs = tileInLattice(p) ? s.pages.get(pageKey(shr(p, 3))) : undefined; if (cs === undefined) return false;
     const w = s.def ? s.def(cs, tileIndex(p)) : [0, 0, 0, 0];
     if (w[2] !== slotKey.get(cs)! + 1 || !(fromBits(w[3]!) > 0)) return false;
-    if (!(s.wet?.(cs, tileIndex(p)) ?? false)) return true;
+    // A dry band tile (no liquid sample) is never calm: no water for a 4h mean to average.
+    if (!(s.wet?.(cs, tileIndex(p)) ?? false)) return false;
     const e = tileH(p) ? Math.max(fromBits(w[1]!), fromBits((s.tc ? s.tc(cs, tileIndex(p)) : [])[15] ?? 0)) : fromBits(w[1]!);
     return e < PLAN_MAX && fr(fr(dt * e) / h) <= fr(0.08);
   };

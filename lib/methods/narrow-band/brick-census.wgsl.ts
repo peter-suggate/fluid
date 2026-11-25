@@ -1060,12 +1060,15 @@ fn ncCalm(t:vec3i,s:u32,i:u32)->bool{
   // velocities 4h apart, the error it would meet as 4h. Word 15 alone (2026-11-23) cannot see velocity that varies
   // within a tile: sheared flow went and stayed 4h, and sparse-cm12-long-dam-break kept 36-75k of its ~115k particles
   // (either tier's error alone: 52-53k at step 100; brick-census-jet.test.ts). A tile whose valid certificate saw no
-  // liquid (a dry band tile above the surface) has no velocity of its own to represent: it is calm on the velocity
-  // test, and the caller's surface importance (ncSurfaceQuiet, over its neighbours) decides it. No certificate is
-  // never calm.
+  // liquid (a dry band tile, the air beside the surface) is never calm, as the rule above says: it has no water for a
+  // 4h mean to average, so a calm certificate says nothing of what arrives next, the droplets and sheet tips its h
+  // neighbours hold. Calm there (35eb7ee3 to 2026-11-26), the air about the letters' splash went 4h and its droplets
+  // merged (37-58 particle components at step 60, 61-76 now, c515c625's rules after a47cda09 70-75), and
+  // sparse-cm12-long-dam-break's crossing tiles at step 150 were 12-22% 4h (7-10% now).
+  // No certificate is never calm.
   var e=ncError(t,s,i);
   if(!(e<NC_PLAN_MAX)){return false;}
-  if((census[NC_S*s+${CENSUS.TC}u+16u*i+8u]&1u)==0u){return true;}
+  if((census[NC_S*s+${CENSUS.TC}u+16u*i+8u]&1u)==0u){return false;}
   if(nbTileH(s,i)){e=max(e,bitcast<f32>(census[NC_S*s+${CENSUS.TC}u+16u*i+15u]));}
   return e<NC_PLAN_MAX&&ncDt()*e/ncH()<=${UNIFORM_TILE_UPDATE_BUDGET_H};
 }
