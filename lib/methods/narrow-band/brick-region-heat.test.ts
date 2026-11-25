@@ -27,11 +27,12 @@
 //   no child that is not entering, HELD STILL now and the step before; C_ACT is C_ALL without the STILL pages.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_CELLS, BrickLayout, F_CLASS, H, LIST, REC } from "./brick-abi";
+import { BRICK_CELLS, BrickLayout, F_CLASS, H, LIST, NONE, REC } from "./brick-abi";
 import { BrickEngine, type BrickEngineState } from "./brick-engine";
 import { CENSUS, REGION_H, RG, brickCensusSchedule } from "./brick-census.wgsl";
 import { BRICK_STILL, REGION_HEAT, RG_STILL_BIT, brickRegionHeatSchedule } from "./brick-region-heat.wgsl";
 import { fluidStagesAt } from "./brick-fluid-stages";
+import { fluidLayout } from "./fluid-grid.wgsl";
 import { compositeMGPCG } from "./brick-pressure-solver";
 import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { snapshot } from "./brick-readback";
@@ -437,5 +438,53 @@ test("still pages (GPU): the reservoir's region still bits, the coldSurface stil
     await e.assertHealthy();
     e.destroy();
    }
+  });
+});
+
+// eddd223e put lDilateC on C_ACT's dispatch with C_ALL's count and slots: with STILL pages it ran C_ALL's first |C_ACT|
+// entries. Bit 31 of a DIL4 word is never written (lDilateC writes bits 0..30) and no reader sees it, so it marks
+// every word, the step runs unchanged, and a cleared bit is a word lDilateC wrote this step.
+test("lDilateC (GPU): with STILL pages (C_ACT < C_ALL) it writes exactly C_ACT's pages' absent tiles", { skip: GPU.skip || !BRICK_STILL }, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("lDilateC C_ACT", async device => {
+    const { setup: dam, values } = damSetup();
+    const N = dam.lattice;
+    // A resting reservoir (its pages go STILL) and a falling block in one corner (its pages and their neighbours act):
+    // each step marked, until a step runs with both.
+    const setup: BrickSceneSetup = { ...dam, liquid: [{ lo: [-8, -8, -8], hi: [N[0] + 8, 40, N[2] + 8] }, { lo: [8, 56, 8], hi: [24, 72, 24] }] };
+    const e = await engineFor(device, setup, values);
+    const L = e.layout, at = fluidLayout(L, { tiered: true }).fcell.DIL4, n = 512 * L.cap.c;
+    const tally = { steps: 0, mixed: 0, still: 0, act: 0, absent: 0 };
+    for (let step = 0; step < 80 && tally.mixed < 4; step++) {
+      await e.fence();
+      const marked = (await e.read("fcell", at, n)).map(w => (w | 0x80000000) >>> 0);
+      e.write("fcell", at, marked);
+      e.advance(1); await e.assertHealthy();
+      const s = await snapshot(e), dil = await e.read("fcell", at, n);
+      const all = s.list(LIST.C_ALL), act = new Set(s.list(LIST.C_ACT));
+      tally.steps++;
+      if (act.size === 0 || act.size === all.length) continue;
+      tally.mixed++;
+      for (const cs of all) {
+        const key = s.dir[L.dir.crec + 32 * cs + REC.KEY]!, P = [key & 1023, (key >>> 10) & 1023, (key >>> 20) & 1023];
+        if (!act.has(cs)) {
+          tally.still++;
+          for (let i = 0; i < 512; i++) assert.ok(dil[512 * cs + i]! >>> 31, `step ${step}: STILL page ${P}: tile ${i}'s DIL4 word written`);
+          continue;
+        }
+        tally.act++;
+        for (let i = 0; i < 512; i++) {
+          const t = [8 * P[0]! + (i & 7), 8 * P[1]! + ((i >> 3) & 7), 8 * P[2]! + (i >> 6)];
+          if (t.some((v, a) => 4 * v >= N[a]!)) continue;
+          const b = t.map(v => (v >> 1) & 3), child = s.dir[L.dir.child + 64 * cs + (b[0]! | (b[1]! << 2) | (b[2]! << 4))]!;
+          if (child !== NONE) continue;
+          tally.absent++;
+          assert.equal(dil[512 * cs + i]! >>> 31, 0, `step ${step}: C_ACT page ${P}: absent tile ${t}'s DIL4 word not written`);
+        }
+      }
+    }
+    console.log(`lDilateC over C_ACT, lattice ${N}: ${JSON.stringify(tally)}`);
+    assert.ok(tally.mixed > 0 && tally.still > 0 && tally.absent > 0, "steps with STILL pages and C_ACT pages with absent tiles");
+    e.destroy();
   });
 });

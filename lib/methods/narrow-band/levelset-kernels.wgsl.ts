@@ -519,7 +519,8 @@ fn lAbsentWord(t:vec3i)->u32{
  }
 }`);
 
-  // lDilateC (tiered): cfg.w = the round. A workgroup a C page (C_ALL, G1), before the round's lDilate x pass: for
+  // lDilateC (tiered): cfg.w = the round. A workgroup a C_ACT page (C_ACT, G1: its count and its slots, as
+  // pagesAct dispatches it; a STILL page's DIL4 words keep their last write), before the round's lDilate x pass: for
   // each tile of the page that no F slot holds, its source flags and lDilate's x and y passes (DA, DB), into DIL4.
   // The sources are staged over the page's 8^3 tiles and 5 more each way in x and y (18 x 18 x 8): an F tile's
   // flags (lTiles, lClear), and an absent tile's from its eight C corners: air seed where one is at or under 0,
@@ -566,9 +567,9 @@ fn dSource(t:vec3i,x:u32,y:u32,z:u32)->u32{
 }
 @compute @workgroup_size(256) fn lDilateC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);
- if(lid==0u){sCount=nbListCount(NB_LIST_C_ALL);}
+ if(lid==0u){sCount=nbListCount(NB_LIST_C_ACT);}
  if(g>=workgroupUniformLoad(&sCount)){return;}
- let slot=nbListSlot(NB_LIST_C_ALL,g);let P=nbCOrigin(slot)>>vec3u(2u);let round=cfg.w;
+ let slot=nbListSlot(NB_LIST_C_ACT,g);let P=nbCOrigin(slot)>>vec3u(2u);let round=cfg.w;
  let mask=select(0xff0u,15u,round==2u);
  for(var i=lid;i<513u;i+=256u){atomicStore(&dV[i],0u);}
  for(var i=lid;i<432u;i+=256u){atomicStore(&dS[i],0u);}

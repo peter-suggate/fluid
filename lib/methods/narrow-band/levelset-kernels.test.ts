@@ -5,7 +5,7 @@
  * test checks that each round's lDilateC runs after its sources' writers and before the round's x pass. */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BrickLayout } from "./brick-abi";
+import { ARGS, BrickLayout, LIST } from "./brick-abi";
 import { fluidStagesAt } from "./brick-fluid-stages";
 import { fluidLayout } from "./fluid-grid.wgsl";
 
@@ -158,4 +158,31 @@ test("the redistance's crossings are open cells outside body bricks (arenaCross:
     // A body brick keeps its closed cells as crossings (umVertexBuried, the exclusion's partner, is not ported).
     assert.match(clear.code, /let bodyBrick=\(nbFRec\(slot,NB_REC_CLASS\)&\(NB_CLASS_NEAR_BODY\|NB_CLASS_BODY_WAS\)\)!=0u;/, `lClear: the body brick rule (tiered ${tiered})`);
   }
+});
+
+// eddd223e moved lDilateC's dispatch to C_ACT (pagesAct) but left its count and slots on C_ALL: with STILL pages
+// (C_ACT < C_ALL) it ran C_ALL's first |C_ACT| entries. Every list placement's C pages are the list its dispatch
+// counts: a kernel on a C_ACT word (C_ACT's own, FCA, FCA2, C_ACT4, C_ACT2) reads C_ACT's count and slots only, one on a
+// C_ALL word (C_ALL's own, FC, FA, C_ALL2) C_ALL's only.
+test("every tiered fluid placement reads the C list its dispatch counts (C_ACT or C_ALL)", () => {
+  const L = new BrickLayout({ lattice: [128, 128, 128], f: 600, c: 40, b: 0, k: 0, particles: 1 << 16 });
+  const stages = fluidStagesAt(true)({ layout: L, values: { volumeControlSeconds: 0 }, fluid: { viscosity_Pa_s: 1e-3, density_kg_m3: 1000, surfaceTension_N_m: 0 } } as never);
+  type P = { kernel: { label: string; code: string }; dispatch: { indirect?: number } };
+  const s = stages as unknown as { move: P[]; rebin: P[]; levelSet: P[]; velocity: P[]; tail: P[]; boot: P[]; kick: { force: P[]; after: P[]; seed: P[] } };
+  const all = [...s.move, ...s.rebin, ...s.levelSet, ...s.velocity, ...s.tail, ...s.boot, ...s.kick.force, ...s.kick.after, ...s.kick.seed];
+  const span = (from: number, n: number) => (w: number) => w >= from && w < from + n;
+  const act = [span(ARGS.PER_LIST * LIST.C_ACT, ARGS.PER_LIST), span(ARGS.FCA_G1, 9), span(ARGS.FCA2_G1, 3), span(ARGS.C_ACT4_G1, 3), span(ARGS.C_ACT2_G1, 3)];
+  const whole = [span(ARGS.PER_LIST * LIST.C_ALL, ARGS.PER_LIST), span(ARGS.FC_G1, 9), span(ARGS.FA_G1, 9), span(ARGS.C_ALL2_G1, 3)];
+  const seen = new Set<string>();
+  for (const p of all) {
+    const w = p.dispatch.indirect;
+    if (w === undefined) continue;
+    const want = act.some(f => f(w)) ? "C_ACT" : whole.some(f => f(w)) ? "C_ALL" : undefined;
+    if (!want) continue;
+    const reads = new Set([...p.kernel.code.matchAll(/nbList(?:Count|Slot)\(NB_LIST_(C_ALL|C_ACT)\b/g)].map(m => m[1]));
+    assert.deepEqual([...reads], [want], `${p.kernel.label} (args word ${w}) reads ${[...reads].join(", ") || "no C list"}, its dispatch counts ${want}`);
+    seen.add(`${p.kernel.label}:${want}`);
+  }
+  for (const l of ["lDilateC", "uExt4Seed", "uExt4", "uAdvect", "uTransfer", "uViscous", "lcAdvect", "lcCouple", "lcRetire", "lcClear", "lcPublish"])
+    assert.ok(seen.has(`${l}:C_ACT`), `${l} is on a C_ACT word`);
 });
