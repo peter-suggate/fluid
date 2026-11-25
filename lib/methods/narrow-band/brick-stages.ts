@@ -38,6 +38,14 @@ export interface BrickStages {
   readonly tiered?: boolean;
   /** Part 1, after the head: the particle move. */
   readonly move: readonly BrickPlacement[];
+  /**
+   * Tiered: F's shared-vertex resolve (lResolve: every F slot's non-owned PHI words take their owner-resolved φ,
+   * fluid-grid.wgsl.ts FG_PHI_WGSL). The set update and the transfer change the ownership the words depend on, so the
+   * engine places it after the head's transfer (before the certificate, the stamp and `move`), and at boot before the
+   * boot's census: the head's resolved-φ readers (brick-owner.wgsl.ts resolvedOwnerReads) and the move read resolved
+   * words. Absent: no resolve (all-h, where every vertex is F's own).
+   */
+  readonly resolve?: readonly BrickPlacement[];
   /** Part 1: the rebin (counts, scan, scatter; raises BOUND_F from particle speeds). */
   readonly rebin: readonly BrickPlacement[];
   /** Part 2, after the brick set: advection, reconstruction and redistance of phi. */

@@ -97,7 +97,9 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   // Tiered, the re-entry seed (pSeed cfg.w = 2) into the source bank (z = 1: pSrc ^ 1 at z = 1 is part 1's source).
   // Then the move's arguments (pArgs w = 0: the source's records, so the head's refined tiles' seeds move and bin
   // this step), which also empty the destination bank, every move (brick-particle-banks.test.ts).
-  const move = runs([[T.moveCaches, [...resolve, ...cache]],
+  // The move's resolve is the engine's (stages.resolve: after the head's transfer, before the certificate), so the
+  // move starts from resolved words.
+  const move = runs([[T.moveCaches, [...cache]],
     [T.move, [at(p.pLiquid, all), ...(tiered ? [at(p.pSeed, all, 1, 2)] : []), args(0, 0), at(p.pSeparate, records), at(p.pMove, records), ...(p.pSolid ? [at(p.pSolid, records)] : [])]]]);
   const levelSet = runs([
     [T.levelAdvect, [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, allX8), ...(l.phiSolid ? [at(l.phiSolid, allX8)] : []), ...coarse("lcAdvect")]],
@@ -111,6 +113,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const stages: BrickStages = {
     label: tiered ? "lane F (NB-FLIP tiered)" : "lane F (NB-FLIP all-h)", bringUp: false, tiered,
     move: move.list,
+    ...(resolve.length ? { resolve } : {}),
     rebin: rebin(0),
     levelSet: levelSet.list,
     velocity: velocity.list,

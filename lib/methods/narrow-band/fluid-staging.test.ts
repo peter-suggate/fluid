@@ -11,6 +11,9 @@ import { fluidLayout } from "./fluid-grid.wgsl";
 import { levelSetKernels } from "./levelset-kernels.wgsl";
 import { particleKernels } from "./particles-kernels.wgsl";
 import { velocityKernels } from "./velocity-kernels.wgsl";
+import { BrickEngine } from "./brick-engine";
+import { brickPressureSolver } from "./brick-pressure-solver";
+import { RESOLVED_OWNER_KERNELS, RESOLVED_OWNER_MARK } from "./brick-owner.wgsl";
 
 const STAGE = /\b(fgWindowStage|fgWindowStageAt|fgRingStage)\(/g;
 
@@ -122,51 +125,78 @@ test("FC_UNIT: every reader runs after uCache, with no US writer between", () =>
   assert.ok(readers >= 12 && writers >= 2 && usWriters >= 6, `${readers} FC_UNIT readers, ${writers} writers, ${usWriters} US writers`);
 });
 
-/** Resolved φ (fluid-grid.wgsl.ts FG_PHI_WGSL): tiered, a non-owned vertex's PHI word is exact only between the
- * lResolve after the last writer of what it depends on (a C PHI writer, or the set update before a schedule) and
- * the next such writer. Every kernel that reads resolved words (FG_PHI_RESOLVED on, or a staged ring) must run in
- * such a span. */
-test("resolved φ: no resolved read before the schedule's lResolve or after a C PHI write without one", () => {
+/** Resolved φ (fluid-grid.wgsl.ts FG_PHI_WGSL, brick-owner.wgsl.ts resolvedOwnerReads): tiered, a non-owned vertex's
+ * PHI word is exact only between the lResolve after the last writer of what it depends on and the next such writer:
+ * a C PHI writer (lcCouple, lcClear, lcPublish), or the set update (the ownership and the F set: claims, leaves, a new
+ * slot's words, the transfer's remap, the mask commit; bootPhi). Every kernel that reads resolved words (FG_PHI_RESOLVED
+ * on, a staged ring, lcAdvect's lcFResolved, an owner reader resolvedOwnerReads opted in) must run in such a span of
+ * the engine's own schedule: the boot, then the step's part 1 and part 2 twice (the head reads the last step's words).
+ * Every writer of F PHI, C PHI or the directory is classified here, so a new one fails until it is. */
+type SK = { label: string; code: string };
+const C_PHI = new Set(["lcCouple", "lcClear", "lcPublish"]), C_PHI1 = new Set(["lcAdvect", "lcRetire", "lcRetireLong"]);
+const SET_UPDATE = new Set(["setClaimPages", "setClaimBricks", "setLeave", "setLeavePages", "setInit", "setTransferCells", "setCommitMask", "bootPhi"]);
+// F PHI writers of owned vertices only (lSetPhi's rule; lUnion's own guard): a resolved word stays its owner's.
+const OWNED_F = new Set(["lUnion"]);
+// Directory writers that change no owner a reader resolves: the records and lists (setRecords, setLists), the class
+// words (setMark, setMarkPages, regionStill's COLD) and resMark's claim marks (NONE -> CLAIM: absent either way).
+const DIR_RECORDS = new Set(["setRecords", "setLists", "setMark", "setMarkPages", "regionStill", "resMark"]);
+const writesF = (k: SK) => /phi\[NB_PHI_F_PHI\+[^\]]*\]\s*=[^=]/.test(k.code);
+const writesCRaw = (k: SK) => /phi\[NB_PHI_C_PHI\+[^\]]*\]\s*=[^=]|lcSetC\(NB_PHI_C_PHI,/.test(k.code);
+const writesDir = (k: SK) => /atomic(Store|Exchange|CompareExchangeWeak|Or|And|Add)\(&dir\[|\bdir\[[^\]]*\]\s*=[^=]/.test(k.code);
+const readsResolved = (k: SK) => k.code.includes("const FG_PHI_RESOLVED:bool=true;") || /\bfgRingStage\(/.test(k.code.replace(/fn fgRingStage\(/g, ""))
+  || (k.label === "lcAdvect" && k.code.includes("fn lcFResolved(")) || k.code.includes(RESOLVED_OWNER_MARK);
+/** Whether k ends a fresh span (a C PHI writer or the set update), after checking it is classified. */
+const invalidates = (k: SK) => {
+  if (k.label === "lResolve" || k.label === "lResolveD") return false;
+  if (writesF(k)) assert.ok(OWNED_F.has(k.label) || SET_UPDATE.has(k.label), `${k.label} writes F PHI words and is not classified`);
+  if (!C_PHI.has(k.label) && !C_PHI1.has(k.label) && writesCRaw(k)) assert.ok(SET_UPDATE.has(k.label), `${k.label} writes C vertices and is not classified`);
+  if (writesDir(k)) assert.ok(SET_UPDATE.has(k.label) || DIR_RECORDS.has(k.label), `${k.label} writes the directory and is not classified`);
+  return C_PHI.has(k.label) || SET_UPDATE.has(k.label);
+};
+/** The resolved readers of `list` that run while a non-owned word may be stale ("label@index"), from `fresh`. */
+const staleResolvedReads = (list: readonly SK[], fresh: boolean) => {
+  const stale: string[] = [];
+  let prev = "", phiWriters: string[] = [];
+  list.forEach((k, i) => {
+    // lResolveD re-resolves only what the analysis's clear changed: since the lResolve before it, PHI's only writers
+    // are lClear and lcClear (whose stamps it reads), and it follows lcClear.
+    if (k.label === "lResolveD") {
+      assert.ok(prev === "lcClear", `lResolveD follows ${prev}, not lcClear`);
+      assert.deepEqual([...new Set(phiWriters)].sort(), ["lClear", "lcClear"], `PHI writers since the last lResolve: ${phiWriters.join(",")}`);
+    }
+    if (k.label === "lResolve" || k.label === "lResolveD") { fresh = true; prev = k.label; phiWriters = []; return; }
+    if (/phi\[NB_PHI_[FC]_PHI\+[^\]]*\]\s*=[^=]|lSetPhi\(NB_PHI_F_PHI,|lcSetC\(NB_PHI_C_PHI,/.test(k.code)) phiWriters.push(k.label);
+    if (readsResolved(k) && !fresh) stale.push(`${k.label}@${i}`);
+    if (invalidates(k)) fresh = false;
+    prev = k.label;
+  });
+  return { stale, fresh };
+};
+
+test("resolved φ: every resolved reader of the engine's boot and step runs after an lResolve with no stale-making writer between", () => {
   const L = new BrickLayout({ lattice: [128, 128, 128], f: 600, c: 40, b: 0, k: 0, particles: 1 << 16 });
-  type K = { label: string; code: string };
-  // lcAdvect's taps read F's PHI words (lcFResolved); the C kernels share one module text, so it counts by entry.
-  const resolved = (k: K) => k.code.includes("const FG_PHI_RESOLVED:bool=true;") || /\bfgRingStage\(/.test(k.code.replace(/fn fgRingStage\(/g, ""))
-    || (k.label === "lcAdvect" && k.code.includes("fn lcFResolved("));
-  // Lane E's C kernels share one module text, so their writes are classified by entry (levelset-coarse.wgsl.ts):
-  // C PHI by lcCouple, lcClear and lcPublish; PHI1 only by lcAdvect, lcRetire and lcRetireLong (lcRetire's listed
-  // vertices). Any other C writer fails here.
-  const C_PHI = new Set(["lcCouple", "lcClear", "lcPublish"]), C_PHI1 = new Set(["lcAdvect", "lcRetire", "lcRetireLong"]);
-  const writesC = (k: K) => {
-    if (C_PHI.has(k.label)) return true;
-    if (C_PHI1.has(k.label)) return false;
-    assert.ok(!/lcSetC\(/.test(k.code) && !/phi\[NB_PHI_C_PHI1?\+[^\]]*\]\s*=[^=]/.test(k.code), `${k.label} writes C vertices and is not classified`);
-    return false;
-  };
+  const solver = brickPressureSolver!(L);
   let readers = 0, resolves = 0;
   for (const viscosity_Pa_s of [0, 1e-3]) {
-    const stages = fluidStagesAt(true)({ layout: L, values: { volumeControlSeconds: 0 }, fluid: { viscosity_Pa_s, density_kg_m3: 1000, surfaceTension_N_m: 0 } } as never) as unknown as Record<string, unknown>;
-    const of = (list: unknown) => ((list as { kernel: K }[] | undefined) ?? []).map(p => p.kernel);
-    const kick = stages.kick as Record<string, unknown>;
-    // Each list starts after a possible set update or census (stale until its lResolve).
-    const schedules = { step: ["move", "rebin", "levelSet", "velocity", "tail"].flatMap(s => of(stages[s])), boot: of(stages.boot), kickForce: [...of(kick.force), ...of(kick.after)], kickSeed: of(kick.seed) };
-    for (const [name, list] of Object.entries(schedules)) {
-      let fresh = false, prev = "", phiWriters: string[] = [];
-      const writesPhi = (k: K) => /phi\[NB_PHI_[FC]_PHI\+[^\]]*\]\s*=[^=]|lSetPhi\(NB_PHI_F_PHI,|lcSetC\(NB_PHI_C_PHI,/.test(k.code);
-      for (const k of list) {
-        // lResolveD re-resolves only what the analysis's clear changed: since the lResolve before it, PHI's only
-        // writers are lClear and lcClear (whose stamps it reads), and it follows lcClear.
-        if (k.label === "lResolveD") {
-          assert.ok(prev === "lcClear", `${name}: lResolveD follows ${prev}, not lcClear`);
-          assert.deepEqual([...new Set(phiWriters)].sort(), ["lClear", "lcClear"], `${name}: PHI writers since the last lResolve: ${phiWriters.join(",")}`);
-          fresh = true; resolves++; prev = k.label; phiWriters = []; continue;
-        }
-        if (k.label === "lResolve") { fresh = true; resolves++; prev = k.label; phiWriters = []; continue; }
-        if (writesPhi(k)) phiWriters.push(k.label);
-        if (resolved(k)) { readers++; assert.ok(fresh, `${name}: ${k.label} reads resolved φ while a non-owned word may be stale`); }
-        if (writesC(k)) fresh = false;
-        prev = k.label;
-      }
-    }
+    const stages = fluidStagesAt(true)({ layout: L, values: { volumeControlSeconds: 0 }, fluid: { viscosity_Pa_s, density_kg_m3: 1000, surfaceTension_N_m: 0 } } as never);
+    const s = BrickEngine.scheduleFor(L, solver, stages, 1);
+    const of = (list: readonly { kernel: SK }[]) => list.map(p => p.kernel);
+    // The boot starts stale (no word resolved); each step reads the last one's state.
+    const run = [...of(s.boot), ...of(s.part1), ...of(s.part2), ...of(s.part1), ...of(s.part2)];
+    const { stale } = staleResolvedReads(run, false);
+    assert.deepEqual(stale, [], `viscosity ${viscosity_Pa_s}: resolved reads in a stale span`);
+    readers += run.filter(readsResolved).length; resolves += run.filter(k => k.label === "lResolve" || k.label === "lResolveD").length;
+    // The head's owner readers opted in (brick-owner.wgsl.ts resolvedOwnerReads).
+    for (const label of RESOLVED_OWNER_KERNELS) assert.ok(run.some(k => k.label === label && k.code.includes(RESOLVED_OWNER_MARK)), `${label} reads resolved φ`);
+    // The reverse: the step without the resolve after the transfer strands the move.
+    const head = of(s.part1), at = head.findIndex(k => k.label === "lResolve");
+    assert.ok(at > head.findIndex(k => k.label === "setCommitMask") && at < head.findIndex(k => k.label === "certCoarse"), "part 1's lResolve sits between the transfer's commit and the certificate");
+    const cut = [...head.slice(0, at), ...head.slice(at + 1)];
+    const strand = staleResolvedReads([...of(s.part2), ...cut], true).stale;
+    assert.ok(strand.some(r => r.startsWith("pMove@")), `without it the move reads stale words (${strand.join(", ")})`);
+    // And a reader moved past a C PHI writer is caught.
+    const lc = of(s.part2), couple = lc.findIndex(k => k.label === "lcCouple"), reader = head.find(k => k.label === "pMove")!;
+    assert.deepEqual(staleResolvedReads([...lc.slice(0, couple + 1), reader], true).stale, [`pMove@${couple + 1}`], "a reader after lcCouple without an lResolve is stale");
   }
-  assert.ok(readers >= 20 && resolves >= 8, `${readers} resolved readers, ${resolves} lResolve placements`);
+  assert.ok(readers >= 60 && resolves >= 16, `${readers} resolved readers, ${resolves} lResolve placements`);
 });

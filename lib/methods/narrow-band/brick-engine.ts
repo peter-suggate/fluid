@@ -492,13 +492,17 @@ export class BrickEngine {
       { kernel: set.setKRelease, dispatch: list(LIST.F_ALL, "G64"), z: 0 },
       { kernel: set.setKRelease, dispatch: list(LIST.F_LEAVE, "G64"), z: 1 },
     ] : [])];
+    // Tiered, F's resolve (BrickStages.resolve) after the transfer and before the boot's census: the ownership the
+    // resolved words depend on is final for the step there (the stamp writes flags only), so the certificate, the
+    // stamp, the release port and the move read resolved words; the boot's census follows bootPhi's analytic F words.
+    const resolveHead: BrickPlacement[] = tiered ? [...(stages.resolve ?? [])] : [];
     const headRuns: (readonly [BrickPhase, readonly BrickPlacement[]])[] = censused ? [
       // A detail engine's mask turns first (brick-residency.wgsl.ts detailRefresh): its cells' OPEN as the mask's.
       [T.census, [...(res.detailRefresh ? [{ kernel: res.detailRefresh, dispatch: direct(64) }] : []), ...headCensus()]], [T.residency, [...residency, ...tail, ...lists(1), ...want]],
-      [T.transfer, tiered ? [...transfer, ...(heat?.cert ?? [])] : certificate], [T.stamp, [...stamp, churnClear]],
+      [T.transfer, tiered ? [...transfer, ...resolveHead, ...(heat?.cert ?? [])] : certificate], [T.stamp, [...stamp, churnClear]],
     ] : [];
     const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
-    const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists(2), ...want, ...commit] : census(false);
+    const bootHead = tiered ? [...resolveHead, ...census(false), ...update(0), ...tail, bootPhi, ...lists(2), ...want, ...commit] : census(false);
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,
     // F's after; with F's seed, a TRIG-only census of the kicked state (brickTrigCensusSchedule), then the seed.
     const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, censusHold, frame, mask?.walls) : [];

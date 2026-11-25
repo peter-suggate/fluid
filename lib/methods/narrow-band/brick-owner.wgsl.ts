@@ -57,6 +57,36 @@ export const brickOwnerWGSL = (n: BrickOwnerNames = { phi: "phi", vel: "vel" }) 
   return code;
 };
 
+/** The resolved-φ reads (fluid-grid.wgsl.ts FG_PHI_WGSL's resolved words, 2026-11-25): an F slot's PHI word holds every
+ * vertex of the slot at its owner-resolved value between an lResolve and the next writer of what a non-owned word
+ * depends on (C PHI, the tile ownership or the set). In such a span nbVertexPhi, the operator's staged poVertexS and
+ * censusDecide's cdCornerPhi read a vertex an F slot holds as that one word (FLAT, then PHI: two dependent loads, where
+ * the authority walk takes 4 to 17), the same value bit for bit, and walk the owners only where no F slot holds it.
+ * A NEAR_SOLID brick's wall view (BrickOwnerNames.view) reads PHI1 at its owned vertices, so it walks. A kernel opts
+ * in with resolvedOwnerReads on its module text; fluid-staging.test.ts checks every such kernel sits in a fresh span
+ * of the engine's step and boot (RESOLVED_OWNER_MARK). All-h every vertex is F's own, so the word is the walk's. */
+export const RESOLVED_OWNER_MARK = "fn nbResolvedWord(";
+const RESOLVED_WORD = "fn nbResolvedWord(s:u32,v:vec3i)->f32{return bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);}\n";
+const RESOLVED_HEADS: readonly (readonly [string, string])[] = [
+  ["fn nbVertexPhi(v:vec3i)->f32{\n  if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_FAR;}\n",
+    "  {let s=nbFSlotOfBrick(v>>vec3u(3u));if(s<NB_SEAM&&nbFPhiBase(s)==NB_PHI_F_PHI){return nbResolvedWord(s,v);}}\n"],
+  ["fn poVertexS(v:vec3i,o:vec3i)->f32{\n  if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_FAR;}\n",
+    "  {let s=poSB[poIndex((v>>vec3u(3u))-(o>>vec3u(3u))+vec3i(1),3)];if(s<NB_SEAM&&nbFPhiBase(s)==NB_PHI_F_PHI){return nbResolvedWord(s,v);}}\n"],
+  ["fn cdCornerPhi(T:vec3i)->f32{\n  let v=4*T;\n  if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_FAR*cH;}\n",
+    "  {let s=nbFSlotOfBrick(v>>vec3u(3u));if(s<NB_SEAM){return nbResolvedWord(s,v)*cH;}}\n"],
+];
+/** A kernel's module text with its owner φ readers resolved-first (above). Throws where the text holds none of them. */
+export const resolvedOwnerReads = (label: string, code: string): string => {
+  let out = code, hits = 0;
+  for (const [head, fast] of RESOLVED_HEADS) if (out.includes(head)) { out = out.replace(head, head + fast); hits++; }
+  if (!hits) throw new Error(`brick-owner: ${label} holds no owner φ reader to resolve (nbVertexPhi, poVertexS, cdCornerPhi)`);
+  return out + "\n" + RESOLVED_WORD;
+};
+/** The kernels that opt in (fluid-staging.test.ts asserts each reads resolved φ in the engine's schedule). */
+export const RESOLVED_OWNER_KERNELS: readonly string[] = [];
+/** The kernel with resolvedOwnerReads on its text. */
+export const resolvedOwnerKernel = <K extends { readonly label: string; readonly code: string }>(k: K): K => ({ ...k, code: resolvedOwnerReads(k.label, k.code) });
+
 const ownerCode = (n: BrickOwnerNames) => /* wgsl */`
 fn nbTileInLattice(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<NB_LATTICE);}
 fn nbTileIndex(t:vec3i)->u32{let q=vec3u(t&vec3i(7));return q.x|(q.y<<3u)|(q.z<<6u);}

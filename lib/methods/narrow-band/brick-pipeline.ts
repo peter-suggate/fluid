@@ -32,7 +32,7 @@ const stages: FluidPipelineStage[] = [
   {
     id: "brick-transfer", band: "head", side: "left", label: "Tier transfer + certificate", phaseLabels: [T.transfer.label], state: always,
     chip: () => "h ↔ 4h ownership",
-    tip: { summary: "Tiered: the transfer moves owned values between the h bricks and 4h pages the census promoted or retired, then the error certificate. All-h: the certificate alone, for the census's need rule.", timing: "setTransfer*, setCommitMask, certFine, certError", reads: "WANT, phi, velocity", writes: "owners, certificate" },
+    tip: { summary: "Tiered: the transfer moves owned values between the h bricks and 4h pages the census promoted or retired, then the error certificate. All-h: the certificate alone, for the census's need rule.", timing: "setTransfer*, setCommitMask, lResolve (tiered: the shared-vertex resolve the certificate and the move read), certFine, certError", reads: "WANT, phi, velocity", writes: "owners, certificate" },
   },
   {
     id: "brick-stamp", band: "head", side: "right", label: "Solid + body stamp", phaseLabels: [T.stamp.label], state: always,
@@ -43,7 +43,7 @@ const stages: FluidPipelineStage[] = [
   {
     id: "brick-move-caches", band: "particles", side: "left", label: "Sampling caches", phaseLabels: [T.moveCaches.label], state: always,
     chip: () => "opening state",
-    tip: { summary: "The level set's release reach words, the shared-vertex resolve and the samplers' caches of the step's opening velocity, read by the particle move.", timing: "release reach, lResolve, uCache, uCache4" },
+    tip: { summary: "The level set's release reach words and the samplers' caches of the step's opening velocity, read by the particle move (the shared-vertex resolve runs with the transfer).", timing: "release reach, uCache, uCache4" },
   },
   {
     id: "brick-move", band: "particles", side: "right", label: "Particle move", phaseLabels: [T.move.label], state: always,
