@@ -285,13 +285,11 @@ test("census replay (GPU): under gravity a still reservoir's deep regions hold t
     }
     console.log(`census replay, g = ${g}: ${deepRegions} deep regions classify: stamp held ${stampHeld}, a key moved ${keyMoved} (largest move ${moveMax.toExponential(2)} m/s)`);
     if (g) {
-      // The projection's residual moves every submerged face's bits each step: every deep region in the reservoir is
-      // demoted. The still air the residency keeps above it (the page sources' 20 cells past the 4h liquid,
-      // brick-residency.wgsl.ts) has no moving key, so a deep region there replays: every replayed region lies wholly
-      // above the surface.
-      const surface = setup.liquid[0]!.hi[1]!;
-      assert.ok(deepRegions > 0); assert.equal(stampHeld, deepRegions); assert.equal(keyMoved, deepRegions);
-      for (const [cs, r] of replayed) assert.ok(16 * rgCoord(cs, r)[1]! >= surface, `replayed region ${rgCoord(cs, r)} is below the surface (${surface})`);
+      // Since cd582538 the native rows carry their residual in face-difference form, exact in f32 for hydrostatics: the
+      // still column stays at rest to the bit (bulk-rest-tank max|u| 4e-3 to 9e-7 m/s), no submerged key moves, and the
+      // deep regions replay under gravity as without it. A deep region that does classify held its stamp and saw a key move.
+      assert.equal(stampHeld, deepRegions); assert.equal(keyMoved, deepRegions);
+      assert.ok(replayed.length > 0, "under gravity a still reservoir replays");
       e.destroy(); continue;
     }
     assert.ok(replayed.length > 0, "a still reservoir replays");
