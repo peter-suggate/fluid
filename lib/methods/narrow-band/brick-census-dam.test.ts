@@ -122,7 +122,14 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       }
     };
     let noPreimage = 0;
-    const storePhi = (i: number, x: number) => { const v = preimage(x, h); if (v === undefined) noPreimage++; store("PHI", verts[i]!.kind, verts[i]!.p, v ?? fr(x / h)); };
+    // A 4h corner whose brick an F slot holds takes the same word in F too: the engine keeps such a corner's C word F's
+    // copy (lcMirror), and where an h tile touches it the census reads F's (nbVertexCoarse, a47cda09), so the old
+    // engine's coarse value stands in both.
+    const storePhi = (i: number, x: number) => {
+      const v = preimage(x, h), { kind, p } = verts[i]!; if (v === undefined) noPreimage++;
+      store("PHI", kind, p, v ?? fr(x / h));
+      if (kind === "C" && s.bricks.has(key(shr(p, 3)))) store("PHI", "F", p, v ?? fr(x / h));
+    };
     fx.phi.forEach((x, i) => storePhi(i, x));
     faces.forEach(({ c, a, kind }, i) => store(`US${a}`, kind, c, fx.US[i]!));
     upload(["PHI", "US0", "US1", "US2"]);
