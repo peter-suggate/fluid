@@ -202,7 +202,9 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
             }
             for (let k = 0; k < 8; k++) { const x0 = corner(own.map((o, a) => o + ((k >> a) & 1))); lo = Math.min(lo, x0); hi = Math.max(hi, x0); }
             const cubic = Math.min(Math.max(sum, lo), hi), s = Math.min(Math.max(d / 4, 0), 1), ws = s * s * (3 - 2 * s);
-            expect = (cubic * (1 - ws) + q * ws) * h;
+            // A vertex in a coarse tile takes the cubic; elsewhere the blend keeps F's sign (q's where the cubic's differs).
+            const ownCoarse = coarse(own) && crossing(own);
+            expect = (!ownCoarse && (cubic < 0) !== (q < 0) ? q : cubic * (1 - ws) + q * ws) * h;
           }
         }
         const err = Math.abs(got - expect) / h; worst = Math.max(worst, plainV === Math.fround(farM) ? 0 : err);

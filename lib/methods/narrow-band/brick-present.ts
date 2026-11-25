@@ -152,7 +152,10 @@ fn presentVertex(v:vec3i,q:f32,b:vec3i,mask:vec2u)->f32{
     let gap=max(max(4*n-v,v-4*n-vec3i(4)),vec3i(0));d=min(d,length(vec3f(gap)));if(d==0.0){break;}
   }
   if(d>=4.0){return q;}
-  return mix(presentCubic(v,b),q,smoothstep(0.0,4.0,d));
+  // The blend hides the h/4h seam; it never moves F's surface: where the cubic and F's φ disagree in sign, F's φ.
+  let c=presentCubic(v,b);
+  if((c<0.0)!=(q<0.0)){return q;}
+  return mix(c,q,smoothstep(0.0,4.0,d));
 }
 @compute @workgroup_size(64) fn presentVertices(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let b=vec3i(wid);let edge=any(b>=NB_PRESENT_BRICKS);
