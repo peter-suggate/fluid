@@ -307,10 +307,15 @@ ${nbfViscosityWGSL}`,
 const VOLUME_IN = 13, VOLUME_OUT = 2;
 const VOLUME_HEAD = `let i=${VOLUME_IN}u*t;let o=${VOLUME_OUT}u*t;var vertices:array<f32,8>;for(var k=0u;k<8u;k++){vertices[k]=f(i+k);}
  let dt=f(i+10u);let control=f(i+11u);let filled=f(i+12u);`;
+// The old tetra's ratios at unit scale (12f765ac, the shared level-set-fill.wgsl.ts): the Metal NaN fix moves the
+// fill by at most a few ulp, so both sides take the shared tetraOrder / tetra / tetraUnit and the rest stays the old text.
+const SHARED_TETRA = levelSetFillWGSL.slice(0, levelSetFillWGSL.indexOf("fn fill("));
 const OLD_VOLUME: ParityKernel = {
   prelude: `struct UMOwner {tile:u32,lane:u32,width:u32,index:u32}
 var<private> budget:array<f32,11>;var<private> budgetParams:vec4f;
-${old("umCorner", "d4Sum8", "uvCorner", "tetraOrder", "tetra", "geometricPlaneBoxFraction", "geometricUniformSumPrimitive", "umTetraFill", "umSurfaceTarget")}`,
+${old("umCorner", "d4Sum8", "uvCorner")}
+${SHARED_TETRA}
+${old("geometricPlaneBoxFraction", "geometricUniformSumPrimitive", "umTetraFill", "umSurfaceTarget")}`,
   body: `${VOLUME_HEAD}
  put(o,umSurfaceTarget(UMOwner(0u,0u,1u,0u),vertices));
  budget[0]=f(i+8u);budget[1]=f(i+9u);budgetParams=vec4f(dt,0.0,0.0,control);
