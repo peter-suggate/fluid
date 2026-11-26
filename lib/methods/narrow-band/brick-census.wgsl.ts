@@ -212,6 +212,11 @@ const NC_REQUIRED:u32=33554432u;const NC_CROSSES:u32=268435456u;const NC_WET:u32
 const NC_HEAT_SHAPE:u32=67108864u;const NC_HEAT_THIN:u32=134217728u;
 // censusFine's classify flag (mixedTile only, cleared before the class is stored): an open cell of the tile crosses.
 const NC_OPEN_CROSS:u32=0x40000000u;
+// C'' (coordinator 2026-11-26, the user's "fine h for accurate physics, no particles unless heat calls for them"): a
+// shape misfit heats only an energetic tile, fast (ncFastTile) or accelerating. NC_ENERGETIC is FIN's (and W1's) bit:
+// an open face of a liquid cell of the crossing tile had |Du/Dt| >= |g|/2 over the last step (ncEnergeticCell).
+// NC_CLASS_ENERGETIC is the class flag (mixedTile) it is reduced through.
+const NC_ENERGETIC:u32=0x80000000u;const NC_CLASS_ENERGETIC:u32=16u;
 fn ncCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
 fn ncCriterionOn(k:u32)->bool{return ((NC_CRITERIA>>k)&1u)!=0u;}
 fn ncTriggerBit(k:u32)->u32{return 1u<<(16u+k);}
@@ -644,6 +649,7 @@ fn ncFinishTile(p:vec3i,width:u32,c:NcClass)->NcFinish{
   let shaped=!fast&&ncCriterionOn(NC_SHAPE)&&!(tolerant&&error<=NC_TOL);
   if(!fast){w0|=select(255u,ncScoreByte(error/max(NC_TOL,1e-30)),tolerant);}
   if(shaped){w1|=ncTriggerBit(NC_SHAPE)|NC_HEAT_SHAPE;}
+  if((c.flags&NC_CLASS_ENERGETIC)!=0u){w1|=NC_ENERGETIC;}
   if(all(c.deep!=vec2u(0u))){
    let thickness=max(min(ncOrderValue(c.deep.x),ncOrderValue(c.deep.y)),0.0)/ncH();let thin=NC_THIN;
    w0|=ncScoreByte(thin/max(thickness,0.25*thin))<<8u;
@@ -919,7 +925,7 @@ const kernel = (L: BrickLayout, label: string, bindings: readonly BrickBinding[]
 /** The hooks on the brick storage (CENSUS_FORMULAS' contract), for a module that binds dir, phi, vel and census. */
 const HOOKS = /* wgsl */`
 const NC_S:u32=${CENSUS.STRIDE}u;
-var<private> cH:f32;var<private> cDt:f32;var<private> cUp:u32;
+var<private> cH:f32;var<private> cDt:f32;var<private> cUp:u32;var<private> cAccel:f32;
 // The ring's h, dt and up (uniformMixedUp: the axis gravity pulls along most, the first of equals, and -g's sign).
 fn ncInit(){
   cH=nbRingF(cfg.x,NB_RING_H);cDt=nbRingF(cfg.x,NB_RING_DT);
@@ -927,6 +933,8 @@ fn ncInit(){
   let a=abs(g.x);let b=abs(g.y);let c=abs(g.z);
   let upAxis=select(select(2u,0u,a>=c),1u,b>=a&&b>=c);let up=sign(-g[upAxis]);
   cUp=select(select(2u,1u,up>0.0)|(upAxis<<2u),0u,up==0.0);
+  // ncEnergeticCell's bound: the velocity change |g|/2 makes in a step.
+  cAccel=0.5*length(g)*cDt;
 }
 fn ncH()->f32{return cH;}
 fn ncDt()->f32{return cDt;}
@@ -961,6 +969,28 @@ fn ncCellClosed(c:vec3i)->bool{
 fn ncTileState(q:vec3i)->u32{if(!nbTileInLattice(q)){return 2u;}return select(0u,1u,ncPageSlot(q>>vec3u(3u))==NB_NONE);}
 fn ncCellOwnerH(c:vec3i)->bool{return nbCellOwnerH(c);}
 fn ncObstacleAt(q:vec3i)->bool{return false;}
+// The last step's velocity change at the lower face of c along a (m/s): UP, which holds the FLIP delta from the tail's
+// extension (uExtend: the extended value less the keep, i.e. (g - grad p / rho) dt at a liquid face) until the next
+// uAdvect, read through the owner rule (nbFacePlane's: F where either side is h-owned, else the C face of c's tile).
+// 0 on a closed face: a face with a closed cell either side (ncCellClosed, the stamp's FLAGS.OPEN mask the pressure rows
+// read) is a constraint, not an acceleration, and a face off the box carries none.
+fn ncFaceDelta(c:vec3i,a:u32)->f32{
+  var e=vec3i(0);e[a]=1;
+  if(!nbFaceInLattice(c,a)||nbOnWall(c,a)||ncCellClosed(c)||ncCellClosed(c-e)){return 0.0;}
+  if(nbCellOwnerH(c)||nbCellOwnerH(c-e)){
+    let s=nbFSlotOfCell(c);if(s>=NB_SEAM){return 0.0;}
+    return vel[NB_VEL_F_UP0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];
+  }
+  let T=c>>vec3u(2u);let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return 0.0;}
+  return vel[NB_VEL_C_UP0+NB_STRIDE*(cs+a*NB_CCAP)+nbTileIndex(T)];
+}
+// Material acceleration at least |g|/2 at cell c (its three lower faces): hydrostatic rest has Du/Dt = 0 and free fall
+// |g|, so half of g is the midpoint of the two states, no fitted cutoff. The delta is over the last step and the bound
+// takes this step's dt (equal under a fixed dt).
+fn ncEnergeticCell(c:vec3i)->bool{
+  let d=vec3f(ncFaceDelta(c,0u),ncFaceDelta(c,1u),ncFaceDelta(c,2u));
+  return cAccel>0.0&&dot(d,d)>=cAccel*cAccel;
+}
 // umWallBeyond (l.1732): the tiles from p to the wall across direction k, the wall within a page of p (no wall
 // further). The wall is the box's (cdTile's test), not the lattice's: a lattice padded to whole pages past the
 // container's walls has its high walls inside its last page, and the impact and run-up triggers see them there.
@@ -1117,7 +1147,10 @@ fn ncDeformation(t:vec3i,s:u32,i:u32)->f32{
 fn ncNeedTriggered(t:vec3i,s:u32,i:u32,fin:u32)->bool{
   let criteria=(fin>>16u)&63u;
   if((criteria&0x3cu)!=0u){return true;}
-  if((criteria&1u)!=0u&&(fin&NC_HEAT_SHAPE)!=0u){return true;}
+  // A shape misfit says 4h cannot carry the surface: a tier fact (it keeps the tile h, ncDecide), not energy. It heats
+  // only an energetic tile (C'', coordinator 2026-11-26): fast (R2's speed horizon, ncFastTile) or accelerating
+  // (NC_ENERGETIC). A falling body keeps its particles; a calm layer at rest or sliding slowly is grid-only.
+  if((criteria&1u)!=0u&&(fin&NC_HEAT_SHAPE)!=0u&&(ncFastTile(s,i)||(fin&NC_ENERGETIC)!=0u)){return true;}
   if((criteria&2u)==0u||(fin&NC_HEAT_THIN)==0u){return false;}
   return ncDt()*ncDeformation(t,s,i)/ncH()>${UNIFORM_SURFACE_TRANSPORT_ERROR_H};
 }
@@ -1314,6 +1347,27 @@ fn cfStage(t:vec3i,lane:u32){
     var f=0.0;if(nbFaceInLattice(q,a)){f=nbFFace(q,a);}cfFaces[i]=f;
   }
 }
+// The cell's centre φ (its 8 staged vertices' mean) below 0.
+fn cfCellLiquid(lane:u32)->bool{
+ let l=ncCorner(lane,4u);var sum=0.0;
+ for(var k=0u;k<8u;k++){let q=l+ncCorner(k,2u);sum+=ncTileRaw[q.x+5u*q.y+25u*q.z];}
+ return sum<0.0;
+}
+// ncEnergeticCell on the lane's cell of h tile t, cheaply: the tile is h-owned, so each lower face of its cells is F's
+// (nbFacePlane's owner rule), at the cell in the tile's own brick slot; the lane's cell is open (cfClosed), and the
+// cell below it is open unless the tile is cut or that cell lies across the tile's low side, where ncCellClosed says.
+fn cfEnergetic(t:vec3i,lane:u32,cut:bool)->bool{
+ let l=ncCorner(lane,4u);let c=4*t+vec3i(l);
+ let s=nbFSlotOfBrick(c>>vec3u(3u));if(s>=NB_SEAM){return false;}
+ var d=vec3f(0.0);
+ for(var a=0u;a<3u;a++){
+  var e=vec3i(0);e[a]=1;
+  if(!nbFaceInLattice(c,a)||nbOnWall(c,a)){continue;}
+  if((cut||l[a]==0u)&&ncCellClosed(c-e)){continue;}
+  d[a]=vel[NB_VEL_F_UP0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];
+ }
+ return cAccel>0.0&&dot(d,d)>=cAccel*cAccel;
+}
 // ncFace at the cell of local coordinate l with plane p along a (p = l[a] its low face, l[a] + 1 its high face).
 fn cfFace(l:vec3u,a:u32,p:u32)->f32{return cfFaces[80u*a+16u*p+l[(a+1u)%3u]+4u*l[(a+2u)%3u]];}
 // ncOwnerBounds1 on the staged faces.
@@ -1402,6 +1456,8 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
     // The tier's misfit, every cell open (HEAD's): a wet wall's crossing keeps its tile h as it did.
     ncCut=false;
     if(shaping){atomicMax(&tileError,bitcast<u32>(ncSurfaceDisplacement(t,lane,false)));}
+    // C'': a liquid cell of a crossing tile (its 8 staged vertices' mean below 0) whose last step accelerated it.
+    if(crossing&&!cfClosed&&cfCellLiquid(lane)&&cfEnergetic(t,lane,cut)){atomicOr(&mixedTile,NC_CLASS_ENERGETIC);}
     if((atomicLoad(&mixedTile)&2u)!=0u){let deep=ncDepthSample(t,lane);for(var q=0u;q<2u;q++){atomicMax(&tileDeep[q],deep[q]);}}
     workgroupBarrier();
     var c=ncEmptyClass();
@@ -1516,6 +1572,8 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
     }else{
       classified=true;atomicOr(&cqBounded[lane>>5u],1u<<(lane&31u));
       ncClassifyOwner(t,4u,0u,&c,false);
+      // C'': the crossing 4h tile's lower faces at its corner cell (the C faces, or F's where a neighbour is h).
+      if((c.flags&2u)!=0u&&ncEnergeticCell(4*t)){c.flags|=NC_CLASS_ENERGETIC;}
       if((c.flags&2u)!=0u&&NC_TOL>0.0){let k=atomicAdd(&cqErrors,1u);atomicOr(&cqError[k>>2u],lane<<(8u*(k&3u)));}
       if((c.flags&2u)!=0u){let k=atomicAdd(&cqDeeps,1u);atomicOr(&cqDeep[k>>2u],lane<<(8u*(k&3u)));atomicOr(&cqIsDeep[lane>>5u],1u<<(lane&31u));}
     }

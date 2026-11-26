@@ -33,6 +33,8 @@ const local8 = (c: V3) => (c[0] & 7) | ((c[1] & 7) << 3) | ((c[2] & 7) << 6);
 const brickLocal = (b: V3) => (b[0] & 3) | ((b[1] & 3) << 2) | ((b[2] & 3) << 4);
 const P = CENSUS_POLICY;
 const NO_WALL = 0xffff, CROSSES = 1 << 28, WET = 1 << 29, REQUIRED = 1 << 25, HEAT_SHAPE = 1 << 26, HEAT_THIN = 1 << 27, OPEN_CROSS = 1 << 30;
+// C'': FIN's energetic bit (|Du/Dt| >= |g|/2 at an open face of a liquid cell of the crossing tile) and its class flag.
+const ENERGETIC = 0x80000000, CLASS_ENERGETIC = 16;
 const trig = (k: number) => (1 << (16 + k)) >>> 0;
 const on = (k: number) => ((P.criteria >> k) & 1) !== 0;
 const scoreByte = (s: number) => Math.trunc(Math.min(Math.max(fr(s * 64), 0), 255));
@@ -44,6 +46,8 @@ export interface CensusState {
   readonly cmask: (cs: number) => Uint32Array;
   readonly fPhi: (fs: number) => Float32Array; readonly cPhi: (cs: number) => Float32Array;
   readonly fU: (a: number, fs: number) => Float32Array; readonly cU: (a: number, cs: number) => Float32Array;
+  /** C'': the last step's velocity change (UP, the FLIP delta) of F slot fs and C slot cs along a; absent: 0. */
+  readonly fUP?: (a: number, fs: number) => Float32Array; readonly cUP?: (a: number, cs: number) => Float32Array;
   readonly tileOcc: (fs: number) => number;
   /** C_ALL in list order. */ readonly cAll: readonly number[];
   /** The census buffer's DEF words of tile i of C slot cs (the certificate's packed copy); absent: 0 (none written). */
@@ -160,6 +164,19 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   const finite = (u: number) => Math.abs(u) <= fr(3e38);
   // ncCellClosed: outside the box, or OPEN clear in the cell's F slot; a cell no F slot holds is open.
   const cellClosed = (c: V3) => !inLattice(c) || (fSlot(shr(c, 3)) !== undefined && (s.closed?.(c) ?? false));
+  // C'' (ncFaceDelta, ncEnergeticCell): the last step's velocity change at c's lower face along a through the owner rule,
+  // 0 on a closed face (a closed cell either side) and off the box; energetic where |delta| >= |g| dt / 2.
+  const faceDelta = (c: V3, a: number) => {
+    const below = add(c, unit(a, -1));
+    if (!faceInLattice(c, a) || c[a]! <= 0 || c[a]! >= N[a]! || cellClosed(c) || cellClosed(below)) return 0;
+    if (cellH(c) || cellH(below)) { const fs = fSlot(shr(c, 3)); return fs === undefined ? 0 : s.fUP?.(a, fs)[local8(c)] ?? 0; }
+    const T = shr(c, 2), cs = anySlot(shr(T, 3)); return cs === undefined ? 0 : s.cUP?.(a, cs)[tileIndex(T)] ?? 0;
+  };
+  const accelBound = fr(fr(0.5 * fr(Math.hypot(...s.g))) * dt);
+  const energeticCell = (c: V3) => {
+    const d = [0, 1, 2].map(a => faceDelta(c, a));
+    return accelBound > 0 && fr(fr(fr(d[0]! * d[0]!) + fr(d[1]! * d[1]!)) + fr(d[2]! * d[2]!)) >= fr(accelBound * accelBound);
+  };
 
   // umClassifyOwner (surface authority). Every cell classifies, a closed one too (the tier's crossing, HEAD's); an h
   // owner's open cell that crosses also flags OPEN_CROSS, the liquid-air crossing that heats.
@@ -385,6 +402,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     if (crossing) {
       const error = fromBits(c.error), shaped = on(0) && !(error <= P.tolerance);
       w0 |= scoreByte(fr(error / P.tolerance)); if (shaped) w1 |= trig(0) | HEAT_SHAPE;
+      if ((c.flags & CLASS_ENERGETIC) !== 0) w1 |= ENERGETIC;
       if (c.deep[0] !== 0 && c.deep[1] !== 0) {
         const thickness = fr(Math.max(Math.min(orderValue(c.deep[0]), orderValue(c.deep[1])), 0) / h);
         w0 |= scoreByte(fr(P.thin / Math.max(thickness, 0.25 * P.thin))) << 8; if (thickness < P.thin && on(1)) w1 |= trig(1) | HEAT_THIN;
@@ -421,6 +439,12 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
           for (let k = 0; k < 6; k++) { c.gap[k] = Math.min(c.gap[k]!, l.gap[k]!); c.reach[k] = Math.min(c.reach[k]!, l.reach[k]!); }
           c.flags |= l.flags; c.crossing = [(c.crossing[0] | l.crossing[0]) >>> 0, (c.crossing[1] | l.crossing[1]) >>> 0];
         }
+        // C'': a liquid open cell (its 8 vertices' f32 sum below 0) of the crossing tile, last step accelerated.
+        if ((c.flags & 2) !== 0) for (let lane = 0; lane < 64; lane++) {
+          const cell = add(scale3(t, 4), corner(lane, 4)); let sum = 0;
+          for (let k = 0; k < 8; k++) sum = fr(sum + load(add(cell, corner(k, 2))));
+          if (!cellClosed(cell) && sum < 0 && energeticCell(cell)) c.flags |= CLASS_ENERGETIC;
+        }
         const openCross = (c.flags & OPEN_CROSS) !== 0; c.flags &= ~OPEN_CROSS;
         const reheat = (c.flags & 2) !== 0 && openCross && tileCut(t);
         let error = 0, heatError = 0;
@@ -436,6 +460,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
         store(c, r); reachMax = Math.max(reachMax, r.reach); if (c.flags & 2) crossingCount++;
       } else {
         const c = emptyClass(); classifyOwner(t, 4, 0, c, false);
+        if ((c.flags & 2) !== 0 && energeticCell(scale3(t, 4))) c.flags |= CLASS_ENERGETIC;
         const lo = [orderKey(fr(3e38)), orderKey(fr(3e38)), orderKey(fr(3e38))], hi = [orderKey(fr(-3e38)), orderKey(fr(-3e38)), orderKey(fr(-3e38))];
         for (let axis = 0; axis < 3; axis++) for (const sign of [-1, 1]) {
           const origin = scale3(t, 4), probe = add(origin, unit(axis, sign > 0 ? 4 : -1));
@@ -475,10 +500,11 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   };
   // fin: the final word 1, its criteria and their liquid-air heat bits (a wet wall's crossing heats nothing).
   const needTriggered = (t: V3, fin: number, keys: number[]) => {
-    branch = undefined; void keys;
+    branch = undefined;
     const criteria = (fin >>> 16) & 63;
     if ((criteria & 0x3c) !== 0) return true;
-    if ((criteria & 1) !== 0 && (fin & HEAT_SHAPE) !== 0) return true;
+    // C'': the shape criterion heats only an energetic tile, fast (ncFastTile) or accelerating (FIN's ENERGETIC).
+    if ((criteria & 1) !== 0 && (fin & HEAT_SHAPE) !== 0 && (fast(keys) || (fin & ENERGETIC) !== 0)) return true;
     if ((criteria & 2) === 0 || (fin & HEAT_THIN) === 0) return false;
     const d = deformation(t), heated = fr(fr(dt * d) / h) > fr(0.02);
     if (branch === undefined) branch = heated ? "heated" : "cool";
@@ -794,6 +820,12 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
     assert.ok(cAll.length >= 2 && snap.bricks.size > 8, `pages ${cAll.length}, bricks ${snap.bricks.size}`);
     const pageCoord = new Map([...snap.pages].map(([k, cs]) => [cs, [k & 1023, (k >>> 10) & 1023, (k >>> 20) & 1023] as V3]));
     const resident = (b: V3) => snap.bricks.has(key(b));
+    // C'': the last step's velocity change (UP), by tile: free fall (-g dt, energetic) on a third of the tiles, an
+    // eighth of g's (calm) elsewhere, with a sideways part on alternate tiles; clear of the |g| dt / 2 bound either way.
+    const upOf = (c: V3, a: number) => {
+      const T = shr(c, 2), fall = (T[0] * 7 + T[1] * 3 + T[2] * 5) % 3 === 0, g = 9.81 * DT;
+      return a === 1 ? -(fall ? 1 : 0.125) * g : a === 0 && (T[2] & 1) === 1 ? 0.125 * g : 0;
+    };
     // CMASK: h where hTile holds and the tile's brick is resident; 4h elsewhere.
     for (const cs of cAll) {
       const pk = pageCoord.get(cs)!, m = new Uint32Array(CMASK_WORDS);
@@ -802,6 +834,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
       const cw = (fn: (T: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let i = 0; i < BRICK_CELLS; i++) w[i] = fn(add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6])); return w; };
       e.write("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, cw(T => phiOf(scale3(T, 4)) + 0.15 * Math.sin(T[0] + 2 * T[2])));
       for (let a = 0; a < 3; a++) e.write("vel", L.base("vel", "C", `US${a}`) + BRICK_STRIDE * cs, cw(T => velOf(scale3(T, 4), a) * 0.9));
+      for (let a = 0; a < 3; a++) e.write("vel", L.base("vel", "C", `UP${a}`) + BRICK_STRIDE * cs, cw(T => upOf(scale3(T, 4), a)));
     }
     const occ = new Uint32Array(L.cap.f);
     for (const [kb, fs] of snap.bricks) {
@@ -809,6 +842,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
       const fw = (fn: (c: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let l = 0; l < BRICK_CELLS; l++) w[l] = fn(add(scale3(b, 8), [l & 7, (l >> 3) & 7, l >> 6])); return w; };
       e.write("phi", L.base("phi", "F", "PHI") + BRICK_STRIDE * fs, fw(phiOf));
       for (let a = 0; a < 3; a++) e.write("vel", L.base("vel", "F", `US${a}`) + BRICK_STRIDE * fs, fw(c => velOf(c, a)));
+      for (let a = 0; a < 3; a++) e.write("vel", L.base("vel", "F", `UP${a}`) + BRICK_STRIDE * fs, fw(c => upOf(c, a)));
       // Particles on every tile; a join on tile 7 of the bricks at x = 9 (4h there, in the air).
       occ[fs] = 0xff | (b[0] === 9 && b[1] === 2 ? 0x8000 : 0);
     }
@@ -847,17 +881,22 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
     const cRead = async (pool: "phi" | "vel", name: string) => { const m = new Map<number, Float32Array>(); for (const cs of snap.pages.values()) m.set(cs, new Float32Array((await e.read(pool, L.base(pool, "C", name) + BRICK_STRIDE * cs, BRICK_CELLS)).buffer)); return m; };
     const fPhi = await fRead("PHI"), fU = [await fRead("US0"), await fRead("US1"), await fRead("US2")];
     const cPhi = await cRead("phi", "PHI"), cU = [await cRead("vel", "US0"), await cRead("vel", "US1"), await cRead("vel", "US2")];
+    const fUP = [await fRead("UP0"), await fRead("UP1"), await fRead("UP2")], cUP = [await cRead("vel", "UP0"), await cRead("vel", "UP1"), await cRead("vel", "UP2")];
     const dir = await e.read("dir");
     const state: CensusState = {
       N, h: fr(H_M), dt: fr(DT), g: [0, fr(-9.81), 0], pages: snap.pages, bricks: snap.bricks,
       cmask: cs => dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1)),
       fPhi, cPhi: cs => cPhi.get(cs)!, fU: (a, fs) => fU[a]!(fs), cU: (a, cs) => cU[a]!.get(cs)!, tileOcc: fs => occ[fs]!, cAll,
+      fUP: (a, fs) => fUP[a]!(fs), cUP: (a, cs) => cUP[a]!.get(cs)!,
       def: (cs, i) => [...defWords.subarray(CENSUS.STRIDE * cs + CENSUS.DEF + 4 * i, CENSUS.STRIDE * cs + CENSUS.DEF + 4 * i + 4)],
       wet: (cs, i) => (defWords[CENSUS.STRIDE * cs + CENSUS.TC + 16 * i + 8]! & 1) === 1,
       tc: (cs, i) => [...defWords.subarray(CENSUS.STRIDE * cs + CENSUS.TC + 16 * i, CENSUS.STRIDE * cs + CENSUS.TC + 16 * i + 16)],
     };
     const want = censusOracle(state);
     assert.equal(want.failed, 0);
+    // C'': the UP pattern makes some crossing tiles energetic and leaves others calm, each with a shape misfit.
+    { let energetic = 0, calmShaped = 0; for (const sc of want.scratch.values()) sc.fin.forEach(f => { if (f & HEAT_SHAPE) { if (f & ENERGETIC) energetic++; else calmShaped++; } });
+      console.log(`setCensus C'': shape-heated tiles energetic ${energetic}, not ${calmShaped}`); assert.ok(energetic > 0 && calmShaped > 0, "both kinds of shaped tile"); }
     console.log(`setCensus: thin-alone tiles ${want.thinAlone.tiles}, heated ${want.thinAlone.heated}; tuDeformation branches ${JSON.stringify(want.defBranches)}`);
     // The scene's thin tiles all carry a shape or impact bit too, so its need rule never reads DEF (no thin-alone tile):
     // brick-census-dam.test.ts's frame 43 (874 thin-alone tiles) covers tuDeformation's branches.

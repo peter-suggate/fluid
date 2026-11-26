@@ -203,7 +203,10 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     };
     // tuDeformation of the written words (uniform-narrow-band-flip.ts l.938): 3.4e38 for a stale key or width <= 0.
     const deformation = (t: V3) => defCase(ti(t)) === "valid" ? planDeformation(t) : SAT;
-    const need = (t: V3, criteria: number) => (criteria & 0x3c) !== 0 || (criteria & 1) !== 0 || ((criteria & 2) !== 0 && fr(fr(dt * deformation(t)) / h) > fr(0.02));
+    // C' / C'' (coordinator 2026-11-26): the shape criterion heats only an energetic tile: fast (ncFastTile, R2's speed horizon: 2 ncKeySpeed >= 4).
+    const fastKeys = (keys: number[]) => { let v = 0; for (let a = 0; a < 3; a++) { if (keys[a] !== 0xffffffff) v = Math.max(v, fr(fr(Math.abs(orderValue(keys[a]!)) * dt) / h)); if (keys[3 + a] !== 0) v = Math.max(v, fr(fr(Math.abs(orderValue(keys[3 + a]!)) * dt) / h)); } return 2 * v >= 4; };
+    // C'': or an accelerating one (FIN's bit 31, the census's own: the fixture carries no UP, so it reads 0 here).
+    const need = (t: V3, criteria: number, keys: number[], fin = 0) => (criteria & 0x3c) !== 0 || ((criteria & 1) !== 0 && (fastKeys(keys) || (fin & 0x80000000) !== 0)) || ((criteria & 2) !== 0 && fr(fr(dt * deformation(t)) / h) > fr(0.02));
     const defWords = new Uint32Array(await e.read("census"));
     for (let i = 0; i < n; i++) {
       const t = coord(i), k = key(shr(t, 3)), cs = s.pages.get(k)!, at = CENSUS.STRIDE * cs + CENSUS.DEF + 4 * local8(t), c = defCase(i);
@@ -272,7 +275,7 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       wantNew += want; wantOld += fx.decided[i]!;
       check("WANT", i, want === fx.decided[i], () => `${want} vs ${fx.decided[i]} (${fx.owner[i] === 1 ? "h" : "4h"} now; fin ${hex(fin)} vs ${hex(ow1)})`);
       const fs = s.bricks.get(key(shr(t, 1)))!, j = (t[0] & 1) | ((t[1] & 1) << 1) | ((t[2] & 1) << 2);
-      const criteria = (ow1 >>> 16) & 63, trig = (set[L.set.trig + fs]! >>> j) & 1, oldTrig = need(t, criteria) ? 1 : 0;
+      const criteria = (ow1 >>> 16) & 63, trig = (set[L.set.trig + fs]! >>> j) & 1, oldTrig = need(t, criteria, keys, fin) ? 1 : 0;
       if (criteria === 2) { thinAlone.tiles++; thinAlone.heated += oldTrig; const c = defCase(i); thinAlone.branches[c === "valid" ? (oldTrig ? "heated" : "cool") : c]++; }
       check("TRIG", i, trig === oldTrig, () => `${trig} vs ${oldTrig} (criteria ${criteria})`);
       check("TRIG thin alone", i, ((set[L.set.trig + fs]! >>> (8 + j)) & 1) === ((ow1 >>> 17) & 1), () => `thin bit`);
