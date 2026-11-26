@@ -1030,13 +1030,24 @@ fn ncCurveShift(t:vec3i,s:u32,i:u32)->f32{
   // div n = div / 4h; the shift (4/3) h div n, cells.
   return abs(div)/3.0;
 }
+// A fast tile (R2's speed horizon): its fastest velocity key (ncKeySpeed, cells a step) crosses a tile, 4 cells, within
+// R2's demotion hysteresis, the two consecutive calm heads an h tile needs before it goes 4h: 2 ncKeySpeed >= 4, so
+// |u| >= 2h/dt. This is a policy, not a bound derived from the error: the user's (2026-11-26) "fast water stays fine,
+// slow water may go coarse", set at tile size over the hysteresis. The hold it measures is short: the calm bit is the
+// last head's (one step back) and the demotion this head's (two heads down), so a slower tile can still carry detail
+// that 4h misses into a 4h tile; that is the accepted loss.
+fn ncFastTile(s:u32,i:u32)->bool{return 2.0*ncKeySpeed(ncKeys(s,i))>=4.0;}
 fn ncCalm(t:vec3i,s:u32,i:u32)->bool{
   // Each tier reads its certificate error (the DEF word, certError's tileErrorOf): an h tile's per-cell defect (the
   // velocity inside the tile its trilinear field misses), a 4h tile's enclosing constant model (half its velocity span
   // across the tile) and second difference. An h tile also reads TC word 15, the second difference of the tile mean
   // velocities 4h apart, the error it would meet as 4h. Word 15 alone (2026-11-23) cannot see velocity that varies
   // within a tile: sheared flow went and stayed 4h, and sparse-cm12-long-dam-break kept 36-75k of its ~115k particles
-  // (either tier's error alone: 52-53k at step 100; brick-census-jet.test.ts). A tile whose valid certificate saw no
+  // (either tier's error alone: 52-53k at step 100). So a fast tile (ncFastTile) reads the certificate error (an h tile:
+  // and word 15), and a slow one word 15 alone: the h particles' cell-scale noise, about a quarter of |u| in the long
+  // dam's thinning layer at 3-3.5 s (about 0.5 m/s), is not an error 4h would meet there. With the defect on every tile
+  // (cb56115c) that layer's thin crossing tiles were 2-9% 4h at 3 s and 17-18% at 3.5 s and drew bumpy; now 71-76% and
+  // 97%, as at 19bcf370 (69-73%, 96-97%; brick-census-jet.test.ts). A tile whose valid certificate saw no
   // liquid (a dry band tile, the air beside the surface) is never calm, as the rule above says: it has no water for a
   // 4h mean to average, so a calm certificate says nothing of what arrives next, the droplets and sheet tips its h
   // neighbours hold. Calm there (35eb7ee3 to 2026-11-26), the air about the letters' splash went 4h and its droplets
@@ -1046,7 +1057,8 @@ fn ncCalm(t:vec3i,s:u32,i:u32)->bool{
   var e=ncError(t,s,i);
   if(!(e<NC_PLAN_MAX)){return false;}
   if((census[NC_S*s+${CENSUS.TC}u+16u*i+8u]&1u)==0u){return false;}
-  if(nbTileH(s,i)){e=max(e,bitcast<f32>(census[NC_S*s+${CENSUS.TC}u+16u*i+15u]));}
+  let tc=bitcast<f32>(census[NC_S*s+${CENSUS.TC}u+16u*i+15u]);
+  if(!ncFastTile(s,i)){e=tc;}else if(nbTileH(s,i)){e=max(e,tc);}
   return e<NC_PLAN_MAX&&ncDt()*e/ncH()<=${UNIFORM_TILE_UPDATE_BUDGET_H};
 }
 `;
@@ -1628,10 +1640,14 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   // Refining has none: a tile that is not calm bands at once.
   // Calm means 4h represents the tile's velocity (ncCalm) and its surface's curvature (ncCurveShift), and it carries no
   // thin trigger, so R2 never demotes a sheet 4h cannot carry
-  // (falling-water-torus lost all its liquid by step 10 without this, 2026-11-17), and no shape trigger (4h misses the
-  // h surface by more than the tolerance): a sheet sliding along itself (the pour's stream) is calm on every measure
-  // above (no second difference of its tile means, flat tile normals), so without this guard R2 demotes
-  // the surface 4h cannot hold and the sheet loses its particles, which live only in h bricks (brick-census-jet.test.ts).
+  // (falling-water-torus lost all its liquid by step 10 without this, 2026-11-17), and, on a fast tile (ncFastTile), no
+  // shape trigger (4h misses the h surface by more than the tolerance): a sheet sliding along itself (the pour's stream)
+  // is calm on every measure above (no second difference of its tile means, flat tile normals), so without this guard
+  // R2 demotes the surface 4h cannot hold and the sheet loses its particles, which live only in h bricks
+  // (brick-census-jet.test.ts). A slow tile's shape trigger does not keep it h: the long dam's thinning layer misfits
+  // its 4h corners by about the tolerance (the corner Laplacian of a layer a tile or two deep) while its surface is
+  // smooth, and kept h it drew the h particles' bumps (the speed horizon above; the pour's upper stream 11-12% 4h at
+  // step 42, 4-8% before, its slow tiles at 1.4-1.9 cells a step).
   // No importance test: ncSurfaceQuiet (2026-11-23 to 2026-11-26) kept h only where the surface about the tile moved
   // along its normal by more than the budget a step, but a smooth, slow surface still carries a crest about to
   // overturn, which 4h cannot hold: sparse-cm12-long-dam-break's returning bore at 2 s was a smooth glassy hump, not
@@ -1641,7 +1657,7 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   // a joined source tile too: the nozzle's tiles are joined once its plug has filled them, and while 4h they hold no
   // particles, so the stream's lip at the nozzle went 4h (8-11 of the pour's 454 nozzle tiles at every step; 0 now).
   // And an h tile is calm only where its 4h-scale curvature keeps its volume within the budget (ncCurveShift).
-  if(band&&head&&!sourceTile&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&ncCalm(t,cs,i)
+  if(band&&head&&!sourceTile&&(ncFin(cs,i)&ncTriggerBit(NC_THIN_K))==0u&&((ncFin(cs,i)&ncTriggerBit(NC_SHAPE))==0u||!ncFastTile(cs,i))&&ncCalm(t,cs,i)
      &&cdCurve(t,cs,i)){
     atomicOr(&wgCalm[lane>>5u],bit);
     let known=census[o+${CENSUS.CALM_KEY}u+(i>>6u)]==nbCRec(cs,NB_REC_KEY)+1u;

@@ -358,16 +358,23 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     }
     // R2 (lane E, a stated deviation; 2026-11-23 at the 4h owner's scale): at a step's head a band tile is 4h where its
     // certificate copy (the supplied DEF words) is valid, saw liquid (TC's wet bit), and dt e / h <= 0.08 on its DEF error (an h tile: and TC word 15)
-    // (ncCalm); no shape or thin trigger in this census's FIN; an h tile's curvature shift (4/3) h div n of the tile mean normals
+    // where the tile is fast (R2's speed horizon, ncFastTile: 2 ncKeySpeed >= 4 cells), on TC word 15 alone where slow (ncCalm); no thin trigger in
+    // this census's FIN, and no shape trigger on a fast tile; an h tile's curvature shift (4/3) h div n of the tile mean normals
     // <= 0.08 (ncCurveShift: an h tile's normal its VOL word, which brick-census.test.ts pins, a 4h tile's the gradient
     // of its 8 stored corners). No importance test (the mean velocity is not read).
     const f32w = (u: number) => new Float32Array(new Uint32Array([u]).buffer)[0]!;
+    const keySpeed = (cs: number, l: number) => { let v = 0; const k = S * cs + CENSUS.KEYS + 6 * l;
+      for (let a = 0; a < 6; a++) { const w = rCensus[k + a]!; if (w === (a < 3 ? 0xffffffff : 0)) continue;
+        const b = (w & 0x80000000) !== 0 ? w & 0x7fffffff : ~w >>> 0; v = Math.max(v, fr(fr(fr(meta.dt) * Math.abs(f32w(b))) / fr(meta.h))); }
+      return v; };
+    const fast = (cs: number, l: number) => 2 * keySpeed(cs, l) >= 4;
     const calm = (cs: number, l: number, fine: boolean) => { const o = S * cs + CENSUS.DEF + 4 * l;
       if (cens[o + 2] !== pageKeys.get(cs)! + 1 || !(f32w(cens[o + 3]!) > 0)) return false;
       if ((cens[S * cs + CENSUS.TC + 16 * l + 8]! & 1) === 0) return false;
-      const e = fine ? Math.max(f32w(cens[o + 1]!), f32w(cens[S * cs + CENSUS.TC + 16 * l + 15]!)) : f32w(cens[o + 1]!);
+      const tc = f32w(cens[S * cs + CENSUS.TC + 16 * l + 15]!);
+      const e = !fast(cs, l) ? tc : fine ? Math.max(f32w(cens[o + 1]!), tc) : f32w(cens[o + 1]!);
       return e < 3.402823e38 && fr(fr(fr(meta.dt) * e) / fr(meta.h)) <= fr(0.08); };
-    const thin = (cs: number, l: number) => (rCensus[S * cs + CENSUS.FIN + l]! & (3 << 16)) !== 0;
+    const thin = (cs: number, l: number) => { const f = rCensus[S * cs + CENSUS.FIN + l]!; return (f & (2 << 16)) !== 0 || ((f & (1 << 16)) !== 0 && fast(cs, l)); };
     const unpack = (w: number) => [0, 8, 16, 24].map(b => Math.max(((((w >>> b) & 255) << 24) >> 24) / 127, -1));
     const corner = (q: V3) => { const v = cBuf.get("PHI")![BRICK_STRIDE * s.pages.get(key(shr(q, 3)))! + local8(q)]!; return fr(v * h); };
     const tileNormal = (q: V3): number[] => {

@@ -87,7 +87,8 @@ export interface CensusResult {
 
 /** The oracle. deep: tiles taking the last census's decision (the old deep COLD branch, l.2852), for the D test.
  * head: a tiered step head with the real D, where R2 (lane E, a stated deviation) makes a calm band tile 4h:
- * dt e / h <= 0.08 on the DEF error (an h tile: and TC word 15) under valid DEF words (ncCalm; an unknown copy is never calm, nor a dry one), an h
+ * dt e / h <= 0.08 on the DEF error (an h tile: and TC word 15) of a fast tile (2 ncKeySpeed >= 4, ncFastTile), on TC word 15 alone of a slow one,
+ * under valid DEF words (ncCalm; an unknown copy is never calm, nor a dry one), with no thin trigger and no shape trigger on a fast tile, an h
  * tile only at its second consecutive calm head (calmPrev; the hysteresis), a 4h tile at once; an h tile only where its
  * 4h-scale curvature shift (4/3) h div n of the tile mean normals is <= 0.08 (ncCurveShift; VOL the packed normal). */
 export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; decided: (t: V3) => boolean }, head = false): CensusResult {
@@ -560,13 +561,17 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   };
   const joinedOf = (t: V3) => { const fs = fSlot(shr(t, 1)); if (fs === undefined) return false; const j = (t[0] & 1) | ((t[1] & 1) << 1) | ((t[2] & 1) << 2); return ((s.tileOcc(fs) >>> (8 + j)) & 1) === 1; };
   const far = Math.ceil(fr(fr(fr(Math.min(reachMax, 1e6) + 0.5) + fr(1e-3)) / 4)) + 2;
-  const calm = (p: V3) => {
+  // R2's speed horizon (ncFastTile): a tile's fastest velocity key crosses a tile within R2's two calm heads, 2 ncKeySpeed >= 4.
+  const fast = (keys: number[]) => 2 * keySpeed(keys) >= 4;
+  const calm = (p: V3, keys: number[]) => {
     const cs = tileInLattice(p) ? s.pages.get(pageKey(shr(p, 3))) : undefined; if (cs === undefined) return false;
     const w = s.def ? s.def(cs, tileIndex(p)) : [0, 0, 0, 0];
     if (w[2] !== slotKey.get(cs)! + 1 || !(fromBits(w[3]!) > 0)) return false;
     // A dry band tile (no liquid sample) is never calm: no water for a 4h mean to average.
     if (!(s.wet?.(cs, tileIndex(p)) ?? false)) return false;
-    const e = tileH(p) ? Math.max(fromBits(w[1]!), fromBits((s.tc ? s.tc(cs, tileIndex(p)) : [])[15] ?? 0)) : fromBits(w[1]!);
+    // A slow tile reads TC word 15 alone (the tile means); a fast one its DEF error (an h tile: and word 15).
+    const tc = fromBits((s.tc ? s.tc(cs, tileIndex(p)) : [])[15] ?? 0);
+    const e = !fast(keys) ? tc : tileH(p) ? Math.max(fromBits(w[1]!), tc) : fromBits(w[1]!);
     return e < PLAN_MAX && fr(fr(dt * e) / h) <= fr(0.08);
   };
   const demoted = new Set<number>(), calmNow = new Set<number>(), held = new Set<number>();
@@ -612,9 +617,11 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     const band = decideBand(p, sc, i);
     // censusFine writes VOL for every h tile, band or not: the oracle's packed normal of each, compared word for word.
     if (head && tileH(p)) vol.set(key(p), volOf(p));
-    if (band && head && ((sc.fin[i]! & (trig(0) | trig(1))) >>> 0) !== 0) { if (calm(p)) shaped.add(key(p)); return band; }
-    if (band && head && tileH(p)) { const d = curveShift(p); shift.set(key(p), d); if (!(d <= 0.08)) { if (calm(p)) volumeKept.add(key(p)); return band; } }
-    if (!(band && head && calm(p))) return band;
+    // No thin trigger, and no shape trigger on a fast tile (R2's speed horizon).
+    const keys = sc.keys[i]!;
+    if (band && head && (((sc.fin[i]! & trig(1)) >>> 0) !== 0 || (((sc.fin[i]! & trig(0)) >>> 0) !== 0 && fast(keys)))) { if (calm(p, keys)) shaped.add(key(p)); return band; }
+    if (band && head && tileH(p)) { const d = curveShift(p); shift.set(key(p), d); if (!(d <= 0.08)) { if (calm(p, keys)) volumeKept.add(key(p)); return band; } }
+    if (!(band && head && calm(p, keys))) return band;
     calmNow.add(key(p));
     const cs = s.pages.get(pageKey(shr(p, 3)))!;
     if (!tileH(p) || (s.calmPrev?.(cs, tileIndex(p)) ?? false)) { demoted.add(key(p)); return false; }
