@@ -166,9 +166,6 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
       const cl = (v: number, n: number) => Math.min(Math.max(v, 0), n);
       const corner = (T: number[]) => cw[2 * (cl(T[0]!, C[0]! - 1) + C[0]! * (cl(T[1]!, C[1]! - 1) + C[1]! * cl(T[2]!, C[2]! - 1)))]!;
       const coarse = (t: number[]) => t.every((c, a) => c >= 0 && 4 * c < N[a]!) && cw[2 * (t[0]! + C[0]! * (t[1]! + C[1]! * t[2]!)) + 1] === 1;
-      // The blend's coarse tiles: a 4h tile the surface crosses (its eight corners not of one sign); the brick's
-      // surface test reads every coarse tile.
-      const crossing = (t: number[]) => { let lo = Infinity, hi = -Infinity; for (let k = 0; k < 8; k++) { const x0 = corner(t.map((o, a) => o + ((k >> a) & 1))); lo = Math.min(lo, x0); hi = Math.max(hi, x0); } return lo < 0 && hi >= 0; };
       const cr = (t: number) => [0.5 * (-t * t * t + 2 * t * t - t), 0.5 * (3 * t * t * t - 5 * t * t + 2), 0.5 * (-3 * t * t * t + 4 * t * t + t), 0.5 * (t * t * t - t * t)];
       const nb = V.map(n => Math.ceil(n / 8));
       const surface = new Uint8Array(nb[0]! * nb[1]! * nb[2]!);
@@ -190,7 +187,7 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
           let d = 4;
           for (let k = 0; k < 27 && d > 0; k++) {
             const n = [own[0]! + (k % 3) - 1, own[1]! + (Math.floor(k / 3) % 3) - 1, own[2]! + Math.floor(k / 9) - 1];
-            if (n.some((c, a) => c < 2 * b[a]! - 1 || c > 2 * b[a]! + 2) || !coarse(n) || !crossing(n)) continue;
+            if (n.some((c, a) => c < 2 * b[a]! - 1 || c > 2 * b[a]! + 2) || !coarse(n)) continue;
             d = Math.min(d, Math.hypot(...n.map((c, a) => Math.max(4 * c - v[a]!, v[a]! - 4 * c - 4, 0))));
           }
           if (d < 4) {
@@ -203,7 +200,7 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
             for (let k = 0; k < 8; k++) { const x0 = corner(own.map((o, a) => o + ((k >> a) & 1))); lo = Math.min(lo, x0); hi = Math.max(hi, x0); }
             const cubic = Math.min(Math.max(sum, lo), hi), s = Math.min(Math.max(d / 4, 0), 1), ws = s * s * (3 - 2 * s);
             // A vertex in a coarse tile takes the cubic; elsewhere the blend keeps F's sign (q's where the cubic's differs).
-            const ownCoarse = coarse(own) && crossing(own);
+            const ownCoarse = coarse(own);
             expect = (!ownCoarse && (cubic < 0) !== (q < 0) ? q : cubic * (1 - ws) + q * ws) * h;
           }
         }

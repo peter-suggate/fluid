@@ -132,13 +132,11 @@ fn presentCubic(v:vec3i,b:vec3i)->f32{
 // |second difference| to 0.16 cells on the faces and 0 inside, 2026-11-23), and an h patch in 4h water steps by its
 // detail one cell inside its boundary, where F's own surface meets the 4h interpolant its faces hold (0.1-0.3 cells).
 // Near the surface (|φ| under a tile) v shows the coarse surface (presentCubic) blended into q by the distance d from
-// v to the nearest 4h-owned tile the surface crosses (presentCoarse; smoothstep over a tile): at such a vertex (an
-// incident tile is one, d = 0) the coarse surface, at an h vertex a tile or more from one F's φ, and between the two tiers meet
+// v to the nearest 4h-owned tile (presentCoarse; smoothstep over a tile): at a 4h-owned vertex (an incident tile is
+// 4h-owned, d = 0) the coarse surface, at an h vertex a tile or more from one F's φ, and between the two tiers meet
 // with matching value and slope. A tile corner shows q either way (the cubic takes the corner values, and q is the
-// corner's authority word, F's where F owns it), so nbVertexCoarse's fine-corner rule needs no test here. A 4h tile
-// whose eight corners share a sign holds no surface, so there is no seam to meet there: it is not in presentCoarse, and
-// an h sheet beside 4h air or 4h bulk keeps F's own surface (the pour's stream frayed where every dry 4h tile about it
-// pulled it toward the cubic of its air corners, 2026-11-25). The physics is untouched: this is the drawn surface alone.
+// corner's authority word, F's where F owns it), so nbVertexCoarse's fine-corner rule needs no test here. The physics
+// is untouched: this is the drawn surface alone.
 fn presentVertex(v:vec3i,q:f32,b:vec3i,mask:vec2u)->f32{
   if(abs(q)>=4.0){return q;}
   var d=4.0;let own=v>>vec3u(2u);
@@ -187,19 +185,12 @@ ${smooth ? `  // The brick's tiles' coarse bits first; the corners and the cubic
   }
   workgroupBarrier();
   if(lid==0u){presentSurface=atomicLoad(&presentSurfaceAny);presentCoarse=vec2u(atomicLoad(&presentCoarseAny[0]),atomicLoad(&presentCoarseAny[1]));}
-  var mask=workgroupUniformLoad(&presentCoarse);
+  let mask=workgroupUniformLoad(&presentCoarse);
   let surface=workgroupUniformLoad(&presentSurface)==3u;
   if(surface){
     for(var i=lid;i<125u;i+=64u){let T=2*b-vec3i(1)+vec3i(i32(i%5u),i32((i/5u)%5u),i32(i/25u));presentCorner[i]=nbCVertex(clamp(T,vec3i(0),NB_LATTICE>>vec3u(2u)));}
     workgroupBarrier();
     presentCubicStage(lid);
-    // Only a 4h tile the surface crosses (its eight corners not of one sign) keeps its coarse bit (presentVertex).
-    {let i=vec3u(lid&3u,(lid>>2u)&3u,lid>>4u);var lo=3e38;var hi=-3e38;
-     for(var k=0u;k<8u;k++){let c=i+vec3u(k&1u,(k>>1u)&1u,k>>2u);let x=presentCorner[c.x+5u*(c.y+5u*c.z)];lo=min(lo,x);hi=max(hi,x);}
-     if(!(lo<0.0&&hi>=0.0)){atomicAnd(&presentCoarseAny[lid>>5u],~(1u<<(lid&31u)));}}
-    workgroupBarrier();
-    if(lid==0u){presentCoarse=vec2u(atomicLoad(&presentCoarseAny[0]),atomicLoad(&presentCoarseAny[1]));}
-    mask=workgroupUniformLoad(&presentCoarse);
   }
 ` : ""}  for(var j=0u;j<8u;j++){
     let v=8*b+nbLocalCoord(lid+64u*j);
