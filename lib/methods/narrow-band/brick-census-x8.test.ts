@@ -52,7 +52,10 @@ async function compareSchedules(e: BrickEngine, L: BrickLayout, tiered: boolean,
   // the plan words (DEF) there.
   for (let cs = 0; cs < L.cap.c; cs++) for (let k = 0; k < FROZEN.RES; k++) {
     if (k >= CENSUS.MOV && k < CENSUS.MOV + 16) continue;
-    const a = old.census[FROZEN.STRIDE * cs + k]!, b = neu.census[CENSUS.STRIDE * cs + k]!;
+    // W1 and FIN bits 26 and 27 (NC_HEAT_SHAPE, NC_HEAT_THIN: shape and thin at a liquid-air crossing, the heat's) are
+    // newer than the frozen passes; brick-census.test.ts's oracle checks them.
+    const heat = (k >= CENSUS.W1 && k < CENSUS.W1 + 512) || (k >= CENSUS.FIN && k < CENSUS.FIN + 512) ? ~(3 << 26) : ~0;
+    const a = (old.census[FROZEN.STRIDE * cs + k]! & heat) >>> 0, b = (neu.census[CENSUS.STRIDE * cs + k]! & heat) >>> 0;
     if (a !== b) note(`census slot ${cs} +${k}: ${a.toString(16)} vs ${b.toString(16)}`);
   }
   const c0 = set0[H.N_CAND]!, cOld = old.set[H.N_CAND]!, cNew = neu.set[H.N_CAND]!;

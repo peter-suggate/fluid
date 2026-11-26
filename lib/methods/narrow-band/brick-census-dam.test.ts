@@ -58,7 +58,8 @@ const preimage = (x: number, h: number) => {
   return fr(v * h) === x ? v : undefined;
 };
 const CROSSES = 1 << 28, WET = 1 << 29, REQUIRED = 1 << 25;
-const FLAGS = (0xffff0000 & ~(7 << 22)) >>> 0;
+// Bits 26 and 27 (NC_HEAT_SHAPE, NC_HEAT_THIN, the heat's liquid-air split) are newer than the old engine's words.
+const FLAGS = (0xffff0000 & ~(7 << 22) & ~(3 << 26)) >>> 0;
 const byteNear = (a: number, b: number, shift: number) => Math.abs(((a >>> shift) & 255) - ((b >>> shift) & 255)) <= 1;
 
 for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own dam census, frame ${step}`, GPU, async () => {

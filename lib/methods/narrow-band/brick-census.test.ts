@@ -32,7 +32,7 @@ const tileIndex = (t: V3) => (t[0] & 7) | ((t[1] & 7) << 3) | ((t[2] & 7) << 6);
 const local8 = (c: V3) => (c[0] & 7) | ((c[1] & 7) << 3) | ((c[2] & 7) << 6);
 const brickLocal = (b: V3) => (b[0] & 3) | ((b[1] & 3) << 2) | ((b[2] & 3) << 4);
 const P = CENSUS_POLICY;
-const NO_WALL = 0xffff, CROSSES = 1 << 28, WET = 1 << 29, REQUIRED = 1 << 25;
+const NO_WALL = 0xffff, CROSSES = 1 << 28, WET = 1 << 29, REQUIRED = 1 << 25, HEAT_SHAPE = 1 << 26, HEAT_THIN = 1 << 27, OPEN_CROSS = 1 << 30;
 const trig = (k: number) => (1 << (16 + k)) >>> 0;
 const on = (k: number) => ((P.criteria >> k) & 1) !== 0;
 const scoreByte = (s: number) => Math.trunc(Math.min(Math.max(fr(s * 64), 0), 255));
@@ -55,6 +55,8 @@ export interface CensusState {
   /** The last certificate's TC record (16 words) of tile i of C slot cs (R2 reads the mean velocity, words 0..2, and
    * word 15, the second difference of the tile means); absent: zeros. */
   readonly tc?: (cs: number, i: number) => readonly number[];
+  /** FLAGS.OPEN clear in cell c's F slot (a mask voxel, a body); absent: every stored cell open. */
+  readonly closed?: (c: V3) => boolean;
 }
 /** The six-tetrahedron fill of a cell's 8 vertex φ (lib/core/level-set-fill.wgsl.ts), Float64. */
 function cellFill(v: readonly number[]): number {
@@ -156,10 +158,14 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   const perStep = (x: number) => fr(fr(x * dt) / h), scaleDt = fr(dt / h);
   const faceLow = (anchor: V3, axis: number) => (anchor[axis]! & 31) === 31 && cellKind(anchor) >= 2;
   const finite = (u: number) => Math.abs(u) <= fr(3e38);
+  // ncCellClosed: outside the box, or OPEN clear in the cell's F slot; a cell no F slot holds is open.
+  const cellClosed = (c: V3) => !inLattice(c) || (fSlot(shr(c, 3)) !== undefined && (s.closed?.(c) ?? false));
 
-  // umClassifyOwner (surface authority, every cell open).
+  // umClassifyOwner (surface authority). Every cell classifies, a closed one too (the tier's crossing, HEAD's); an h
+  // owner's open cell that crosses also flags OPEN_CROSS, the liquid-air crossing that heats.
   const classifyOwner = (t: V3, width: number, lane: number, c: Class, bounds: boolean) => {
     const side = 4 / width, origin = add(scale3(t, 4), scale3(corner(lane, side), width));
+    const closedCell = width === 1 && cellClosed(origin);
     let inside = 0, lo = fr(3e38), hi = fr(-3e38);
     for (let k = 0; k < 8; k++) {
       const v = width === 4 ? load(add(origin, scale3(corner(k, 2), 4))) : load(add(origin, scale3(corner(k, 2), width)));
@@ -179,6 +185,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     const crosses = lo <= eps && hi >= -eps && lo < hi;
     if (crosses) {
       if (width === 4) c.crossing = [0xffffffff, 0xffffffff]; else c.crossing[lane >> 5] = (c.crossing[lane >> 5]! | (1 << (lane & 31))) >>> 0;
+      if (width === 1 && !closedCell) c.flags |= OPEN_CROSS;
       for (let a = 0; a < 3; a++) { c.gap[a] = Math.min(c.gap[a]!, local[a]!); c.gap[3 + a] = Math.min(c.gap[3 + a]!, 4 - width - local[a]!); }
     }
     const interior = !crosses && inside === 8, air = !crosses && inside === 0;
@@ -189,32 +196,77 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     }
   };
   // umSurfaceDisplacement: lane sums as the kernel keeps them (lane i % 64), then the workgroup's.
-  const displacement = (t: V3) => {
+  // A cut tile (a closed cell of its own): its buried vertices (no incident cell open), its open cells and edges
+  // (umCensusCellOpen: a cell outside the tile is closed), as censusFine stages them; an uncut tile's every one open.
+  // The tier's pass (cutPass false) takes every cell open, HEAD's; the heat's (a cut tile with an open crossing) the cut,
+  // with no buried vertex in the corner curvature.
+  const tileCut = (t: V3) => { for (let i = 0; i < 64; i++) if (cellClosed(add(scale3(t, 4), corner(i, 4)))) return true; return false; };
+  const wideBuried = (T: V3) => Array.from({ length: 8 }, (_, q) => add(scale3(T, 4), scale3(corner(q, 2), -1))).every(cellClosed);
+  const displacement = (t: V3, cutPass: boolean) => {
     const origin = scale3(t, 4), raw: number[] = [], smooth: number[] = [];
+    const cut = cutPass && tileCut(t);
+    const buried = (v: V3) => cut && Array.from({ length: 8 }, (_, k) => add(add(origin, v), scale3(corner(k, 2), -1))).every(cellClosed);
+    const cellOpen = (l: V3) => l.every(x => x >= 0 && x < 4) && (!cut || !cellClosed(add(origin, l)));
+    const edgeOpen = (v: V3, a: number) => !cut || [0, 1, 2, 3].some(i => { const q: V3 = [...v]; q[(a + 1) % 3]! -= i & 1; q[(a + 2) % 3]! -= i >> 1; return cellOpen(q); });
+    const vertexOpen = (v: V3) => !cut || Array.from({ length: 8 }, (_, k) => add(v, scale3(corner(k, 2), -1))).every(cellOpen);
+    const buriedAt: boolean[] = []; for (let i = 0; i < 125; i++) buriedAt.push(buried(corner(i, 5)));
+    const isBuried = (v: V3) => buriedAt[v[0] + 5 * v[1] + 25 * v[2]]!;
     for (let i = 0; i < 125; i++) raw.push(load(add(origin, corner(i, 5))));
     for (let i = 0; i < 125; i++) {
       const v = corner(i, 5), r = v.map(x => (x > 0 && x < 4 ? 1 : 0));
+      if (buriedAt[i]) { smooth.push(raw[i]!); continue; }
       let sum = 0, weight = 0;
       for (let z = v[2] - r[2]!; z <= v[2] + r[2]!; z++) for (let y = v[1] - r[1]!; y <= v[1] + r[1]!; y++) for (let x = v[0] - r[0]!; x <= v[0] + r[0]!; x++) {
+        if (isBuried([x, y, z]) || isBuried([2 * v[0] - x, 2 * v[1] - y, 2 * v[2] - z])) continue;
         const w = (x === v[0] ? 2 : 1) * (y === v[1] ? 2 : 1) * (z === v[2] ? 2 : 1); sum = fr(sum + fr(w * raw[x + 5 * y + 25 * z]!)); weight += w;
       }
       smooth.push(fr(sum / weight));
     }
     const at = (a: number[], v: V3) => a[v[0] + 5 * v[1] + 25 * v[2]]!;
     const c: number[] = []; for (let k = 0; k < 8; k++) c.push(load(add(origin, scale3(corner(k, 2), 4))));
+    // umPlaneBuriedCorners: the buried corners take the least-squares plane through the smoothed vertices of the open
+    // cells whose smoothed vertices change sign (a vertex once per such cell); none: they keep their markers.
+    const buriedCorners = [0, 1, 2, 3, 4, 5, 6, 7].filter(k => isBuried(scale3(corner(k, 2), 4)));
+    if (buriedCorners.length) {
+      const A = [0, 0, 0, 0], B = [0, 0, 0, 0], C = [0, 0, 0], D = [0, 0, 0];
+      for (let j = 0; j < 64; j++) {
+        const cell = corner(j, 4); if (!cellOpen(cell)) continue;
+        const vs = Array.from({ length: 8 }, (_, k) => add(cell, corner(k, 2)));
+        if (!(vs.some(q => at(smooth, q) < 0) && vs.some(q => !(at(smooth, q) < 0)))) continue;
+        for (const q of vs) {
+          const v = at(smooth, q);
+          for (let a = 0; a < 3; a++) { A[a]! += q[a]!; B[a]! += q[a]! * q[a]!; D[a]! += q[a]! * v; }
+          A[3]! += 1; B[3]! += v; C[0]! += q[0] * q[1]; C[1]! += q[0] * q[2]; C[2]! += q[1] * q[2];
+        }
+      }
+      if (A[3]! > 0) {
+        const mean = [A[0]! / A[3]!, A[1]! / A[3]!, A[2]! / A[3]!], level = B[3]! / A[3]!;
+        const dg = [0, 1, 2].map(a => B[a]! - mean[a]! * A[a]!), cr = [C[0]! - mean[0]! * A[1]!, C[1]! - mean[0]! * A[2]!, C[2]! - mean[1]! * A[2]!];
+        const mo = [0, 1, 2].map(a => D[a]! - mean[a]! * B[3]!), shift = 1e-6 * Math.max(dg[0]! + dg[1]! + dg[2]!, 1);
+        const M = [[dg[0]! + shift, cr[0]!, cr[1]!], [cr[0]!, dg[1]! + shift, cr[2]!], [cr[1]!, cr[2]!, dg[2]! + shift]];
+        const det3 = (m: number[][]) => m[0]![0]! * (m[1]![1]! * m[2]![2]! - m[1]![2]! * m[2]![1]!) - m[0]![1]! * (m[1]![0]! * m[2]![2]! - m[1]![2]! * m[2]![0]!) + m[0]![2]! * (m[1]![0]! * m[2]![1]! - m[1]![1]! * m[2]![0]!);
+        const det = det3(M), solve = (rhs: number[]) => [0, 1, 2].map(col => det3(M.map((row, i) => row.map((x, j) => (j === col ? rhs[i]! : x)))) / det);
+        const S = [[dg[0]!, cr[0]!, cr[1]!], [cr[0]!, dg[1]!, cr[2]!], [cr[1]!, cr[2]!, dg[2]!]];
+        let slope = [0, 0, 0];
+        for (let fit = 0; fit < 2; fit++) { const rest = mo.map((m, i) => m - (S[i]![0]! * slope[0]! + S[i]![1]! * slope[1]! + S[i]![2]! * slope[2]!)); const d = solve(rest); slope = slope.map((x, i) => x + d[i]!); }
+        for (const k of buriedCorners) { const q = scale3(corner(k, 2), 4); c[k] = fr(level + slope[0]! * (q[0] - mean[0]!) + slope[1]! * (q[1] - mean[1]!) + slope[2]! * (q[2] - mean[2]!)); }
+      }
+    }
     const held = [...c], metric = new Array<number>(8).fill(Infinity);
     for (let lane = 0; lane < 24; lane++) {
       const k = Math.floor(lane / 3), a = lane % 3, cv = scale3(corner(k, 2), 4), inward = cv.map(x => (x === 4 ? -1 : 1)), step = unit(a, inward[a]!);
       for (let j = 0; j < 4; j++) {
-        const v = add(cv, scale3(step, j)), n = add(v, step), u = at(raw, v), w = at(raw, n);
+        const v = add(cv, scale3(step, j)), n = add(v, step);
+        if (!edgeOpen(v.map((x, i) => Math.min(x, n[i]!)) as V3, a)) break;
+        const u = at(raw, v), w = at(raw, n);
         if ((u < 0) === (w < 0)) continue;
         const f = fr(u / (u - w)), gr = [0, 0, 0]; gr[a] = fr(w - u);
-        for (let b = 0; b < 3; b++) { if (b === a) continue; const tt = unit(b, inward[b]!); gr[b] = inward[b]! * fr((at(raw, add(v, tt)) - u) + f * ((at(raw, add(n, tt)) - w) - (at(raw, add(v, tt)) - u))); }
+        for (let b = 0; b < 3; b++) { if (b === a) continue; const tt = unit(b, inward[b]!); if (isBuried(add(v, tt)) || isBuried(add(n, tt))) continue; gr[b] = inward[b]! * fr((at(raw, add(v, tt)) - u) + f * ((at(raw, add(n, tt)) - w) - (at(raw, add(v, tt)) - u))); }
         const along = Math.abs(gr[a]!) / Math.max(Math.hypot(gr[0]!, gr[1]!, gr[2]!), 1e-20);
         metric[k] = Math.min(metric[k]!, fr((j + f) * along)); break;
       }
     }
-    for (let k = 0; k < 8; k++) if (metric[k] !== Infinity && c[k] !== 0) c[k] = Math.sign(c[k]!) * fr(metric[k]! * h);
+    for (let k = 0; k < 8; k++) if (metric[k] !== Infinity && !isBuried(scale3(corner(k, 2), 4)) && c[k] !== 0) c[k] = Math.sign(c[k]!) * fr(metric[k]! * h);
     const low = [c[0]!, c[2]!, c[4]!, c[6]!], high = [c[1]!, c[3]!, c[5]!, c[7]!], dx = low.map((x, i) => high[i]! - x);
     const mix = (a: number, b: number, t: number) => a + t * (b - a);
     const cornerDistance = (v: V3, a: number, f: number) => {
@@ -228,7 +280,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     const alongL = new Array<number>(64).fill(0), curveL = new Array<number>(64).fill(0), crossL = new Array<number>(64).fill(0), curvesL = new Array<number>(64).fill(0);
     for (let i = 0; i < 125; i++) {
       const lane = i % 64, v = corner(i, 5), value = smooth[i]!;
-      if (v.every(x => x >= 1 && x <= 3) && Math.abs(value) <= fr(1.5 * h)) {
+      if (v.every(x => x >= 1 && x <= 3) && Math.abs(value) <= fr(1.5 * h) && vertexOpen(v)) {
         const gg3 = [0, 0, 0], d = [0, 0, 0], m = [0, 0, 0];
         for (let a = 0; a < 3; a++) {
           const below = at(smooth, add(v, unit(a, -1))), above = at(smooth, add(v, unit(a)));
@@ -247,8 +299,10 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
         if (Math.abs(centre) <= fr(2 * h)) {
           let lap = 0;
           for (let a = 0; a < 3; a++) {
+            if (isBuried(v)) break;
             const lo = add(add(t, k), unit(a, -1)), hi = add(add(t, k), unit(a));
             if (!widePresent(lo) || !widePresent(hi)) continue;
+            if (cut && (wideBuried(lo) || wideBuried(hi))) continue;
             const below = load(scale3(lo, 4)), above = load(scale3(hi, 4));
             if (Math.abs(below - centre) > fr(6 * h) || Math.abs(above - centre) > fr(6 * h)) continue;
             lap += above - 2 * centre + below;
@@ -257,7 +311,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
         }
       }
       for (let a = 0; a < 3; a++) {
-        if (v[a]! >= 4) continue;
+        if (v[a]! >= 4 || !edgeOpen(v, a)) continue;
         const n = add(v, unit(a)), next = at(smooth, n);
         if ((value < 0) !== (next < 0)) worst = Math.max(worst, Math.abs(cornerDistance(v, a, fr(value / (value - next)))));
         const r0 = at(raw, v), r1 = at(raw, n);
@@ -330,10 +384,10 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     let w0 = 0, w1 = (crossing ? CROSSES : 0) | ((c.flags & 4) !== 0 ? WET : 0), gap = 0xffffffff;
     if (crossing) {
       const error = fromBits(c.error), shaped = on(0) && !(error <= P.tolerance);
-      w0 |= scoreByte(fr(error / P.tolerance)); if (shaped) w1 |= trig(0);
+      w0 |= scoreByte(fr(error / P.tolerance)); if (shaped) w1 |= trig(0) | HEAT_SHAPE;
       if (c.deep[0] !== 0 && c.deep[1] !== 0) {
         const thickness = fr(Math.max(Math.min(orderValue(c.deep[0]), orderValue(c.deep[1])), 0) / h);
-        w0 |= scoreByte(fr(P.thin / Math.max(thickness, 0.25 * P.thin))) << 8; if (thickness < P.thin && on(1)) w1 |= trig(1);
+        w0 |= scoreByte(fr(P.thin / Math.max(thickness, 0.25 * P.thin))) << 8; if (thickness < P.thin && on(1)) w1 |= trig(1) | HEAT_THIN;
       }
       const b = boundary(p, width, c); w1 |= scoreByte(b.score); if (b.triggered && on(4)) w1 |= trig(4);
       gap = Math.min(Math.ceil(speed), 255) * 2 ** 24; for (let k = 0; k < 6; k++) gap += c.gap[k]! * 2 ** (4 * k);
@@ -367,14 +421,19 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
           for (let k = 0; k < 6; k++) { c.gap[k] = Math.min(c.gap[k]!, l.gap[k]!); c.reach[k] = Math.min(c.reach[k]!, l.reach[k]!); }
           c.flags |= l.flags; c.crossing = [(c.crossing[0] | l.crossing[0]) >>> 0, (c.crossing[1] | l.crossing[1]) >>> 0];
         }
-        let error = 0;
+        const openCross = (c.flags & OPEN_CROSS) !== 0; c.flags &= ~OPEN_CROSS;
+        const reheat = (c.flags & 2) !== 0 && openCross && tileCut(t);
+        let error = 0, heatError = 0;
         if ((c.flags & 2) !== 0) {
-          const d = displacement(t);
+          const d = displacement(t, false);
           error = Math.max(d.worst, Math.max(d.volume, classMoving(c) ? Math.max(d.curve, d.corner) : 0));
+          if (reheat) { const e = displacement(t, true); heatError = Math.max(e.worst, Math.max(e.volume, classMoving(c) ? Math.max(e.curve, e.corner) : 0)); }
           for (let lane = 0; lane < 64; lane++) { const q = depthSample(t, lane); c.deep = [Math.max(c.deep[0], q[0]), Math.max(c.deep[1], q[1])]; }
         }
         c.error = bitsOf(error);
-        const r = finish(t, 1, c); store(c, r); reachMax = Math.max(reachMax, r.reach); if (c.flags & 2) crossingCount++;
+        const r = finish(t, 1, c);
+        if (!openCross) r.w1 = (r.w1 & ~(HEAT_SHAPE | HEAT_THIN)) >>> 0; else if (reheat && heatError <= P.tolerance) r.w1 = (r.w1 & ~HEAT_SHAPE) >>> 0;
+        store(c, r); reachMax = Math.max(reachMax, r.reach); if (c.flags & 2) crossingCount++;
       } else {
         const c = emptyClass(); classifyOwner(t, 4, 0, c, false);
         const lo = [orderKey(fr(3e38)), orderKey(fr(3e38)), orderKey(fr(3e38))], hi = [orderKey(fr(-3e38)), orderKey(fr(-3e38)), orderKey(fr(-3e38))];
@@ -414,10 +473,13 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     if (!(fromBits(w[3]!) > 0)) { branch = "width"; return PLAN_MAX; }
     return fromBits(w[0]!);
   };
-  const needTriggered = (t: V3, criteria: number) => {
-    branch = undefined;
-    if ((criteria & 0x3c) !== 0 || (criteria & 1) !== 0) return true;
-    if ((criteria & 2) === 0) return false;
+  // fin: the final word 1, its criteria and their liquid-air heat bits (a wet wall's crossing heats nothing).
+  const needTriggered = (t: V3, fin: number, keys: number[]) => {
+    branch = undefined; void keys;
+    const criteria = (fin >>> 16) & 63;
+    if ((criteria & 0x3c) !== 0) return true;
+    if ((criteria & 1) !== 0 && (fin & HEAT_SHAPE) !== 0) return true;
+    if ((criteria & 2) === 0 || (fin & HEAT_THIN) === 0) return false;
     const d = deformation(t), heated = fr(fr(dt * d) / h) > fr(0.02);
     if (branch === undefined) branch = heated ? "heated" : "cool";
     return heated;
@@ -590,7 +652,8 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     const at = (l: V3) => load(add(scale3(p, 4), l)), eps = fr(1e-6 * h);
     let crossing = false, count = 0; const sum = [0, 0, 0];
     for (let i = 0; i < 64; i++) {
-      const l: V3 = [i & 3, (i >> 2) & 3, i >> 4], v = Array.from({ length: 8 }, (_, k) => at(add(l, [k & 1, (k >> 1) & 1, k >> 2])));
+      const l: V3 = [i & 3, (i >> 2) & 3, i >> 4];
+      const v = Array.from({ length: 8 }, (_, k) => at(add(l, [k & 1, (k >> 1) & 1, k >> 2])));
       const lo = Math.min(...v), hi = Math.max(...v); if (lo <= eps && hi >= -eps && lo < hi) crossing = true;
       if (!(lo < 0 && hi >= 0)) continue;
       const g = gradOf(v), m = Math.hypot(...g); if (!(m > 0)) continue;
@@ -684,10 +747,10 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
       const fs = s.bricks.get(key(add(scale3(pk, 4), corner(bl, 4)))); if (fs === undefined) continue;
       let bits = 0;
       for (let j = 0; j < 8; j++) {
-        const q = add(scale3(corner(bl, 4), 2), corner(j, 2)), w1 = sc.fin[tileIndex(q)]!, criteria = (w1 >>> 16) & 63, heat = needTriggered(add(scale3(pk, 8), q), criteria);
+        const q = add(scale3(corner(bl, 4), 2), corner(j, 2)), w1 = sc.fin[tileIndex(q)]!, criteria = (w1 >>> 16) & 63, heat = needTriggered(add(scale3(pk, 8), q), w1, sc.keys[tileIndex(q)]!);
         if (heat) bits |= 1 << j;
         if ((w1 >>> 17) & 1) bits |= 1 << (8 + j);
-        if (criteria === 2) { thinAlone.tiles++; if (heat) thinAlone.heated++; defBranches[branch!]++; }
+        if (criteria === 2) { thinAlone.tiles++; if (heat) thinAlone.heated++; if (branch !== undefined) defBranches[branch]++; }
       }
       trigOut.set(fs, bits >>> 0); counters.CENSUS_TRIGGERED += [...Array(8).keys()].filter(j => (bits >> j) & 1).length;
     }
@@ -987,6 +1050,177 @@ test("setCensus: D = 0 gives the old decisions on every tile that is not deep CO
     else { other++; if (b) bandTiles++; assert.equal(withDeep.band.get(k), b, `tile ${t} is decided as with D = 0`); }
   }
   assert.ok(deepTiles > 50 && other > 50 && bandTiles > 5, `deep ${deepTiles}, other ${other}, band ${bandTiles}`);
+});
+
+// ---- A wetted wall: a glass plate (closed cells x 9..11, y 0..19, through the h tiles at x = 2) standing in a pool
+// whose surface (y 9.3) crosses it. Its buried vertices (no incident cell open, x 10..11) hold the air marker +5 h a
+// solid's burial leaves them; the plate's open neighbours keep the pool's φ. The tier and the heat apart (coordinator
+// 2026-11-26): below the surface the wall's liquid against the markers crosses for the tier, as at HEAD (the wet wall
+// stays h), and heats nothing; at the surface the pool meets the wall and crosses as anywhere, and its liquid-air misfit
+// (the cut's: open cells, buried corners on the plane, no buried vertex in the corner curvature) is the heat's.
+const WALL_N: V3 = [64, 32, 32];
+const wallClosed = (c: V3) => c[0] >= 9 && c[0] <= 11 && c[1] <= 19;
+const wallCellClosed = (c: V3) => c.some((x, a) => x < 0 || x >= WALL_N[a]!) || wallClosed(c);
+const wallBuried = (v: V3) => Array.from({ length: 8 }, (_, k) => add(v, scale3(corner(k, 2), -1))).every(wallCellClosed);
+const wallPhi = (v: V3) => (wallBuried(v) ? 5 : Math.max(v[1] - 9.3 + 0.4 * Math.sin(0.3 * v[2]) + 0.2 * Math.cos(0.21 * v[0]), -8));
+function wallState(closed: boolean): CensusState {
+  const pages = new Map<number, number>(), bricks = new Map<number, number>();
+  pages.set(key([0, 0, 0]), 0); pages.set(key([1, 0, 0]), 1);
+  let fsNext = 0;
+  for (let bz = 0; bz < 4; bz++) for (let by = 0; by < 3; by++) for (let bx = 0; bx < 7; bx++) bricks.set(key([bx, by, bz]), fsNext++);
+  const fPhi = new Map<number, Float32Array>(), fU = [0, 1, 2].map(() => new Map<number, Float32Array>());
+  for (const [kb, fs] of bricks) {
+    const b: V3 = [kb & 1023, (kb >>> 10) & 1023, (kb >>> 20) & 1023];
+    const fw = (fn: (c: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let l = 0; l < BRICK_CELLS; l++) w[l] = fn(add(scale3(b, 8), [l & 7, (l >> 3) & 7, l >> 6])); return w; };
+    fPhi.set(fs, fw(wallPhi)); for (let a = 0; a < 3; a++) fU[a]!.set(fs, fw(c => (wallClosed(c) ? 0 : 0.2 * velOf(c, a))));
+  }
+  const cw = (pk: V3, fn: (T: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let i = 0; i < BRICK_CELLS; i++) w[i] = fn(add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6])); return w; };
+  const masks = new Map<number, Uint32Array>(), cPhi = new Map<number, Float32Array>(), cU = [0, 1, 2].map(() => new Map<number, Float32Array>());
+  for (const [k, cs] of pages) {
+    const pk: V3 = [k & 1023, (k >>> 10) & 1023, (k >>> 20) & 1023], m = new Uint32Array(16);
+    for (let i = 0; i < BRICK_CELLS; i++) { const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]); if (t[0] < 12 && t[1] < 6 && bricks.has(key(shr(t, 1)))) m[i >> 5] = (m[i >> 5]! | (1 << (i & 31))) >>> 0; }
+    masks.set(cs, m); cPhi.set(cs, cw(pk, T => wallPhi(scale3(T, 4)))); for (let a = 0; a < 3; a++) cU[a]!.set(cs, cw(pk, T => 0.2 * velOf(scale3(T, 4), a)));
+  }
+  return {
+    N: WALL_N, h: fr(H_M), dt: fr(DT), g: [0, fr(-9.81), 0], pages, bricks, cmask: cs => masks.get(cs)!,
+    fPhi: fs => fPhi.get(fs)!, cPhi: cs => cPhi.get(cs)!, fU: (a, fs) => fU[a]!.get(fs)!, cU: (a, cs) => cU[a]!.get(cs)!, tileOcc: () => 0xff, cAll: [0, 1],
+    ...(closed ? { closed: wallClosed } : {}),
+  };
+}
+/** Every h tile's census words by tile key: W1, the crossing cells and FIN. */
+function wallWords(r: CensusResult) {
+  const out = new Map<number, { w1: number; cross: [number, number]; fin: number; t: V3 }>();
+  for (const [cs, sc] of r.scratch) for (let i = 0; i < BRICK_CELLS; i++) {
+    const t = add(scale3([cs, 0, 0], 8), [i & 7, (i >> 3) & 7, i >> 6]);
+    if (t[0] < 12 && t[1] < 6) out.set(key(t), { w1: sc.w1[i]!, cross: sc.cross[i]!, fin: sc.fin[i]!, t });
+  }
+  return out;
+}
+test("setCensus: a wetted wall keeps HEAD's tier and heats nothing; the free surface at the wall heats by its liquid-air misfit", () => {
+  const withRule = censusOracle(wallState(true)), noRule = censusOracle(wallState(false));
+  assert.equal(withRule.failed, 0); assert.equal(noRule.failed, 0);
+  const a = wallWords(withRule), b = wallWords(noRule);
+  const HEAT = (1 << 26) | (1 << 27), SHAPE = 1 << 16, tier = (x: number) => (x & ~HEAT) >>> 0;
+  let sleeve = 0, sleeveShape = 0, contact = 0, contactHeatOff = 0, far = 0;
+  for (const [k, w] of a) {
+    const t = w.t, o = b.get(k)!, crosses = (x: number) => (x & CROSSES) !== 0;
+    // The lattice's high z face (z = 32) is beyond the bricks: its vertices read FAR, a domain wall either way.
+    if (t[2] === 0 || t[2] === 7) continue;
+    if (t[0] === 2 && t[1] <= 1) {
+      // The sleeve: the wall's liquid against the markers crosses, the tier's words the all-open mask's, and no heat.
+      assert.ok(crosses(w.w1), `tile ${t}: the wetted wall crosses for the tier`);
+      assert.deepEqual([tier(w.w1), tier(w.fin), w.cross], [tier(o.w1), tier(o.fin), o.cross], `tile ${t}: the tier's words are HEAD's`);
+      assert.equal(w.fin & HEAT, 0, `tile ${t}: a wetted wall heats nothing`);
+      if (w.fin & SHAPE) sleeveShape++;
+      sleeve++;
+    } else if (t[0] === 2 && t[1] === 2) {
+      // The contact row: the tier's words are HEAD's; its heat bits are within the tier's criteria, by the cut's misfit.
+      assert.ok(crosses(w.w1), `tile ${t}: the free surface at the wall crosses`);
+      assert.deepEqual([tier(w.w1), tier(w.fin), w.cross], [tier(o.w1), tier(o.fin), o.cross], `tile ${t}: the tier's words are HEAD's`);
+      assert.ok(((w.fin & (1 << 26)) === 0 || (w.fin & SHAPE) !== 0) && ((w.fin & (1 << 27)) === 0 || (w.fin & (1 << 17)) !== 0), `tile ${t}: heat within the tier`);
+      if ((w.fin & SHAPE) !== 0 && (w.fin & (1 << 26)) === 0) contactHeatOff++;
+      contact++;
+    } else if (t[0] >= 5) {
+      // Away from the wall (no shell, no depth vertex beside it): the words are the all-open mask's, heat and all.
+      assert.deepEqual([w.w1, w.cross], [o.w1, o.cross], `tile ${t}: unchanged away from the wall`);
+      far++;
+    }
+  }
+  console.log("setCensus wall (oracle):", JSON.stringify({ sleeve, sleeveShape, contact, contactHeatOff, far }));
+  assert.ok(sleeve === 12 && contact === 6 && far > 40 && sleeveShape > 0, `sleeve ${sleeve} (shape ${sleeveShape}), contact ${contact}, far ${far}`);
+});
+
+test("setCensus (GPU): the wetted wall's closed cells (FLAGS.OPEN) classify as the oracle's", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  const { BrickEngine } = await import("./brick-engine");
+  const { bringUpCG } = await import("./brick-bringup-cg");
+  const { bringUpStages } = await import("./brick-stages");
+  const { snapshot, readChannel } = await import("./brick-readback");
+  const { FLAG } = await import("./brick-abi");
+  await withUniformDevice("brick census wall", async device => {
+    const e = await BrickEngine.create(device, {
+      lattice: WALL_N, h_m: H_M, dt_s: DT, gravity_mps2: [0, -9.81, 0],
+      capacities: { f: 400, c: 8, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi: [56, 12, 33] }], solver: L => bringUpCG(L),
+      stages: bringUpStages,
+    });
+    const L = e.layout, snap = await snapshot(e);
+    const cAll = snap.list(LIST.C_ALL);
+    const pageCoord = new Map([...snap.pages].map(([k, cs]) => [cs, [k & 1023, (k >>> 10) & 1023, (k >>> 20) & 1023] as V3]));
+    const wallH = (t: V3) => t[0] < 12 && t[1] < 6;
+    for (const cs of cAll) {
+      const pk = pageCoord.get(cs)!, m = new Uint32Array(CMASK_WORDS);
+      for (let i = 0; i < BRICK_CELLS; i++) { const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]); if (wallH(t) && 4 * t[1] < WALL_N[1] && snap.bricks.has(key(shr(t, 1)))) m[i >> 5] = (m[i >> 5]! | (1 << (i & 31))) >>> 0; }
+      e.write("dir", L.dir.cmask + CMASK_WORDS * cs, m);
+      const cw = (fn: (T: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let i = 0; i < BRICK_CELLS; i++) w[i] = fn(add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6])); return w; };
+      e.write("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, cw(T => wallPhi(scale3(T, 4))));
+      for (let a = 0; a < 3; a++) e.write("vel", L.base("vel", "C", `US${a}`) + BRICK_STRIDE * cs, cw(T => 0.2 * velOf(scale3(T, 4), a)));
+    }
+    const flags = (await readChannel(e, "phi", "FLAGS", true)) as (slot: number) => Uint32Array;
+    let closedCells = 0;
+    const occ = new Uint32Array(L.cap.f);
+    for (const [kb, fs] of snap.bricks) {
+      const b: V3 = [kb & 1023, (kb >>> 10) & 1023, (kb >>> 20) & 1023];
+      const fw = (fn: (c: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let l = 0; l < BRICK_CELLS; l++) w[l] = fn(add(scale3(b, 8), [l & 7, (l >> 3) & 7, l >> 6])); return w; };
+      e.write("phi", L.base("phi", "F", "PHI") + BRICK_STRIDE * fs, fw(wallPhi));
+      for (let a = 0; a < 3; a++) e.write("vel", L.base("vel", "F", `US${a}`) + BRICK_STRIDE * fs, fw(c => (wallClosed(c) ? 0 : 0.2 * velOf(c, a))));
+      const f = new Uint32Array(flags(fs));
+      for (let l = 0; l < BRICK_CELLS; l++) { const c = add(scale3(b, 8), [l & 7, (l >> 3) & 7, l >> 6]); if (wallClosed(c)) { f[l] = (f[l]! & ~FLAG.OPEN) >>> 0; closedCells++; } }
+      e.write("phi", L.base("phi", "F", "FLAGS") + BRICK_STRIDE * fs, f);
+      occ[fs] = 0xff;
+    }
+    e.write("set", L.set.tileOcc, occ);
+    e.write("set", L.set.ring + RING.DT, new Float32Array([DT])); e.write("set", L.set.ring + RING.H, new Float32Array([H_M]));
+    e.write("set", L.set.ring + RING.GRAVITY, new Float32Array([0, -9.81, 0])); e.write("set", L.set.ring + RING.FLAGS, new Uint32Array([0]));
+    assert.ok(closedCells > 1000, `closed cells ${closedCells}`);
+    const fRead = async (name: string) => (await readChannel(e, name === "PHI" ? "phi" : "vel", name)) as (slot: number) => Float32Array;
+    const cRead = async (pool: "phi" | "vel", name: string) => { const m = new Map<number, Float32Array>(); for (const cs of snap.pages.values()) m.set(cs, new Float32Array((await e.read(pool, L.base(pool, "C", name) + BRICK_STRIDE * cs, BRICK_CELLS)).buffer)); return m; };
+    const fPhi = await fRead("PHI"), fU = [await fRead("US0"), await fRead("US1"), await fRead("US2")];
+    const cPhi = await cRead("phi", "PHI"), cU = [await cRead("vel", "US0"), await cRead("vel", "US1"), await cRead("vel", "US2")];
+    const dir = await e.read("dir"), words = await e.read("census");
+    const state: CensusState = {
+      N: WALL_N, h: fr(H_M), dt: fr(DT), g: [0, fr(-9.81), 0], pages: snap.pages, bricks: snap.bricks,
+      cmask: cs => dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1)),
+      fPhi, cPhi: cs => cPhi.get(cs)!, fU: (a, fs) => fU[a]!(fs), cU: (a, cs) => cU[a]!.get(cs)!, tileOcc: fs => occ[fs]!, cAll,
+      def: (cs, i) => [...words.subarray(CENSUS.STRIDE * cs + CENSUS.DEF + 4 * i, CENSUS.STRIDE * cs + CENSUS.DEF + 4 * i + 4)],
+      wet: (cs, i) => (words[CENSUS.STRIDE * cs + CENSUS.TC + 16 * i + 8]! & 1) === 1,
+      tc: (cs, i) => [...words.subarray(CENSUS.STRIDE * cs + CENSUS.TC + 16 * i, CENSUS.STRIDE * cs + CENSUS.TC + 16 * i + 16)],
+      closed: wallClosed,
+    };
+    const want = censusOracle(state);
+    assert.equal(want.failed, 0);
+    await e.run(brickCensusSchedule(L, k => ({ indirect: ARGS.PER_LIST * k + ARGS.G1 })));
+    const set = await e.read("set"), census = await e.read("census");
+    assert.equal(set[H.FAIL], 0, `FAIL ${set[H.FAIL]} info ${set[H.FAIL_INFO]?.toString(16)}`);
+    const mismatch: string[] = [];
+    const check = (ok: boolean, what: string) => { if (!ok && mismatch.length < 30) mismatch.push(what); };
+    const byteNear = (a: number, b: number, shift: number) => Math.abs(((a >>> shift) & 255) - ((b >>> shift) & 255)) <= 1;
+    const FLAG_BITS = 0xffff0000 >>> 0;
+    let sleeve = 0, contact = 0;
+    for (const cs of cAll) {
+      const sc = want.scratch.get(cs)!, o = CENSUS.STRIDE * cs, pk = pageCoord.get(cs)!;
+      for (let i = 0; i < BRICK_CELLS; i++) {
+        const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]), at = `tile ${t.join(",")}`;
+        for (let k = 0; k < 6; k++) check(census[o + CENSUS.KEYS + 6 * i + k] === sc.keys[i]![k], `${at} key ${k}`);
+        const gw0 = census[o + CENSUS.W0 + i]!, gw1 = census[o + CENSUS.W1 + i]!, gfin = census[o + CENSUS.FIN + i]!;
+        check(byteNear(gw0, sc.w0[i]!, 0) && byteNear(gw0, sc.w0[i]!, 8), `${at} w0 ${gw0.toString(16)} vs ${sc.w0[i]!.toString(16)}`);
+        check(((gw1 & FLAG_BITS) >>> 0) === ((sc.w1[i]! & FLAG_BITS) >>> 0) && byteNear(gw1, sc.w1[i]!, 0), `${at} w1 ${gw1.toString(16)} vs ${sc.w1[i]!.toString(16)}`);
+        check(((gfin & FLAG_BITS & ~(7 << 22)) >>> 0) === ((sc.fin[i]! & FLAG_BITS & ~(7 << 22)) >>> 0) && byteNear(gfin, sc.fin[i]!, 0) && byteNear(gfin, sc.fin[i]!, 8), `${at} fin ${gfin.toString(16)} vs ${sc.fin[i]!.toString(16)}`);
+        check(census[o + CENSUS.CROSS + 2 * i] === sc.cross[i]![0] && census[o + CENSUS.CROSS + 2 * i + 1] === sc.cross[i]![1], `${at} crossing cells`);
+        check(census[o + CENSUS.GAP + i] === sc.gap[i], `${at} gap`);
+        if (t[0] === 2 && t[2] >= 1 && t[2] <= 6 && (state.cmask(cs)[i >> 5]! >>> (i & 31) & 1) === 1) {
+          if (t[1] <= 1) { check((gw1 & CROSSES) !== 0 && (gfin & ((1 << 26) | (1 << 27))) === 0, `${at}: the wetted wall does not cross for the tier, or heats`); sleeve++; }
+          if (t[1] === 2) { check((gw1 & CROSSES) !== 0, `${at}: the free surface at the wall does not cross`); contact++; }
+        }
+      }
+      const gotWant = set.subarray(L.set.want + CMASK_WORDS * cs, L.set.want + CMASK_WORDS * (cs + 1));
+      for (let w = 0; w < 16; w++) check(gotWant[w] === want.want.get(cs)![w], `page ${cs} WANT word ${w}`);
+    }
+    for (const [fs, bits] of want.trig) check(set[L.set.trig + fs] === bits, `TRIG slot ${fs}: ${set[L.set.trig + fs]} vs ${bits}`);
+    assert.deepEqual(mismatch, [], `${mismatch.length} mismatches`);
+    assert.ok(sleeve === 12 && contact === 6, `sleeve ${sleeve}, contact ${contact}`);
+    console.log("setCensus wall:", JSON.stringify({ closedCells, sleeve, contact, crossing: want.counters.CENSUS_CROSSING, band: want.counters.CENSUS_BAND }));
+    e.destroy();
+  });
 });
 
 test("setCensus: the census header words are free in H, or H declares them as the census does", () => {

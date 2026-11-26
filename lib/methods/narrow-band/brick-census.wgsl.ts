@@ -51,9 +51,17 @@
  *   max |Δ∇p| (pmgC PDELTA, +Inf where not published: unknown fails HOT); a 4h tile with no F slot keeps its own heat
  *   word (HEAT4, here every tile's), updated in censusDecide by the old rule. M3 question, to be measured, not
  *   assumed: the freeze against seep's BULK pressure-only rows in the deep interior, decided by time and gates.
- * - No solids at M2: every census open mask is all cells (umCensusOpenCells), so the cut branches
- *   (umPlaneBuriedCorners, buried taps, closed edges) drop, and umObstacleAt is false. A body or solid edit
- *   fails explicitly (NB_FAIL_UNSUPPORTED).
+ * - Solids: an h tile's open mask (umCensusOpenCells) is FLAGS.OPEN of its cells (ncCellClosed, psClosed's rule:
+ *   outside the wall box, or OPEN clear in the cell's F slot, a mask voxel or a body; a cell no F slot holds is
+ *   open). censusFine ports the old cut branches on it: a closed cell is no owner (umOwnerOpen: no classify, no
+ *   bounds), a buried vertex (no incident cell open: an air marker) keeps its raw value and drops from the
+ *   smoothing with its mirror, a buried 4h corner takes the plane of the tile's open crossing cells
+ *   (umPlaneBuriedCorners), the corner metric stops at a closed edge and skips buried tangent taps, the curvature
+ *   reads only vertices whose 8 cells are open and the crossings only open edges, and umDepthSample counts only
+ *   open cells. So a wetted wall below the surface (liquid against buried air markers) is no crossing, and the
+ *   free surface meeting the wall still is. Until lane A2's port (2026-11-26) every mask was all cells, and every
+ *   tile of a resting pool's wetted wall crossed (the old engine's Figure 4 ring). A 4h owner keeps the all-open
+ *   mask (censusCoarse: the static rule holds every wet supported tile h), and umObstacleAt is false.
  * - Storage: a 4h face toward a page that is not resident reads the brick storage (its C face below, 0
  *   above), where the old engine read its own texel. A face of a non-resident brick reads 0.
  * - Dead under the dam's policy and not ported: forwardFine (fastTravel 0) and its travel words, holds,
@@ -198,6 +206,12 @@ const NC_VOLUME_SHAPE:f32=4.0;
 const NC_MOVING_SECONDS:f32=0.5;
 const NC_SAMPLE_REACH:f32=2.5;
 const NC_REQUIRED:u32=33554432u;const NC_CROSSES:u32=268435456u;const NC_WET:u32=536870912u;
+// The tier and the heat of a liquid-solid contact apart (coordinator 2026-11-26, the user's "fine h near solids for accurate
+// physics, but no particles unless heat"): FIN's shape and thin bits are the tier's (a wet wall crossing counts, as at HEAD), and
+// NC_HEAT_SHAPE and NC_HEAT_THIN say they also hold at a liquid-air crossing, the only crossing that heats (ncNeedTriggered).
+const NC_HEAT_SHAPE:u32=67108864u;const NC_HEAT_THIN:u32=134217728u;
+// censusFine's classify flag (mixedTile only, cleared before the class is stored): an open cell of the tile crosses.
+const NC_OPEN_CROSS:u32=0x40000000u;
 fn ncCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
 fn ncCriterionOn(k:u32)->bool{return ((NC_CRITERIA>>k)&1u)!=0u;}
 fn ncTriggerBit(k:u32)->u32{return 1u<<(16u+k);}
@@ -220,6 +234,57 @@ var<workgroup> ncTileCorner:atomic<u32>;
 var<workgroup> ncTileRaw:array<f32,125>;
 var<workgroup> ncTileSmooth:array<f32,125>;
 var<workgroup> ncCornerMetric:array<atomic<u32>,8>;
+// The h tile's cut (umCensusOpenCells, umTileBuried): the closed cells of its 6^3 shell (local -1..4, bit (x + 1) +
+// 6 (y + 1) + 36 (z + 1)) and its buried vertices (no incident cell open: an air marker, not a sample; bit x + 5y +
+// 25z), staged by ncStageCut only where a cell of the tile's own is closed (ncCut, censusFine's). Elsewhere every
+// cell is open and no vertex buried, the old all-open mask.
+var<workgroup> ncShellBits:array<atomic<u32>,7>;
+var<workgroup> ncBuriedBits:array<atomic<u32>,4>;
+var<workgroup> ncShell:array<u32,7>;
+var<workgroup> ncBuried:array<u32,4>;
+var<private> ncCut:bool;
+fn ncShellClosed(c:vec3i)->bool{let i=u32(c.x+1+6*(c.y+1)+36*(c.z+1));return ((ncShell[i>>5u]>>(i&31u))&1u)!=0u;}
+// umCensusCellOpen: a cell of the tile (local 0..3) by the mask; outside the tile, closed.
+fn ncTileCellOpen(c:vec3i)->bool{if(any(c<vec3i(0))||any(c>=vec3i(4))){return false;}return !ncCut||!ncShellClosed(c);}
+fn ncVertexBuried(i:u32)->bool{return ncCut&&((ncBuried[i>>5u]>>(i&31u))&1u)!=0u;}
+fn ncVertexBuriedAt(v:vec3i)->bool{return ncVertexBuried(u32(v.x+5*v.y+25*v.z));}
+// umCensusEdgeOpen: an edge belongs to the fluid domain only if an incident cell of the tile is open.
+fn ncEdgeOpen(v:vec3u,a:u32)->bool{
+ if(!ncCut){return true;}
+ for(var i=0u;i<4u;i++){
+  var c=vec3i(v);c[(a+1u)%3u]-=i32(i&1u);c[(a+2u)%3u]-=i32(i>>1u);
+  if(ncTileCellOpen(c)){return true;}
+ }
+ return false;
+}
+// umCensusVertexOpen: every cell incident to interior vertex v is open.
+fn ncVertexOpen(v:vec3u)->bool{
+ if(!ncCut){return true;}
+ for(var k=0u;k<8u;k++){if(!ncTileCellOpen(vec3i(v)-vec3i(ncCorner(k,2u)))){return false;}}
+ return true;
+}
+// The cut's staging: every lane, in uniform control, where ncCut holds. Lane a shell cell (ncCellClosed), then lane a
+// vertex (umCensusVertexBuried over the shell bits).
+fn ncStageCut(t:vec3i,lane:u32){
+ if(lane<7u){atomicStore(&ncShellBits[lane],0u);}
+ if(lane<4u){atomicStore(&ncBuriedBits[lane],0u);}
+ workgroupBarrier();
+ for(var i=lane;i<216u;i+=64u){
+  let l=vec3i(i32(i%6u),i32((i/6u)%6u),i32(i/36u))-vec3i(1);
+  if(ncCellClosed(4*t+l)){atomicOr(&ncShellBits[i>>5u],1u<<(i&31u));}
+ }
+ workgroupBarrier();
+ if(lane<7u){ncShell[lane]=atomicLoad(&ncShellBits[lane]);}
+ workgroupBarrier();
+ for(var i=lane;i<125u;i+=64u){
+  let v=vec3i(ncCorner(i,5u));var buried=true;
+  for(var k=0u;k<8u;k++){if(!ncShellClosed(v-vec3i(ncCorner(k,2u)))){buried=false;break;}}
+  if(buried){atomicOr(&ncBuriedBits[i>>5u],1u<<(i&31u));}
+ }
+ workgroupBarrier();
+ if(lane<4u){ncBuried[lane]=atomicLoad(&ncBuriedBits[lane]);}
+ workgroupBarrier();
+}
 fn ncSmoothAt(v:vec3u)->f32{return ncTileSmooth[v.x+5u*v.y+25u*v.z];}
 fn ncRawAt(v:vec3i)->f32{return ncTileRaw[v.x+5*v.y+25*v.z];}
 // umSmoothCurvature (l.1281).
@@ -236,21 +301,76 @@ fn ncSmoothCurvature(p:vec3u,centre:f32)->vec2f{
  let ghg=dot(g*g,d)+2.0*(g.x*g.y*m.x+g.y*g.z*m.y+g.z*g.x*m.z);
  return vec2f((gg*(d.x+d.y+d.z)-ghg)/(gg*sqrt(gg)),1.0);
 }
-// umStageSmoothTile (l.1313), every cell open: no buried taps. The raw vertices (ncTileRaw, ncLoadFine at the tile's
-// 5^3 vertices) are the caller's: censusFine stages them once a tile, for its classify too.
+// umStageSmoothTile (l.1313). The raw vertices (ncTileRaw, ncLoadFine at the tile's 5^3 vertices) are the caller's:
+// censusFine stages them once a tile, for its classify too. A cut tile (ncCut) filters over its unburied vertices
+// alone, in mirror pairs (a buried one holds an air marker, and keeps it); an uncut one takes every tap.
 fn ncSmoothTile(lane:u32){
  for(var i=lane;i<125u;i+=64u){
   let v=ncCorner(i,5u);
+  if(ncVertexBuried(i)){ncTileSmooth[i]=ncTileRaw[i];continue;}
   let r=select(vec3u(0u),vec3u(1u),(v>vec3u(0u))&(v<vec3u(4u)));
   var sum=0.0;var weight=0.0;
   for(var z=v.z-r.z;z<=v.z+r.z;z++){for(var y=v.y-r.y;y<=v.y+r.y;y++){for(var x=v.x-r.x;x<=v.x+r.x;x++){
    let at=x+5u*y+25u*z;
+   // A buried tap goes with its mirror: the pass stays centred, exact on a linear field.
+   if(ncCut){let m=2u*v-vec3u(x,y,z);if(ncVertexBuried(at)||ncVertexBuried(m.x+5u*m.y+25u*m.z)){continue;}}
    let w=select(1.0,2.0,x==v.x)*select(1.0,2.0,y==v.y)*select(1.0,2.0,z==v.z);
    sum+=w*ncTileRaw[at];weight+=w;
   }}}
   ncTileSmooth[i]=sum/weight;
  }
  workgroupBarrier();
+}
+// umPlaneBuriedCorners (uniform-mixed-dynamic.ts l.765): a cut tile's buried 4h corners take the plane its open
+// crossing cells continue into the solid (the remap's planeSums, from the smoothed vertices of the open cells that
+// cross the surface), not the air marker: against the marker every wall tile of a pool at rest beside a tank wall
+// saturated the displacement (the old Figure 4's waterline ring). A lane a cell marks its open crossing cell
+// (ncPlaneCells); every lane then takes the sums over the 125 vertices, each weighted by the marked cells holding it
+// (the old per-cell sums, in another order), and solves the same centred least squares, its shift refined once.
+// Every lane of a cut tile calls it: the corners' buried bits (vertices 0, 4, 20, 24 in word 0; 100, 104, 120, 124 in
+// word 3) are loaded uniformly.
+var<workgroup> ncPlaneCells:array<atomic<u32>,2>;
+var<workgroup> ncPlaneMask:array<u32,2>;
+fn ncPlaneBuriedCorners(lane:u32,c:ptr<function,array<f32,8>>){
+ let low=workgroupUniformLoad(&ncBuried[0]);let high=workgroupUniformLoad(&ncBuried[3]);
+ var buried=0u;
+ for(var k=0u;k<8u;k++){let i=u32(dot(vec3i(4*ncCorner(k,2u)),vec3i(1,5,25)));if(((select(low,high,i>=96u)>>(i&31u))&1u)!=0u){buried|=1u<<k;}}
+ if(buried==0u){return;}
+ if(lane<2u){atomicStore(&ncPlaneCells[lane],0u);}
+ workgroupBarrier();
+ let cell=ncCorner(lane,4u);
+ if(ncTileCellOpen(vec3i(cell))){
+  var below=false;var above=false;
+  for(var k=0u;k<8u;k++){if(ncSmoothAt(cell+ncCorner(k,2u))<0.0){below=true;}else{above=true;}}
+  if(below&&above){atomicOr(&ncPlaneCells[lane>>5u],1u<<(lane&31u));}
+ }
+ workgroupBarrier();
+ if(lane<2u){ncPlaneMask[lane]=atomicLoad(&ncPlaneCells[lane]);}
+ let mask=vec2u(workgroupUniformLoad(&ncPlaneMask[0]),workgroupUniformLoad(&ncPlaneMask[1]));
+ // No open crossing cell: the corners keep their markers, as the old A.w == 0.
+ if(all(mask==vec2u(0u))){return;}
+ var A=vec4f(0.0);var B=vec4f(0.0);var C=vec4f(0.0);var D=vec4f(0.0);
+ for(var i=0u;i<125u;i++){
+  let q=ncCorner(i,5u);var n=0u;
+  for(var k=0u;k<8u;k++){
+   let e=vec3i(q)-vec3i(ncCorner(k,2u));
+   if(any(e<vec3i(0))||any(e>=vec3i(4))){continue;}
+   let j=u32(e.x+4*e.y+16*e.z);n+=(mask[j>>5u]>>(j&31u))&1u;
+  }
+  if(n==0u){continue;}
+  let w=f32(n);let v=ncTileSmooth[i];let r=vec3f(q);
+  A+=w*vec4f(r,1.0);B+=w*vec4f(r*r,v);C+=w*vec4f(r.xxy*r.yzz,0.0);D+=w*vec4f(r*v,0.0);
+ }
+ let mean=A.xyz/A.w;let level=B.w/A.w;
+ let diagonal=B.xyz-mean*A.xyz;let cross3=C.xyz-mean.xxy*A.yzz;let moment=D.xyz-mean*B.w;
+ let shift=1e-6*max(diagonal.x+diagonal.y+diagonal.z,1.0);
+ let c0=vec3f(diagonal.x+shift,cross3.x,cross3.y);let c1=vec3f(cross3.x,diagonal.y+shift,cross3.z);let c2=vec3f(cross3.y,cross3.z,diagonal.z+shift);
+ let det=dot(c0,cross(c1,c2));var slope=vec3f(0.0);
+ for(var fit=0u;fit<2u;fit++){
+  let rest=moment-vec3f(dot(vec3f(diagonal.x,cross3.x,cross3.y),slope),dot(vec3f(cross3.x,diagonal.y,cross3.z),slope),dot(vec3f(cross3.y,cross3.z,diagonal.z),slope));
+  slope+=vec3f(dot(rest,cross(c1,c2)),dot(c0,cross(rest,c2)),dot(c0,cross(c1,rest)))/det;
+ }
+ for(var k=0u;k<8u;k++){if((buried&(1u<<k))!=0u){(*c)[k]=level+dot(slope,vec3f(4u*ncCorner(k,2u))-mean);}}
 }
 // umSurfaceDisplacement's corner Laplacian (uniform-mixed-dynamic.ts 907-916): a lane a (corner k, axis a) term, summed in axis order by
 // the corner's lane, so the sum and its rounding are the old loop's; 24 lanes instead of 8 lanes x 3 serial axes.
@@ -260,19 +380,25 @@ var<workgroup> ncLapTerm:array<f32,24>;
 var<workgroup> ncLapUsed:array<u32,24>;
 var<workgroup> ncLapAt:array<f32,48>;
 var<workgroup> ncLapIn:array<u32,48>;
+// A 4h lattice vertex whose eight cells are all closed (ncCellClosed): an air marker, no sample of the liquid.
+fn ncWideBuried(at:vec3i)->bool{
+ for(var q=0u;q<8u;q++){if(!ncCellClosed(4*at-vec3i(ncCorner(q,2u)))){return false;}}
+ return true;
+}
+// A cut tile (ncCut) reads no buried vertex, centre or neighbour: a buried vertex's air phi feeds no shape misfit.
 fn ncCornerLaplacian(t:vec3i,lane:u32,held:array<f32,8>){
  let h=ncH();
  if(lane<48u){
   let k=lane/6u;let a=(lane/2u)%3u;var at=t+vec3i(ncCorner(k,2u));at[a]+=select(-1,1,(lane&1u)!=0u);
   var value=0.0;var present=0u;
-  if(abs(held[k])<=2.0*h&&ncWidePresent(at)){value=ncLoadCorner(4*at);present=1u;}
+  if(abs(held[k])<=2.0*h&&ncWidePresent(at)&&!(ncCut&&ncWideBuried(at))){value=ncLoadCorner(4*at);present=1u;}
   ncLapAt[lane]=value;ncLapIn[lane]=present;
  }
  workgroupBarrier();
  if(lane<24u){
   let k=lane/3u;let centre=held[k];
   var used=0u;var term=0.0;
-  if(abs(centre)<=2.0*h){
+  if(abs(centre)<=2.0*h&&!ncVertexBuriedAt(4*vec3i(ncCorner(k,2u)))){
    let below=ncLapAt[2u*lane];let above=ncLapAt[2u*lane+1u];
    if(ncLapIn[2u*lane]!=0u&&ncLapIn[2u*lane+1u]!=0u){
     if(!(abs(below-centre)>6.0*h||abs(above-centre)>6.0*h)){used=1u;term=above-2.0*centre+below;}
@@ -287,7 +413,8 @@ fn ncCornerLaplacian(t:vec3i,lane:u32,held:array<f32,8>){
   atomicMax(&ncTileCorner,bitcast<u32>(abs(lap)/(12.0*h)));
  }
 }
-// umMetricCorners (l.1437), every edge open and no corner buried.
+// umMetricCorners (l.1437): up a corner's edge to its first crossing (a closed edge ends the walk), no tangent along a
+// buried tap; a buried corner keeps its value (the plane's).
 fn ncMetricCorners(lane:u32,c:ptr<function,array<f32,8>>){
  if(lane<8u){atomicStore(&ncCornerMetric[lane],NC_NO_METRIC);}
  workgroupBarrier();
@@ -297,6 +424,7 @@ fn ncMetricCorners(lane:u32,c:ptr<function,array<f32,8>>){
   var step=vec3i(0);step[a]=inward[a];
   for(var j=0;j<4;j++){
    let v=corner+j*step;let n=v+step;
+   if(!ncEdgeOpen(vec3u(min(v,n)),a)){break;}
    let u=ncRawAt(v);let w=ncRawAt(n);
    if((u<0.0)==(w<0.0)){continue;}
    let f=u/(u-w);
@@ -304,6 +432,7 @@ fn ncMetricCorners(lane:u32,c:ptr<function,array<f32,8>>){
    for(var b=0u;b<3u;b++){
     if(b==a){continue;}
     var t=vec3i(0);t[b]=inward[b];let p=v+t;let q=n+t;
+    if(ncVertexBuriedAt(p)||ncVertexBuriedAt(q)){continue;}
     g[b]=f32(inward[b])*mix(ncRawAt(p)-u,ncRawAt(q)-w,f);
    }
    let along=abs(g[a])/max(length(g),1e-20);
@@ -314,7 +443,7 @@ fn ncMetricCorners(lane:u32,c:ptr<function,array<f32,8>>){
  workgroupBarrier();
  for(var k=0u;k<8u;k++){
   let m=atomicLoad(&ncCornerMetric[k]);
-  if(m!=NC_NO_METRIC&&(*c)[k]!=0.0){(*c)[k]=sign((*c)[k])*bitcast<f32>(m)*ncH();}
+  if(m!=NC_NO_METRIC&&!ncVertexBuriedAt(4*vec3i(ncCorner(k,2u)))&&(*c)[k]!=0.0){(*c)[k]=sign((*c)[k])*bitcast<f32>(m)*ncH();}
  }
 }
 // umCornerDistance (l.1473).
@@ -326,24 +455,25 @@ fn ncCornerDistance(v:vec3u,a:u32,f:f32,low:vec4f,high:vec4f,dx:vec4f)->f32{
  let gradient=vec3f(mix(gx.x,gx.y,t.z),mix(x0.y-x0.x,x0.w-x0.z,t.z),y0.y-y0.x);
  return 4.0*mix(y0.x,y0.y,t.z)/max(length(gradient),4.0e-3*ncH());
 }
-// umSurfaceDisplacement (l.1481) of the h tile at tile coordinate t, every cell open, its raw vertices staged.
-// Every lane calls it.
-fn ncSurfaceDisplacement(t:vec3i,lane:u32)->f32{
+// umSurfaceDisplacement (l.1481) of the h tile at tile coordinate t, its raw vertices and its cut staged. Every lane
+// calls it, cut (ncCut, from a uniform load) alike in every lane.
+fn ncSurfaceDisplacement(t:vec3i,lane:u32,cut:bool)->f32{
  let h=ncH();
  ncSmoothTile(lane);
  var c:array<f32,8>;var worst=0.0;var along=0.0;var crossings=0u;var curve=0.0;var curves=0u;
  // The tile's corners are its staged raw vertices (4·corner): the same nbVertexPhi read, once a tile, not once a lane.
  for(var k=0u;k<8u;k++){c[k]=ncRawAt(4*vec3i(ncCorner(k,2u)));}
+ if(cut){ncPlaneBuriedCorners(lane,&c);}
  let held=c;ncMetricCorners(lane,&c);ncCornerLaplacian(t,lane,held);
  let low=vec4f(c[0],c[2],c[4],c[6]);let high=vec4f(c[1],c[3],c[5],c[7]);let dx=high-low;
  for(var i=lane;i<125u;i+=64u){
   let v=ncCorner(i,5u);let value=ncTileSmooth[i];
-  if(all(v>=vec3u(1u))&&all(v<=vec3u(3u))&&abs(value)<=1.5*h){
+  if(all(v>=vec3u(1u))&&all(v<=vec3u(3u))&&abs(value)<=1.5*h&&ncVertexOpen(v)){
    let kappa=ncSmoothCurvature(v,value);
    if(kappa.y>0.0){curve+=kappa.x*(4.0/3.0)*h;curves++;}
   }
   for(var a=0u;a<3u;a++){
-   if(v[a]>=4u){continue;}
+   if(v[a]>=4u||!ncEdgeOpen(v,a)){continue;}
    var n=v;n[a]+=1u;
    let next=ncSmoothAt(n);
    if((value<0.0)!=(next<0.0)){
@@ -513,11 +643,11 @@ fn ncFinishTile(p:vec3i,width:u32,c:NcClass)->NcFinish{
   let tolerant=NC_TOL>0.0;let error=bitcast<f32>(c.error);
   let shaped=!fast&&ncCriterionOn(NC_SHAPE)&&!(tolerant&&error<=NC_TOL);
   if(!fast){w0|=select(255u,ncScoreByte(error/max(NC_TOL,1e-30)),tolerant);}
-  if(shaped){w1|=ncTriggerBit(NC_SHAPE);}
+  if(shaped){w1|=ncTriggerBit(NC_SHAPE)|NC_HEAT_SHAPE;}
   if(all(c.deep!=vec2u(0u))){
    let thickness=max(min(ncOrderValue(c.deep.x),ncOrderValue(c.deep.y)),0.0)/ncH();let thin=NC_THIN;
    w0|=ncScoreByte(thin/max(thickness,0.25*thin))<<8u;
-   if(thickness<thin&&ncCriterionOn(NC_THIN_K)){w1|=ncTriggerBit(NC_THIN_K);}
+   if(thickness<thin&&ncCriterionOn(NC_THIN_K)){w1|=ncTriggerBit(NC_THIN_K)|NC_HEAT_THIN;}
   }
   let boundary=ncBoundary(p,width,c);
   w1|=ncScoreByte(boundary.score);
@@ -821,6 +951,13 @@ fn ncGap(s:u32,i:u32)->u32{return census[NC_S*s+${CENSUS.GAP}u+i];}
 fn ncReq(s:u32,w:u32)->u32{return census[NC_S*s+${CENSUS.REQ}u+w];}
 fn ncMov(s:u32,w:u32)->u32{return census[NC_S*s+${CENSUS.MOV}u+w];}
 fn ncCellKind(c:vec3i)->u32{if(!nbInWallBox(c)){return 2u;}return select(0u,1u,ncPageSlot(c>>vec3u(5u))==NB_NONE);}
+// A closed cell (psClosed, umCensusCellClosed): outside the wall box, or FLAGS.OPEN clear in its F slot (solidStamp's
+// mask voxel, a body's cut). A cell no F slot holds reads open, as an AIR page's.
+fn ncCellClosed(c:vec3i)->bool{
+  if(!nbInWallBox(c)){return true;}
+  let s=nbFSlotOfBrick(c>>vec3u(3u));if(s>=NB_SEAM){return false;}
+  return (phi[NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(c)]&NB_FLAG_OPEN)==0u;
+}
 fn ncTileState(q:vec3i)->u32{if(!nbTileInLattice(q)){return 2u;}return select(0u,1u,ncPageSlot(q>>vec3u(3u))==NB_NONE);}
 fn ncCellOwnerH(c:vec3i)->bool{return nbCellOwnerH(c);}
 fn ncObstacleAt(q:vec3i)->bool{return false;}
@@ -975,10 +1112,13 @@ fn ncDeformation(t:vec3i,s:u32,i:u32)->f32{
 // where the step's deformation exceeds the transport budget (UNIFORM_SURFACE_TRANSPORT_ERROR_H of h). The budget's
 // drop (UNIFORM_STAGE_IMPORTANCE.dropped) never fires on the dam (detailBudgetPercent 100: policy.activity.x = 100,
 // nbBudgetOn() false), so it is not ported.
-fn ncNeedTriggered(t:vec3i,s:u32,i:u32,criteria:u32)->bool{
+// fin is the tile's final word 1: its criteria (bits 16..21) and, for shape and thin, whether they hold at a liquid-air
+// crossing (NC_HEAT_SHAPE, NC_HEAT_THIN). A wet wall's crossing keeps its tile h (the tier) and heats nothing.
+fn ncNeedTriggered(t:vec3i,s:u32,i:u32,fin:u32)->bool{
+  let criteria=(fin>>16u)&63u;
   if((criteria&0x3cu)!=0u){return true;}
-  if((criteria&1u)!=0u){return true;}
-  if((criteria&2u)==0u){return false;}
+  if((criteria&1u)!=0u&&(fin&NC_HEAT_SHAPE)!=0u){return true;}
+  if((criteria&2u)==0u||(fin&NC_HEAT_THIN)==0u){return false;}
   return ncDt()*ncDeformation(t,s,i)/ncH()>${UNIFORM_SURFACE_TRANSPORT_ERROR_H};
 }
 // R2 (lane E, the user's aggressive fine-tile retirement; a stated deviation, coordinator's ruling 2026-11-16): a
@@ -1158,6 +1298,9 @@ fn cfTileNormal()->u32{
 // The tile's faces (US), staged once: axis a, plane p (0..4, 4t[a] + p), and the cell across (u = a + 1, v = a + 2):
 // 80a + 16p + 4v + u. Every face a cell of the tile reads (its low face, plane p, and its high face, plane p + 1).
 var<workgroup> cfFaces:array<f32,240>;
+// A closed cell of the tile's own (ncCellClosed): the tile is cut (ncCut). cfClosed: this lane's cell.
+var<workgroup> cfCut:atomic<u32>;
+var<private> cfClosed:bool;
 // The tile's 5^3 raw vertices (ncTileRaw) and its faces, each read once (ncLoadFine and nbFacePlane as the cells read
 // them): the cells' classify, bounds and extents and the surface displacement then read the same values from here.
 // Tile t is h-owned (censusFine's wgFlag), and every staged face has a cell of t on one side (plane p < 4: the cell
@@ -1165,6 +1308,7 @@ var<workgroup> cfFaces:array<f32,240>;
 fn cfStage(t:vec3i,lane:u32){
   let origin=4*t;
   for(var i=lane;i<125u;i+=64u){ncTileRaw[i]=ncLoadFine(origin+vec3i(ncCorner(i,5u)));}
+  cfClosed=ncCellClosed(origin+vec3i(ncCorner(lane,4u)));if(cfClosed){atomicOr(&cfCut,1u);}
   for(var i=lane;i<240u;i+=64u){
     let a=i/80u;let r=i%80u;var q=origin;q[a]+=i32(r/16u);q[(a+1u)%3u]+=i32(r%4u);q[(a+2u)%3u]+=i32((r/4u)%4u);
     var f=0.0;if(nbFaceInLattice(q,a)){f=nbFFace(q,a);}cfFaces[i]=f;
@@ -1186,7 +1330,9 @@ fn cfOwnerBounds1(origin:vec3i,l:vec3u,c:ptr<function,NcClass>){
   (*c).low[axis]=min((*c).low[axis],ncOrderKey(low));(*c).high[axis]=max((*c).high[axis],ncOrderKey(high));
  }
 }
-// ncClassifyOwner(t, 1, lane, c, true) on the staged vertices and faces.
+// ncClassifyOwner(t, 1, lane, c, true) on the staged vertices and faces. Every cell classifies, a closed one too: its
+// crossing (the wall's buried air markers against the liquid) is the tier's, as at HEAD. An open cell's crossing is
+// also NC_OPEN_CROSS, a liquid-air crossing, the heat's.
 fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
  let h=ncH();let l=ncCorner(lane,4u);
  let origin=4*t+vec3i(l);
@@ -1202,7 +1348,7 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
  let epsilon=1e-6*h;
  let crosses=lowPhi<=epsilon&&highPhi>=-epsilon&&lowPhi<highPhi;
  if(crosses){
-  (*c).crossing[lane/32u]|=1u<<(lane%32u);
+  (*c).crossing[lane/32u]|=1u<<(lane%32u);if(!cfClosed){(*c).flags|=NC_OPEN_CROSS;}
   for(var a=0u;a<3u;a++){(*c).gap[a]=min((*c).gap[a],local[a]);(*c).gap[3u+a]=min((*c).gap[3u+a],3u-local[a]);}
  }
  let interior=!crosses&&inside==8u;
@@ -1217,7 +1363,7 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
   ncInit();
   let g=nbGroup(wid);let entry=g>>3u;let j=g&7u;
   if(lane==0u){
-    wgFlag=0u;atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);
+    wgFlag=0u;atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);atomicStore(&cfCut,0u);
     if(entry<nbListCount(NB_LIST_F_ALL)){
       ${bodies ? `let fs=nbListSlot(NB_LIST_F_ALL,entry);
       ${tiered && !statics ? `// A static cut brick, tiered: no static need rule yet (censusBegin's note), info 0x63000004.
@@ -1247,22 +1393,46 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
       for(var q=0u;q<2u;q++){if(c.crossing[q]!=0u){atomicOr(&tileCrossing[q],c.crossing[q]);}}
     }
     workgroupBarrier();
-    if(lane==0u){wgFlag=atomicLoad(&mixedTile);}
-    let crossing=(workgroupUniformLoad(&wgFlag)&2u)!=0u;
+    // Bit 31: the tile is cut (cfCut), beside mixedTile's flags.
+    if(lane==0u){wgFlag=atomicLoad(&mixedTile)|select(0u,0x80000000u,atomicLoad(&cfCut)!=0u);}
+    let tileFlags=workgroupUniformLoad(&wgFlag);
+    let crossing=(tileFlags&2u)!=0u;let cut=(tileFlags&0x80000000u)!=0u;let openCross=(tileFlags&NC_OPEN_CROSS)!=0u;
     let shaping=crossing&&NC_TOL>0.0;
     ${tiered ? "if(crossing){cfNormalCell(lane);}" : ""}
-    if(shaping){atomicMax(&tileError,bitcast<u32>(ncSurfaceDisplacement(t,lane)));}
+    // The tier's misfit, every cell open (HEAD's): a wet wall's crossing keeps its tile h as it did.
+    ncCut=false;
+    if(shaping){atomicMax(&tileError,bitcast<u32>(ncSurfaceDisplacement(t,lane,false)));}
     if((atomicLoad(&mixedTile)&2u)!=0u){let deep=ncDepthSample(t,lane);for(var q=0u;q<2u;q++){atomicMax(&tileDeep[q],deep[q]);}}
     workgroupBarrier();
+    var c=ncEmptyClass();
     if(lane==0u){
-      var c=ncEmptyClass();
       for(var a=0u;a<3u;a++){c.low[a]=atomicLoad(&tileLow[a]);c.high[a]=atomicLoad(&tileHigh[a]);}
       for(var q=0u;q<6u;q++){c.gap[q]=atomicLoad(&tileGap[q]);c.reach[q]=atomicLoad(&tileReach[q]);}
-      c.flags=atomicLoad(&mixedTile);c.error=atomicLoad(&tileError);
+      c.flags=atomicLoad(&mixedTile)&~NC_OPEN_CROSS;c.error=atomicLoad(&tileError);
       c.error=bitcast<u32>(max(bitcast<f32>(c.error),max(ncVolumeError(),select(0.0,max(ncCurveError(),ncCornerCurveError()),ncClassMoving(c)))));
       c.crossing=vec2u(atomicLoad(&tileCrossing[0]),atomicLoad(&tileCrossing[1]));
       c.deep=vec2u(atomicLoad(&tileDeep[0]),atomicLoad(&tileDeep[1]));
-      let r=ncFinishTile(t,1u,c);
+    }
+    // The heat's misfit (lane A2's port of the old cut branches): a cut tile that crosses at an open cell measures its
+    // liquid-air surface again over its open cells alone, its buried corners on the open crossing cells' plane and no
+    // buried vertex in its corner curvature. An uncut tile's is the tier's.
+    let reheat=shaping&&cut&&openCross;
+    var heatError=0.0;
+    if(reheat){
+      workgroupBarrier();
+      if(lane==0u){atomicStore(&tileError,0u);atomicStore(&ncTileSigned,0);atomicStore(&ncTileCrossings,0u);atomicStore(&ncTileCurve,0);atomicStore(&ncTileCurves,0u);atomicStore(&ncTileCorner,0u);}
+      ncCut=true;ncStageCut(t,lane);
+      atomicMax(&tileError,bitcast<u32>(ncSurfaceDisplacement(t,lane,true)));
+      workgroupBarrier();
+      if(lane==0u){heatError=max(bitcast<f32>(atomicLoad(&tileError)),max(ncVolumeError(),select(0.0,max(ncCurveError(),ncCornerCurveError()),ncClassMoving(c))));}
+      ncCut=false;
+    }
+    if(lane==0u){
+      var r=ncFinishTile(t,1u,c);
+      // Heat from a liquid-air crossing only: none without an open crossing cell, and a cut tile's shape heat by the
+      // liquid-air misfit (within the tier's shape: ncFinishTile's fast and criterion rules hold for both).
+      if(!openCross){r.w1&=~(NC_HEAT_SHAPE|NC_HEAT_THIN);}
+      else if(reheat&&heatError<=NC_TOL){r.w1&=~NC_HEAT_SHAPE;}
       ncStoreClass(nbCSlotOfPage(t>>vec3u(3u)),nbTileIndex(t),c,r,1u);
       ${tiered ? `census[NC_S*nbCSlotOfPage(t>>vec3u(3u))+${CENSUS.VOL}u+nbTileIndex(t)]=select(0u,cfTileNormal(),crossing);` : ""}
       atomicMax(&wgReach,r.reach);if((c.flags&2u)!=0u){atomicAdd(&wgCrossing,1u);}
@@ -1650,7 +1820,7 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   // lHeatNow on its own tiles, the same words) and the deep keep. Without it (cfg.w = 1) D = 0: no tile is deep.
   let head=cfg.z==1u&&cfg.w==3u;let o=NC_S*cs;
   if(head){
-    let trig=ncNeedTriggered(t,cs,i,(ncFin(cs,i)>>16u)&63u);let h=bitcast<f32>(census[o+RG_HEAT4+i]);
+    let trig=ncNeedTriggered(t,cs,i,ncFin(cs,i));let h=bitcast<f32>(census[o+RG_HEAT4+i]);
     census[o+RG_HEAT4+i]=bitcast<u32>(max(max(0.0,h-4.0*ncDt()),select(0.0,2.0,trig)));
   }
   // decideTile (l.1934, l.1956; lane F's M4): a tile this step's drop can fill is joined (REASON.source): it bands and
@@ -1760,7 +1930,7 @@ var<workgroup> wgGo:u32;
       let b=vec3u(child&3u,(child>>2u)&3u,child>>4u);var bits=0u;
       for(var j=0u;j<8u;j++){
         let q=2u*b+vec3u(j&1u,(j>>1u)&1u,j>>2u);let qi=q.x|(q.y<<3u)|(q.z<<6u);let w1=ncFin(cs,qi);
-        bits|=select(0u,1u<<j,ncNeedTriggered(xTileOf(cs,qi),cs,qi,(w1>>16u)&63u));
+        bits|=select(0u,1u<<j,ncNeedTriggered(xTileOf(cs,qi),cs,qi,w1));
         // The thin trigger alone (word 1 bit 17: nbActivityThin), bit 8 + j, for F's thin move path.
         bits|=select(0u,1u<<(8u+j),((w1>>17u)&1u)!=0u);
       }
