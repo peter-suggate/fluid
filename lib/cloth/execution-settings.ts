@@ -1,4 +1,4 @@
-import type { ClothSolverSettings } from './types';
+import { CLOTH_ICLOTH_DEFAULTS, type ClothMethod, type ClothSolverSettings } from './types';
 import { CLOTH_NEWTON_SCENE_DEFAULTS } from './newton-defaults';
 
 /** The viewport runs validated optimizations by default; headless reference callers opt in explicitly. */
@@ -15,7 +15,11 @@ export function clothExecutionSettings(settings: ClothSolverSettings = {}, liveD
     // No inexact-solve forcing: forcingMax 0.5 let the cloth slip on the rotating sphere (spin 0.57 of 0.785 rad/s,
     // 46-60 mm from the full-tolerance pose within 20 steps from tick 120); at full PCG tolerance it holds 0.775.
     ...(enabled ? { contactLinearization:'factorized' as const } : {}), ...settings.newton };
+  // The method as authored: an unknown one is refused by validateClothDocument and when the document is built.
+  const method: ClothMethod = settings.method ?? 'newton';
   return {
+    method,
+    icloth: { rounds: settings.icloth?.rounds ?? CLOTH_ICLOTH_DEFAULTS.rounds, impactIterations: settings.icloth?.impactIterations ?? CLOTH_ICLOTH_DEFAULTS.impactIterations },
     solidCandidateReuse,
     macroCacheCapacity:solidCandidateReuse ? 64 : undefined,
     contactEntryCapacity:enabled ? 256 : undefined,

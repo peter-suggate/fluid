@@ -49,7 +49,7 @@ import { candidateCacheCommon, candidateCachePass, candidateCacheDeclaration, CA
  *   plane  (n.xyz, certified support gap) as f32 bits; n points from the second primitive
  *          to the first; a gap <= 0 marks a pair with no separating plane
  */
-import { OGC_COMMON_WGSL, OGC_COUNTERS_WGSL, OGC_POSE_WORD, OGC_POSE_WORDS, OGC_PROJECT_RECORD, OGC_SOLID_WGSL, ogcVertexBlockWGSL } from "./ogc-wgsl";
+import { OGC_HV_CACHE_WGSL, OGC_LEAN, OGC_LEAN_LEVEL, OGC_NO_SELF, OGC_SOLID_PENALTY, OGC_COMMON_WGSL, OGC_COUNTERS_WGSL, OGC_POSE_WORD, OGC_POSE_WORDS, OGC_PROJECT_RECORD, OGC_SOLID_WGSL, ogcVertexBlockWGSL } from "./ogc-wgsl";
 
 export const OGC_PARAM_WORDS = 88;
 /**
@@ -67,6 +67,8 @@ export const OGC_PARAM_WORDS = 88;
  * every vertex and every sample exactly (the moving solid is at its end pose, a_v = 0), so it
  * never conflicts: one redo slot, and a conflict left after it fails as heldConflict.
  */
+const LEAN_THR_JS = typeof process !== "undefined" && process.env?.CLOTH_LEAN_THR ? Number(process.env.CLOTH_LEAN_THR).toFixed(2) : "2.5";
+const ABL_NO_EE = typeof process !== 'undefined' && process.env?.CLOTH_NO_EE === '1', ABL_NO_VT = typeof process !== 'undefined' && process.env?.CLOTH_NO_VT === '1';
 export const OGC_REDO_ROUNDS = 8;
 export const OGC_REDO_MANDATORY = 32;
 /** Per vertex at scaleOff, the least shift's words: the next redo's scale (atomicMin) and this round's. */
@@ -454,6 +456,7 @@ fn putWork4(i: u32, q: vec4<f32>) {
 // The truncation terms of a ball bound (boundTerms, below), without its entry.
 struct OgcTerms { q: vec4<f32>, D: vec3<f32>, rl: f32 }
 fn termsOf(h: OgcSolidHeader, sb: OgcSolidBound, rc: f32, margin: f32) -> OgcTerms {
+  ${OGC_SOLID_PENALTY ? "return OgcTerms(vec4<f32>(0.0), vec3<f32>(0.0), 0.0);" : ""}
   if (!(sb.phi0 > 0.0)) {
     atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_SOLID_PENETRATION);
     return OgcTerms(vec4<f32>(0.0, 0.0, 0.0, 3.0e38), vec3<f32>(0.0), 0.0);
@@ -543,6 +546,7 @@ var<workgroup> wgSqueeze: atomic<u32>;
 // The envelope r + s rho, at least rqBase and at most rqTop (a clamp at rqTop is counted): rqMax, or
 // gamma_r times the smallest rest altitude when the envelope is capped to the mesh (OgcContactConfig).
 fn envelopeOf(rho: f32) -> f32 {
+  ${OGC_LEAN_LEVEL >= 3 ? `if (P.N != 0u) { return ${LEAN_THR_JS} * P.r; }` : ""}
   let env = max(P.rqBase, P.r + P.envScale * rho);
   if (env > P.rqTop) { atomicAdd(&wgCap, 1u); return P.rqTop; }
   return env;
@@ -574,8 +578,9 @@ fn pushSolidEntry(v: u32, y: u32, lambda: f32) {
 fn boundTerms(v: u32, h: OgcSolidHeader, sb: OgcSolidBound, x0: vec3<f32>, y: u32, rc: f32, margin: f32, xs: vec3<f32>) -> OgcTerms {
   let t = termsOf(h, sb, rc, margin);
   if (t.q.w >= 1.0e38) { return t; }
+  ${OGC_LEAN ? "if (P.N != 0u) { return t; }" : ""}
   let st = ogcSolidSample(h, xs);
-  let lambda = select(0.0, -ogcActivation(st.phi, P.r, P.kc).y * length(st.grad), st.phi > 0.0 && st.phi < P.r) * ogcSolidMu(h, xs);
+  let lambda = select(0.0, -ogcSolidAct(st.phi, P.r, P.kc).y * length(st.grad), ${OGC_SOLID_PENALTY ? "" : "st.phi > 0.0 && "}st.phi < P.r) * ogcSolidMu(h, xs);
   pushSolidEntry(v, y, lambda);
   return t;
 }
@@ -669,6 +674,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     var inertial = vel[v].xyz * P.dt + P.gravity.xyz * (P.dt * P.dt);
     if (P.predict == 2u) { inertial = pos[v].xyz - x; }
     if (P.predict == 3u) { inertial = tgt[v].xyz - x; }
+    ${OGC_LEAN_LEVEL >= 5 ? "if (atomicLoad(&counters[OGC_LEAN_RELIST]) != 0u) { inertial = pos[v].xyz - x; }" : ""}
     var plen = length(inertial);
     if (!mandatory) { plen = pred[v].w; }
     var flags = atomicLoad(&work[P.heldOff + v]);
@@ -951,6 +957,44 @@ fn writeArgs(on: bool) {
  * pose table (entries k and k + 1 for the frame's step k; the table's first vec4
  * holds its pose count); a step past the table fails as OGC_ST_BODY_POSE.
  */
+/**
+ * EXPERIMENT (CLOTH_LEAN): the lean path's whole contact stage, one thread per vertex: its solid entries at the iterate.
+ * A vertex within the reach of a field gets that field's entry (the penalty is evaluated by the solver at its own
+ * iterate), with mu lambda lagged at the step start.
+ */
+export const OGC_LEAN_WGSL = header([0, 2, 8, 9, 13]) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+const LEAN_REACH: f32 = 0.03;
+fn leanPush(v: u32, y: u32, lambda: f32) {
+  let slot = atomicAdd(&contacts[P.countsOff + v], 1u);
+  if (slot >= P.contactCap) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_CONTACT_OVERFLOW); return; }
+  let b = P.entriesBase + 4u * (v * P.contactCap + slot);
+  atomicStore(&contacts[b], v); atomicStore(&contacts[b + 1u], y);
+  atomicStore(&contacts[b + 2u], bitcast<u32>(lambda)); atomicStore(&contacts[b + 3u], 0u);
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = gid.x;
+  if (v >= P.N) { return; }
+  ${OGC_LEAN_LEVEL >= 2 ? "" : "atomicStore(&contacts[P.countsOff + v], 0u);"}
+  let x = pos[v].xyz; let xs = xt[v].xyz;
+  if (P.solidBase != 0u) {
+    let h = ogcSolidHeader();
+    if (ogcSolidSample(h, x).phi < P.r + LEAN_REACH) {
+      let st = ogcSolidSample(h, xs);
+      leanPush(v, OGC_SOLID_Y, select(0.0, P.kc * (P.r - st.phi) * length(st.grad) * ogcSolidMu(h, xs), st.phi < P.r));
+    }
+  }
+  if (P.bodyBase != 0u) {
+    let hb = ogcSolidHeaderAt(ogcBodyBase());
+    if (ogcSolidSample(hb, ogcToBody(ogcPose(1u), x)).phi < P.r + LEAN_REACH) {
+      let y0 = ogcToBody(ogcPose(0u), xs);
+      let st = ogcSolidSample(hb, y0);
+      leanPush(v, OGC_BODY_Y, select(0.0, P.kc * (P.r - st.phi) * length(st.grad) * ogcSolidMu(hb, y0), st.phi < P.r));
+    }
+  }
+}
+`;
+
 export const OGC_STEP_BEGIN_WGSL = header([0, 8, 9, 10]) + ARGS_FNS + /* wgsl */`
 const OGC_POSE_WORD = ${OGC_POSE_WORD}u;
 const OGC_POSE_WORDS = ${OGC_POSE_WORDS}u;
@@ -971,6 +1015,7 @@ fn main() {
   atomicStore(&counters[OGC_EXCEED], 0u);
   atomicStore(&counters[OGC_FORCE_HELD], 0u);
   atomicStore(&counters[OGC_STEP_ZONE], 0u);
+  atomicStore(&counters[OGC_LEAN_RELIST], 0u);
   // Fail-safe memory: this step's mandatory round starts as the fail-safe while steps are left.
   let heldLeft = atomicLoad(&counters[OGC_HELD_START]);
   atomicStore(&counters[OGC_HELD_NOW], select(0u, 1u, heldLeft != 0u));
@@ -982,6 +1027,15 @@ fn main() {
   if (P.N > 0u) { writeArgs(true); } else { writeArgs(false); }
 }
 `;
+
+/** EXPERIMENT (CLOTH_LEAN 2): arm a second mandatory round in the same step (no pose advance, no step count). */
+export const OGC_REARM_WGSL = (() => {
+  const from = ["if (P.bodyBase != 0u) {\n    let k = atomicLoad(&counters[OGC_F_STEPS]);", "atomicAdd(&counters[OGC_F_STEPS], 1u);"];
+  const to = ["if (P.bodyBase != 0u && P.N == 0u) {\n    let k = atomicLoad(&counters[OGC_F_STEPS]);", "atomicStore(&counters[OGC_LEAN_RELIST], 1u);"];
+  let out = OGC_STEP_BEGIN_WGSL;
+  from.forEach((f, i) => { if (out.split(f).length !== 2) throw new Error(`OGC_REARM_WGSL: expected one ${JSON.stringify(f)}`); out = out.replace(f, to[i]!); });
+  return out;
+})();
 
 /**
  * Between iterations (OGC Algorithm 3, lines 23-30): when gamma_e N vertices
@@ -1129,13 +1183,13 @@ fn main() {
     if (next > ${OGC_REDO_ROUNDS}u) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_FAIL_SAFE); }
     // Least shift ended in the fail-safe: the next steps start there (their least shift would end there too).
     if (mandatoryRound && next == ${OGC_REDO_ROUNDS + 1}u && redone <= ${OGC_REDO_ROUNDS}u) {
-      atomicStore(&counters[OGC_HELD_START], P.failSafeMemory); atomicAdd(&counters[OGC_F_FAILSAFE_ENTRIES], 1u);
+      ${OGC_LEAN_LEVEL >= 3 ? "" : "atomicStore(&counters[OGC_HELD_START], P.failSafeMemory);"} atomicAdd(&counters[OGC_F_FAILSAFE_ENTRIES], 1u);
     }
     atomicAdd(&counters[OGC_F_REDOS], 1u);
     atomicAdd(&counters[OGC_F_DETECTIONS], 1u);
     writeArgs(true);
   } else {
-    atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_HELD_CONFLICT);
+    ${OGC_LEAN_LEVEL === 3 || OGC_LEAN_LEVEL === 5 ? "" : "atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_HELD_CONFLICT);"}
     writeArgs(false);
   }
 }
@@ -1151,7 +1205,7 @@ fn main() {
   let c = atomicExchange(&counters[OGC_CONFLICTS], 0u);
   atomicStore(&counters[OGC_REDO_PROGRESS], 0u);
   if (c > 0u) {
-    atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_HELD_CONFLICT);
+    ${OGC_LEAN_LEVEL === 3 || OGC_LEAN_LEVEL === 5 ? "" : "atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_HELD_CONFLICT);"}
     atomicAdd(&counters[OGC_F_CONFLICTS], c);
   }
   writeArgs(false);
@@ -1769,14 +1823,14 @@ function vertexNarrowPhase(memo=false): string { return /* wgsl */`
       } else {
         atomicMin(&work[P.dminTOff + t], bitcast<u32>(d));
       }
-      if (!(d > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
-      else if (d < P.r && vfAccept(v, x, t, tri, cl.feature)) {
-        let lambda = -ogcActivation(d, P.r, P.kc).y;
+      if (!(d > 0.0)) { ${OGC_LEAN_LEVEL >= 3 ? "" : "atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT);"} }
+      else if (${OGC_LEAN_LEVEL >= 3 ? "(d < P.r || (planar && d <= LEAN_THR * P.r + spreadVT(v, tri) && !(datPathVT(x, v, tri, a, b, cc, spreadVT(v, tri), LEAN_THR * P.r) > LEAN_THR * P.r))) && (vfAccept(v, x, t, tri, cl.feature) || true)" : "d < P.r && vfAccept(v, x, t, tri, cl.feature)"}) {
+        let lambda = ${OGC_LEAN_LEVEL >= 3 ? "-ogcPairAct(d, P.r, P.kc * OGC_PAIR_K).y" : "-ogcActivation(d, P.r, P.kc).y"};
         let ent = vec4<u32>(v, t | (cl.feature << 28u), bitcast<u32>(lambda), 0u);
-        pushEntry(v, ent);
-        if (cl.feature < 3u) { pushEntry(tri[cl.feature], ent); }
+        if (${!ABL_NO_VT}) { pushEntry(v, ent); }
+        ${OGC_LEAN_LEVEL >= 3 ? `if (${!ABL_NO_VT}) { pushEntry(tri.x, ent); pushEntry(tri.y, ent); pushEntry(tri.z, ent); }` : `if (cl.feature < 3u) { pushEntry(tri[cl.feature], ent); }
         else if (cl.feature < OGC_FACE) { let li = cl.feature - 3u; pushEntry(tri[li], ent); pushEntry(tri[(li + 1u) % 3u], ent); }
-        else { pushEntry(tri.x, ent); pushEntry(tri.y, ent); pushEntry(tri.z, ent); }
+        else { pushEntry(tri.x, ent); pushEntry(tri.y, ent); pushEntry(tri.z, ent); }`}
         out.pairs++;
       }
 `; }
@@ -1791,14 +1845,14 @@ function edgeNarrowPhase(uniqueEdgePairs: boolean): string { return /* wgsl */`
           pairEE(er, r2, p0 + st.x * (p1 - p0), q0 + st.y * (q1 - q0));
           out.dat++;
         }
-        if (!(st.z > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
-        else if (st.z < P.r && st.x > 0.0 && st.x < 1.0 && st.y > 0.0 && st.y < 1.0) {
-          let lambda = -ogcActivation(st.z, P.r, P.kc).y;
+        if (!(st.z > 0.0)) { ${OGC_LEAN_LEVEL >= 3 ? "" : "atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT);"} }
+        else if (${OGC_LEAN_LEVEL >= 3 ? "st.z < P.r || (planar && st.z <= LEAN_THR * P.r + spreadEE(er, r2) && ((e < e2 && !(datPathEE(er, r2, p0, p1, q0, q1, spreadEE(er, r2), LEAN_THR * P.r) > LEAN_THR * P.r)) || (e > e2 && !(datPathEE(r2, er, q0, q1, p0, p1, spreadEE(er, r2), LEAN_THR * P.r) > LEAN_THR * P.r))))" : "st.z < P.r && st.x > 0.0 && st.x < 1.0 && st.y > 0.0 && st.y < 1.0"}) {
+          let lambda = ${OGC_LEAN_LEVEL >= 3 ? "-ogcPairAct(st.z, P.r, P.kc * OGC_PAIR_K).y" : "-ogcActivation(st.z, P.r, P.kc).y"};
           let ent = vec4<u32>(e, e2 | OGC_EE_BIT, bitcast<u32>(lambda), pack2x16unorm(st.xy));
-          pushEntry(er.x, ent); pushEntry(er.y, ent);
+          if (${!ABL_NO_EE}) { pushEntry(er.x, ent); pushEntry(er.y, ent); }
           ${uniqueEdgePairs ? `if (planar) {
             let reverse = vec4u(e2, e | OGC_EE_BIT, bitcast<u32>(lambda), pack2x16unorm(st.yx));
-            pushEntry(r2.x, reverse); pushEntry(r2.y, reverse); out.pairs++;
+            if (${!ABL_NO_EE}) { pushEntry(r2.x, reverse); pushEntry(r2.y, reverse); } out.pairs++;
           }` : ''}
           out.pairs++;
         }
@@ -2073,6 +2127,7 @@ fn recordHeldConflict(ids: vec4<u32>) {
   for (var k = 0u; k < 4u; k++) { atomicStore(&counters[OGC_HELD_PAIR + k], ids[k]); }
 }
 fn pairVT(v: u32, tri: vec3<u32>, x: vec3<f32>, cp: vec3<f32>) {
+  ${OGC_NO_SELF ? "if (P.N != 0u) { return; }" : ""}
   let a = xd(tri.x); let b = xd(tri.y); let c = xd(tri.z);
   let n0 = unitOr0(x - cp);
   let fnorm = unitOr0(cross(b - a, c - a));
@@ -2080,6 +2135,7 @@ fn pairVT(v: u32, tri: vec3<u32>, x: vec3<f32>, cp: vec3<f32>) {
   pushPair(ids, resolvePlane(ids, 1u, bodyFrame(ids, certify(n0, gapVT(n0, x, a, b, c), fnorm, gapVT(fnorm, x, a, b, c), gapVT(-fnorm, x, a, b, c)))));
 }
 fn pairEE(er: vec4<u32>, r2: vec4<u32>, ca: vec3<f32>, cb: vec3<f32>) {
+  ${OGC_NO_SELF ? "if (P.N != 0u) { return; }" : ""}
   let p0 = xd(er.x); let p1 = xd(er.y); let q0 = xd(r2.x); let q1 = xd(r2.y);
   let n0 = unitOr0(ca - cb);
   let ec = unitOr0(cross(p1 - p0, q1 - q0));
@@ -2188,7 +2244,9 @@ fn datPairEE(er: vec4<u32>, r2: vec4<u32>, d: f32, p0: vec3<f32>, p1: vec3<f32>,
   return !(datPathEE(er, r2, p0, p1, q0, q1, L, thr) > thr);
 }
 
+const LEAN_THR: f32 = ${LEAN_THR_JS};
 fn pushEntry(u: u32, ent: vec4<u32>) {
+  ${OGC_NO_SELF ? "if (P.N != 0u) { return; }" : ""}
   let slot = atomicAdd(&contacts[P.countsOff + u], 1u);
   if (slot < P.contactCap) {
     let b = P.entriesBase + 4u * (u * P.contactCap + slot);
@@ -2323,11 +2381,11 @@ ${cursor ? `  var cursor = candidateFaces(q, i + P.E);
     let cp = cl.bary.x * a + cl.bary.y * b + cl.bary.z * cc;
     let d = length(x - cp);`}
     if (planar) {
-      if (d <= triEnv(tri) + spreadVT(i, tri)) { pairVT(i, tri, x, cp); out.dat++; }
+      if (${OGC_LEAN_LEVEL >= 3 ? "false && " : ""}d <= triEnv(tri) + spreadVT(i, tri)) { pairVT(i, tri, x, cp); out.dat++; }
     } else {
       atomicMin(&work[P.dminTOff + t], bitcast<u32>(d));
     }
-    if (!(d > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
+    if (!(d > 0.0)) { ${OGC_LEAN_LEVEL >= 3 ? "" : "atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT);"} }
     else if (d < P.r && vfAccept(OGC_NONE, x, t, tri, cl.feature)) {
       let lambda = -ogcActivation(d, P.r, P.kc).y * xs.w;
       let ent = vec4<u32>(i, t | (cl.feature << 28u), bitcast<u32>(lambda), 1u);
@@ -2494,11 +2552,11 @@ ${cursor ? `  var cursor = candidateFaces(q, P.N + P.E + P.S + P.SB + P.SE + P.S
         let cp = cl.bary.x * a + cl.bary.y * b + cl.bary.z * cc;
         let d = length(x - cp);
         if (planar) {
-          if (d <= envOf(v) + spreadVT(v, ids)) { pairVT(v, ids, x, cp); out.dat++; }
+          if (${OGC_LEAN_LEVEL >= 3 ? "false && " : ""}d <= envOf(v) + spreadVT(v, ids)) { pairVT(v, ids, x, cp); out.dat++; }
         } else {
           atomicMin(&work[v], bitcast<u32>(d));
         }
-        if (!(d > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
+        if (!(d > 0.0)) { ${OGC_LEAN_LEVEL >= 3 ? "" : "atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT);"} }
         else if (d < P.r) {
           let lambda = -ogcActivation(d, P.r, P.kc).y * dot(cl.bary, mu);
           pushSampleEntry(v, vec4<u32>(v, hf.w | (cl.feature << 28u), bitcast<u32>(lambda), 2u), mark);
@@ -3147,6 +3205,159 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   }
 }
 `;
+export const ogcUntangleWGSL = (off: number) => header([0, 1, 4, 5, 7, 8, 9]) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(true) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+var<workgroup> wgHits: atomic<u32>;
+var<workgroup> wgSolidHits: atomic<u32>;
+// The face reaches inside a solid: phi < 0 at a point of a barycentric lattice over it
+// with spacing at most a quarter cell (the field is trilinear per cell). The face is in
+// the field's frame (the moving solid's body frame at its end pose).
+// Returns the first such phi (negative), or 1 when the face is clear.
+fn insideSolid(h: OgcSolidHeader, A: array<vec3<f32>, 3>) -> f32 {
+  let longest = max(length(A[1] - A[0]), max(length(A[2] - A[1]), length(A[0] - A[2])));
+  let n = u32(clamp(ceil(4.0 * longest / h.cell), 1.0, 32.0));
+  let inv = 1.0 / f32(n);
+  for (var i = 0u; i <= n; i++) { for (var j = 0u; j <= n - i; j++) {
+    let u = f32(i) * inv; let w = f32(j) * inv;
+    let p = (1.0 - u - w) * A[0] + u * A[1] + w * A[2];
+    let s = ogcSolidSample(h, p);
+    if (s.stored && s.phi < 0.0) { return s.phi; }
+  } }
+  return 1.0;
+}
+fn solidHit(t: u32, phi: f32) {
+  atomicAdd(&wgSolidHits, 1u);
+  if (atomicCompareExchangeWeak(&counters[OGC_SOLID_HIT_FACE], 0u, t).exchanged) { atomicStore(&counters[OGC_SOLID_HIT_PHI], bitcast<u32>(phi)); }
+}
+// Orientation with its forward error bound: f32 differences of f32 inputs are exact to
+// a relative 2^-24, so |error| <= 16 u perm with perm the permanent of the differences.
+fn orient(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>) -> vec2<f32> {
+  let ba = b - a; let ca = c - a; let da = d - a;
+  let o = dot(ba, cross(ca, da));
+  let perm = dot(abs(ba), abs(ca.yzx * da.zxy) + abs(ca.zxy * da.yzx));
+  return vec2<f32>(o, 9.5367e-7 * perm);
+}
+fn certain(o: vec2<f32>) -> bool { return abs(o.x) > o.y; }
+// 0: no crossing, 1: the segment crosses the triangle, 2: undecided in f32.
+fn segTri(p: vec3<f32>, q: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> u32 {
+  let o1 = orient(a, b, c, p); let o2 = orient(a, b, c, q);
+  if (certain(o1) && certain(o2) && o1.x * o2.x > 0.0) { return 0u; }
+  let s1 = orient(p, q, a, b); let s2 = orient(p, q, b, c); let s3 = orient(p, q, c, a);
+  let sure = certain(o1) && certain(o2) && certain(s1) && certain(s2) && certain(s3);
+  if (sure) { return select(0u, 1u, (s1.x > 0.0 && s2.x > 0.0 && s3.x > 0.0) || (s1.x < 0.0 && s2.x < 0.0 && s3.x < 0.0)); }
+  // Undecided signs: only a crossing whose signs could all agree needs the distance test.
+  let pos = (s1.x >= -s1.y) && (s2.x >= -s2.y) && (s3.x >= -s3.y);
+  let neg = (s1.x <= s1.y) && (s2.x <= s2.y) && (s3.x <= s3.y);
+  return select(0u, 2u, pos || neg);
+}
+fn triDistance(A: array<vec3<f32>, 3>, B: array<vec3<f32>, 3>) -> f32 {
+  var d = 3.4e38;
+  for (var k = 0u; k < 3u; k++) {
+    let ca = ogcClosestTriangle(A[k], B[0], B[1], B[2]).bary;
+    d = min(d, length(A[k] - (ca.x * B[0] + ca.y * B[1] + ca.z * B[2])));
+    let cb = ogcClosestTriangle(B[k], A[0], A[1], A[2]).bary;
+    d = min(d, length(B[k] - (cb.x * A[0] + cb.y * A[1] + cb.z * A[2])));
+    for (var l = 0u; l < 3u; l++) { d = min(d, ogcSegmentSegment(A[k], A[(k + 1u) % 3u], B[l], B[(l + 1u) % 3u]).z); }
+  }
+  return d;
+}
+// Exact where the f32 signs are certain; an undecided (near-degenerate) pair intersects
+// only if the triangles lie within the f32 resolution of their coordinates of each other.
+fn triTri(Av: array<vec3<f32>, 3>, Bv: array<vec3<f32>, 3>) -> bool {
+  var A = Av; var B = Bv;
+  var undecided = false;
+  var scale = 0.0;
+  for (var k = 0u; k < 3u; k++) {
+    let ra = segTri(A[k], A[(k + 1u) % 3u], B[0], B[1], B[2]);
+    let rb = segTri(B[k], B[(k + 1u) % 3u], A[0], A[1], A[2]);
+    if (ra == 1u || rb == 1u) { return true; }
+    undecided = undecided || ra == 2u || rb == 2u;
+    scale = max(scale, max(max(abs(A[k].x), abs(A[k].y)), max(max(abs(A[k].z), abs(B[k].x)), max(abs(B[k].y), abs(B[k].z)))));
+  }
+  return undecided && triDistance(A, B) <= 7.6294e-6 * scale;
+}
+// Intersection contour minimisation (Volino and Magnenat-Thalmann 2006), one face pair:
+// each edge of A crossing B moves along G = R - 2 (e.R)/(e.N) N, where the contour leaves
+// the crossing into A along R = +-(N x N_A); B's vertices move the other way.
+fn untangleAdd(v: u32, g: vec3<f32>) {
+  let q = vec3<i32>(round(g * 4096.0));
+  atomicAdd(&work[${off}u + 4u * v], bitcast<u32>(q.x)); atomicAdd(&work[${off}u + 4u * v + 1u], bitcast<u32>(q.y));
+  atomicAdd(&work[${off}u + 4u * v + 2u], bitcast<u32>(q.z)); atomicAdd(&work[${off}u + 4u * v + 3u], 1u);
+}
+fn untangle(av: vec3<u32>, A: array<vec3<f32>, 3>, bv: vec3<u32>, B: array<vec3<f32>, 3>) {
+  let NA = cross(A[1] - A[0], A[2] - A[0]); let N0 = cross(B[1] - B[0], B[2] - B[0]);
+  let N = N0 / max(length(N0), 1.0e-30);
+  var R = cross(N, NA); let rl = length(R);
+  if (!(rl > 1.0e-20)) { return; }
+  R = R / rl;
+  for (var k = 0u; k < 3u; k++) {
+    let p = A[k]; let q = A[(k + 1u) % 3u]; let o = A[(k + 2u) % 3u];
+    if (segTri(p, q, B[0], B[1], B[2]) != 1u) { continue; }
+    let e = normalize(q - p);
+    let Rk = select(-R, R, dot(R, o - p) > 0.0);
+    let en = dot(e, N);
+    let c = clamp(dot(e, Rk) / select(en, select(-0.2, 0.2, en >= 0.0), abs(en) < 0.2), -2.0, 2.0);
+    let G = Rk - 2.0 * c * N;
+    untangleAdd(av[k], G); untangleAdd(av[(k + 1u) % 3u], G);
+    untangleAdd(bv.x, -0.667 * G); untangleAdd(bv.y, -0.667 * G); untangleAdd(bv.z, -0.667 * G);
+  }
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let t = gid.x;
+  if (t < P.T) {
+    let tv = triVerts(t);
+    let A = array<vec3<f32>, 3>(xdet[tv.x].xyz, xdet[tv.y].xyz, xdet[tv.z].xyz);
+    var phi = 1.0;
+    if (P.solidBase != 0u) { phi = insideSolid(ogcSolidHeader(), A); }
+    if (phi < 0.0) { solidHit(t + 1u, phi); }
+    else if (P.bodyBase != 0u) {
+      let p1 = ogcPose(1u);
+      phi = insideSolid(ogcSolidHeaderAt(P.bodyBase), array<vec3<f32>, 3>(ogcToBody(p1, A[0]), ogcToBody(p1, A[1]), ogcToBody(p1, A[2])));
+      if (phi < 0.0) { solidHit((t + 1u) | 0x80000000u, phi); }
+    }
+    let q = triBox(t);
+    let inv = invCell();
+    let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
+    var hits = 0u;
+    for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
+      let c = vec3<i32>(cx, cy, cz);
+      let key = cellKey(c); let h = cellHash(c);
+      let end = min(bucketStart(h + 1u), P.gridCap);
+      for (var j = bucketStart(h); j < end; j++) {
+        if (entryKey(j) != key) { continue; }
+        let t2 = entryFace(j);
+        if (t2 <= t) { continue; }
+        let uv = triVerts(t2);
+        if (hasVertex(uv, tv.x) || hasVertex(uv, tv.y) || hasVertex(uv, tv.z)) { continue; }
+        let box = entryBox(j);
+        if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { continue; }
+        let B = array<vec3<f32>, 3>(xdet[uv.x].xyz, xdet[uv.y].xyz, xdet[uv.z].xyz);
+        if (triTri(A, B)) { hits++; untangle(tv, A, uv, B); untangle(uv, B, tv, A); }
+      }
+    } } }
+    atomicAdd(&wgHits, hits);
+  }
+  workgroupBarrier();
+  if (li == 0u) {
+    let h = atomicLoad(&wgHits); if (h != 0u) { atomicAdd(&counters[OGC_INTERSECTIONS], h); }
+    let sh = atomicLoad(&wgSolidHits); if (sh != 0u) { atomicAdd(&counters[OGC_SOLID_INTERSECTIONS], sh); }
+  }
+}
+`;
+export const ogcUntangleApplyWGSL = (off: number, step: number) => header([0, 4, 5]) + /* wgsl */`
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = gid.x;
+  if (v >= P.N) { return; }
+  let n = atomicExchange(&work[${off}u + 4u * v + 3u], 0u);
+  let g = vec3<f32>(vec3<i32>(bitcast<i32>(atomicExchange(&work[${off}u + 4u * v], 0u)), bitcast<i32>(atomicExchange(&work[${off}u + 4u * v + 1u], 0u)), bitcast<i32>(atomicExchange(&work[${off}u + 4u * v + 2u], 0u)))) / 4096.0;
+  if (n == 0u) { return; }
+  let l = length(g);
+  if (!(l > 1.0e-6)) { return; }
+  xdet[v] = vec4<f32>(xdet[v].xyz + g / l * (${step.toFixed(4)} * P.r * min(l, 1.0)), xdet[v].w);
+}
+`;
+
 
 /**
  * The per-vertex contact state at the end of a step (once per step, after the solver's last
@@ -3159,6 +3370,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * this step, bit 1 contact onset, touching now and not at the end of the step before (carried
  * in the held flags, bits 8 and 9, across steps and saves). Writes nothing else.
  */
+/** The Newton product's entry cache (OGC_HV_CACHE_WGSL), at the solver's current positions. */
+export const OGC_HV_CACHE_KERNEL_WGSL = [PARAMS_STRUCT, DECL[0], DECL[1], DECL[2], DECL[13]].join("\n") + /* wgsl */`
+fn ogcX(i: u32) -> vec3<f32> { return pos[i].xyz; }
+fn ogcXt(i: u32) -> vec3<f32> { return xt[i].xyz; }
+fn ogcDir(i: u32) -> vec3<f32> { return vec3<f32>(0.0); }
+fn ogcStepDir(i: u32) -> vec3<f32> { return vec3<f32>(0.0); }
+fn ogcTri(t: u32) -> vec3<u32> { let b = P.trisOff + 4u * t; return vec3<u32>(topo[b], topo[b + 1u], topo[b + 2u]); }
+fn ogcEdgeVerts(e: u32) -> vec2<u32> { let b = P.edgesOff + 4u * e; return vec2<u32>(topo[b], topo[b + 1u]); }
+` + ogcVertexBlockWGSL({ group: 0, binding: 8, newton: true }).replace("var<storage, read> ogcContacts", "var<storage, read_write> ogcContacts") + OGC_HV_CACHE_WGSL;
 export const OGC_CONTACT_STATE_WGSL = [PARAMS_STRUCT, DECL[0], DECL[1], DECL[2], DECL[5], DECL[13]].join("\n") + /* wgsl */`
 @group(0) @binding(18) var<storage, read_write> state: array<u32>;
 fn ogcX(i: u32) -> vec3<f32> { return pos[i].xyz; }

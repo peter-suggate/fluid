@@ -16,7 +16,7 @@
  */
 import { GPUPassTimestampRecorder } from '../core/performance-trace';
 
-export type ClothStageId = 'setup' | 'detect' | 'assemble' | 'pcg' | 'filter' | 'line-search' | 'finish' | 'other';
+export type ClothStageId = 'setup' | 'detect' | 'assemble' | 'pcg' | 'filter' | 'line-search' | 'finish' | 'icloth-proximity' | 'icloth-ccd' | 'icloth-impact' | 'other';
 
 export const CLOTH_STAGES: readonly { readonly id: ClothStageId; readonly label: string; readonly tip: string }[] = [
   { id: 'setup', label: 'Step setup', tip: 'Grab anchors, the step\'s frame (inertial target, element frames) and the contact detector\'s frame and step begin.' },
@@ -26,6 +26,9 @@ export const CLOTH_STAGES: readonly { readonly id: ClothStageId; readonly label:
   { id: 'filter', label: 'Contact filter', tip: 'The line-search filter: each vertex\'s plane records and the largest step inside every certificate.' },
   { id: 'line-search', label: 'Line search', tip: 'Projection, trial energy, the trust-region model when on, the choice and the update; strain-limit duals.' },
   { id: 'finish', label: 'Finish', tip: 'Diagnostics, the contact state, restart scans and the step\'s final write-back.' },
+  { id: 'icloth-proximity', label: 'I-Cloth proximity', tip: 'I-Cloth: the spatial hash and the vertex-face, edge-edge and solid proximity records at the start of the step.' },
+  { id: 'icloth-ccd', label: 'I-Cloth CCD', tip: 'I-Cloth: continuous collision detection of the step\'s path, each round and the closing verification.' },
+  { id: 'icloth-impact', label: 'I-Cloth impact zones', tip: 'I-Cloth: the impact-zone solve (augmented-Lagrangian gradient descent) of each round and its write-back.' },
   { id: 'other', label: 'Other', tip: 'Kernels this table does not name.' },
 ];
 
@@ -37,6 +40,12 @@ const FINISH = new Set(['diagnose', 'reduceDiagnostics', 'onsetScan', 'finishSte
 
 /** The stage a cloth pipeline belongs to, by its label. */
 export function clothStageOf(pipelineLabel: string): ClothStageId {
+  // I-Cloth's kernels (lib/cloth/icloth): 'icloth prox <kernel>' the proximity pass, the solve's four, the rest CCD.
+  if (pipelineLabel.startsWith('icloth ')) {
+    const kernel = pipelineLabel.slice(7);
+    if (kernel.startsWith('prox ')) return 'icloth-proximity';
+    return kernel === 'icZoneInit' || kernel === 'icGrad' || kernel === 'icTrial' || kernel === 'icCommit' ? 'icloth-impact' : 'icloth-ccd';
+  }
   const solver = pipelineLabel.startsWith('Cloth '), detector = pipelineLabel.startsWith('ogc ');
   if (!solver && !detector) return 'other';
   const name = pipelineLabel.slice(solver ? 6 : 4);

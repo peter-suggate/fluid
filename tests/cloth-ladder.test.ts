@@ -584,6 +584,8 @@ test('ladder 1d: at a fixed iterate of a restarted contact step on the 16^2 sphe
       assert.ok(cloth.stepTo(start.time_s + H), `the step from tick ${restartTick - 1} was refused: ${cloth.failure?.message ?? 'pending'}`);
       const rec = await newtonOf(solver), status = await solver.readStatus(), x = Float64Array.from(await solver.readPositions()), N = x.length / 3;
       const g = new Float32Array(await r.readRange(r.newtonWork, 0, 16 * N)), duals = new Float32Array(await r.readRange(r.state, 16 * r.tables.edgeDualRecord, 16 * r.E));
+      // The step's multipliers are its start's (they step once, at the step's end: the state read here holds the next step's).
+      for (let e = 0; e < r.E; e++) duals[4 * e] = start.solverState!.edgeDuals[2 * e]!;
       const det = cloth.contactFor(doc.id)!, entries = await det.readContactEntries();
       return { rec, restarts: status.restarts, x, g, duals, entries, S: det.solidSamples, facets: det.facetCapacity, edge: det.topology.layout.maxEdgeLength, origin: cloth.renderSources[0]!.origin_m };
     } finally { cloth.destroy(); }
@@ -654,6 +656,7 @@ test(`ladder 1e (${lin}, start seed ${seed}): the 32^2 sphere contact step never
       const seg = async (k: number) => new Float32Array(await r.readRange(r.newtonWork, 16 * k * r.tables.stride, 16 * N));
       const g = await seg(CLOTH_NEWTON_SEGMENTS.g), P0 = await seg(CLOTH_NEWTON_ACTIVE.projector), P1 = await seg(CLOTH_NEWTON_ACTIVE.projector + 1);
       const duals = new Float32Array(await r.readRange(r.state, 16 * r.tables.edgeDualRecord, 16 * r.E)), det = cloth.contactFor(doc.id)!;
+      for (let e = 0; e < r.E; e++) duals[4 * e] = start.solverState.edgeDuals[2 * e]!;   // the step's multipliers are its start's
       const run: GpuIterate = { x, duals, entries: await det.readContactEntries(), S: det.solidSamples, facets: det.facetCapacity, edge: det.topology.layout.maxEdgeLength, origin: cloth.renderSources[0]!.origin_m };
       assert.equal(cloth.failure, undefined, cloth.failure?.message);
       // P g_v under the vertex's kept certificate normals (nwProject's symmetric projector, NW_PROJ / NW_PROJ + 1).

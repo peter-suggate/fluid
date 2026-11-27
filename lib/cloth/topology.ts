@@ -1,4 +1,4 @@
-import type { ClothDocument, ClothMaterial, ClothTopologyData, ClothVector } from "./types";
+import { CLOTH_METHODS, type ClothDocument, type ClothMaterial, type ClothTopologyData, type ClothVector } from "./types";
 
 /** Boundary marker of the edge table (matches lane C2's `0xffffffff`). */
 export const CLOTH_NO_FACE = 0xffffffff;
@@ -133,6 +133,14 @@ export function validateClothDocument(document: ClothDocument): string[] {
     if (solver.contactEdgeEvaluation !== undefined && !['directed','unique','pruned','staged','packet'].includes(solver.contactEdgeEvaluation)) errors.push('Unknown cloth edge evaluation');
     if (solver.contactBvhLeafSize !== undefined && ![2,4,8,16].includes(solver.contactBvhLeafSize)) errors.push('Invalid cloth BVH leaf size');
     if (solver.optimizations !== false && solver.multigrid && solver.newton?.trustRegion === 'hybrid') errors.push('Cloth multigrid does not support hybrid trust region');
+    if (solver.method !== undefined && !CLOTH_METHODS.includes(solver.method)) errors.push(`Unknown cloth method ${String(solver.method)}`);
+    if (solver.method === 'icloth' && solver.newton?.trustRegion === 'hybrid') errors.push("Cloth method 'icloth' does not support the hybrid trust region");
+    if (solver.icloth !== undefined) {
+      const c = solver.icloth;
+      if (!c || typeof c !== "object") errors.push("Cloth icloth settings must be an object");
+      else for (const key of ["rounds", "impactIterations"] as const)
+        if (c[key] !== undefined && !(Number.isInteger(c[key]) && c[key]! >= 1)) errors.push(`Cloth icloth ${key} must be a positive integer`);
+    }
     if (solver.integrator !== undefined && solver.integrator !== "implicit-euler" && solver.integrator !== "bdf2") errors.push(`Unsupported cloth integrator ${String(solver.integrator)}`);
     if (solver.newton !== undefined) {
       const n = solver.newton;

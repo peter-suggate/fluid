@@ -36,13 +36,14 @@ import type { RigidBodyDescription, SceneDescription } from '../core/model';
 import type { SimulationFailure } from '../core/simulation-failure';
 import { clothDocumentsKey } from './content-stamp';
 import { ClothGPUSolver, type ClothContactLinAB, type ClothGPUState } from './gpu-solver';
-import { CLOTH_BINDING, CLOTH_STATUS, CLOTH_STATUS_WORDS } from './gpu-solver-wgsl';
+import { CLOTH_BINDING, CLOTH_STATE, CLOTH_STATUS, CLOTH_STATUS_WORDS } from './gpu-solver-wgsl';
 import { OgcContactDetector, type OgcCarriedState } from './contact/ogc-detector';
 import type { ClothSolidField } from './contact/solid-field';
 import { buildClothSolverModel, type ClothInitialGuess } from './oracle';
 import type { ClothRenderSource } from './render';
-import { CLOTH_BODY_POSES_PER_FRAME, CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS_OFFSET, buildClothBodyField, buildClothSceneField, clothBodyPoses, clothContactFieldKey,
-  clothContactRadius, clothSceneMovingSolids, createClothSceneContact } from './scene-contact';
+import { CLOTH_BODY_POSES_PER_FRAME, CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS_OFFSET, CLOTH_SCENE_CONTACT, buildClothBodyField, buildClothSceneField, clothBodyPoses, clothContactFieldKey,
+  clothContactRadius, clothContactStiffness, clothSceneMovingSolids, createClothSceneContact } from './scene-contact';
+import { ICLOTH_FAILING, IClothCollision } from './icloth/icloth';
 import { sceneClothSurface } from './scene-geometry';
 import { prepareClothTopology } from './topology';
 import type { ClothContactStateData, ClothDocument, ClothGrab, ClothSurfacePublication, ClothVector } from './types';
@@ -78,7 +79,7 @@ function ogcCarriedState(data: ClothContactStateData, origin: ClothVector, verte
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 /** A document's content apart from its execution settings (the Cloth card's tuning knobs). */
 const documentKeyBesidesTuning = (document: ClothDocument) =>
-  clothDocumentsKey([{ ...document, solver: { ...document.solver, newton: undefined, optimizations: undefined, contactBroadphase: undefined, contactVertexEvaluation: undefined, contactConflictReuse: undefined, lazyLineSearch: undefined, contactEdgeEvaluation: undefined, contactBvhLeafSize: undefined, contactSeparationCulling: undefined, multigrid: undefined } }]);
+  clothDocumentsKey([{ ...document, solver: { ...document.solver, newton: undefined, optimizations: undefined, contactBroadphase: undefined, contactVertexEvaluation: undefined, contactConflictReuse: undefined, lazyLineSearch: undefined, contactEdgeEvaluation: undefined, contactBvhLeafSize: undefined, contactSeparationCulling: undefined, multigrid: undefined, method: undefined, icloth: undefined } }]);
 
 /** Asynchronous copy of the status words and, on request, the full dynamic state (pose, BDF2 history, duals, clock); one map in flight. */
 class PoseMirror {
@@ -88,7 +89,7 @@ class PoseMirror {
   private readonly offsets: number[];
   busy = false;
   statusBusy = false;
-  constructor(device: GPUDevice, private readonly solver: ClothGPUSolver, label: string, private readonly contact?: OgcContactDetector) {
+  constructor(device: GPUDevice, private readonly solver: ClothGPUSolver, label: string, private readonly contact?: OgcContactDetector, private readonly icloth?: IClothCollision) {
     let at = 0;
     this.offsets = [...solver.stateRanges(), { size: 4 * CLOTH_STATUS_WORDS }].map(r => { const o = at; at += align(Math.max(r.size, 4), 256); return o; });
     this.staging = device.createBuffer({ label: `${label} pose mirror`, size: at, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -116,16 +117,18 @@ class PoseMirror {
     if (this.statusBusy) return false;
     encoder.copyBufferToBuffer(this.solver.status, 0, this.statusStaging, 0, 4 * CLOTH_STATUS_WORDS);
     if (this.contact) encoder.copyBufferToBuffer(this.contact.counters, CLOTH_CONTACT_STATUS_OFFSET, this.statusStaging, 4 * CLOTH_STATUS_WORDS, 4);
+    // I-Cloth's status word heads its constraint buffer.
+    if (this.icloth) encoder.copyBufferToBuffer(this.icloth.cons, 0, this.statusStaging, 4 * CLOTH_STATUS_WORDS, 4);
     this.statusBusy = true;
     return true;
   }
   /** After the encoder holding `encodeStatus` is submitted: the solver's status word and the detector's (0 without contact). */
-  async readStatus(): Promise<{ solver: number; contact: number }> {
+  async readStatus(): Promise<{ solver: number; contact: number; icloth: number }> {
     try {
       await this.statusStaging.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(this.statusStaging.getMappedRange().slice(0));
       this.statusStaging.unmap();
-      return { solver: words[0]!, contact: this.contact ? words[CLOTH_STATUS_WORDS]! : 0 };
+      return { solver: words[0]!, contact: this.contact ? words[CLOTH_STATUS_WORDS]! : 0, icloth: this.icloth ? words[CLOTH_STATUS_WORDS]! : 0 };
     } finally { this.statusBusy = false; }
   }
   destroy(): void { this.staging.destroy(); this.statusStaging.destroy(); }
@@ -139,8 +142,10 @@ interface Entry {
   readonly documentKey: string;
   readonly solver: ClothGPUSolver;
   readonly mirror: PoseMirror;
-  /** The contact detector and the static field it holds (`fieldKey` names the solid world and frame it was built for). */
-  readonly contact: OgcContactDetector;
+  /** Method 'newton': the contact detector and the static field it holds (`fieldKey` names the solid world and frame it was built for). */
+  readonly contact?: OgcContactDetector;
+  /** Method 'icloth': I-Cloth's collision stage, which holds the same fields. */
+  readonly icloth?: IClothCollision;
   field: ClothSolidField;
   fieldKey: string;
   /** The scene's moving solid, whose body-frame field the detector holds. */
@@ -156,6 +161,8 @@ interface Entry {
 
 export interface ClothSystemOptions {
   readonly label?: string;
+  /** A/B and tests only, method 'icloth': drop its proximity records or its collision rounds (IClothConfig). */
+  readonly iclothStages?: { readonly proximity?: boolean; readonly collisions?: boolean };
   /** Apply the live viewport optimization defaults; reference harnesses leave this false. */
   readonly liveOptimizations?: boolean;
   /** Steps between status-word reads; default `CLOTH_STATUS_INTERVAL_STEPS`. */
@@ -273,6 +280,8 @@ export class ClothSystem {
   solverFor(documentId: string): ClothGPUSolver | undefined { return this.entries.get(documentId)?.solver; }
   /** The live contact detector of a document (harnesses and diagnostics). */
   contactFor(documentId: string): OgcContactDetector | undefined { return this.entries.get(documentId)?.contact; }
+  /** The live I-Cloth collision stage of a document running method 'icloth' (harnesses and diagnostics). */
+  iclothFor(documentId: string): IClothCollision | undefined { return this.entries.get(documentId)?.icloth; }
 
   private entryTime(e: Entry): number { return e.solver.startTime_s + e.steps * CLOTH_SCENE_STEP_S; }
   private tick(e: Entry): number { return Math.round(this.entryTime(e) / CLOTH_SCENE_STEP_S); }
@@ -313,6 +322,9 @@ export class ClothSystem {
     }
     const execution = clothExecutionSettings(settings, this.options.liveOptimizations);
     const newton = execution.newton;
+    const method: string = execution.method;
+    if (method !== 'newton' && method !== 'icloth') throw new Error(`Cloth document '${document.id}' names an unknown cloth method '${method}'`);
+    if (method === 'icloth') return this.buildICloth(document, topologyRevision, origin, model, field, fieldKey, body, bodyField, gravity, label, start);
     const candidateCache = this.options.contactCandidateCache ?? (this.options.contactBroadphase === undefined ? execution.candidateCache : undefined);
     const useExecutionEdges = this.options.contactBroadphase === undefined && !candidateCache && this.options.contactUniqueEdgePairs !== false;
     const stageCapacity = this.options.contactEdgeStageCapacity ?? (useExecutionEdges ? execution.edgeStageCapacity : undefined);
@@ -349,7 +361,7 @@ export class ClothSystem {
         solverState: start ? start.solverState : data.solverState, label,
         // Contact pairs are global terms of H and g, the filter bounds each direction, re-detection runs between iterations.
         contact: { ...contact.solverContact(CLOTH_BINDING.contact, true), alpha: contact.alpha, state: contact.contactState },
-        hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep, stepEnd: hooks.stepEnd },
+        hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep, beforeFinish: hooks.beforeFinish, stepEnd: hooks.stepEnd },
         ...(this.options.contactLinearizationAB ? { contactLinearizationAB: this.options.contactLinearizationAB } : {}),
       });
       contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, ...(prediction === 'target' ? { target: solver.inertialTarget } : {}), direction: solver.newtonDirection, control: solver.newtonControl });
@@ -362,6 +374,54 @@ export class ClothSystem {
     const positions = Float64Array.from(start?.positions_m ?? data.initialPositions_m ?? data.restPositions_m);
     const velocities = start ? start.velocities_m_s : data.initialVelocities_m_s, solverState = start ? start.solverState : data.solverState;
     const entry: Entry = { document, key: this.entryKey(document), documentKey: clothDocumentsKey([document]), solver, mirror: new PoseMirror(this.device, solver, label, contact), contact, field, fieldKey, body, origin,
+      revision: ++renderRevisions, topologyRevision, steps: 0, sinceStatus: 0,
+      publication: { documentId: document.id, topology: data, positions_m: positions,
+        ...(velocities ? { velocities_m_s: Float64Array.from(velocities) } : {}),
+        ...(solverState ? { solverState } : {}),
+        generation: this.generation, tick: 0, topologyRevision, time_s: solver.startTime_s } };
+    entry.publication = { ...entry.publication, tick: this.tick(entry) };
+    return entry;
+  }
+
+  /**
+   * Method 'icloth' (lib/cloth/icloth): the same solver taking one implicit Euler step with I-Cloth's proximity terms
+   * in the Newton system and no OGC contact, then the collision rounds in its beforeFinish hook. Nothing of the stage
+   * is carried between steps, so the entry starts from a pose alone (a method switch rebuilds from the live pose).
+   */
+  private async buildICloth(document: ClothDocument, topologyRevision: number, origin: ClothVector, model: ReturnType<typeof buildClothSolverModel>, field: ClothSolidField, fieldKey: string,
+    body: RigidBodyDescription | undefined, bodyField: ClothSolidField | undefined, gravity: [number, number, number], label: string, start?: ClothSurfacePublication): Promise<Entry> {
+    const settings = document.solver ?? {}, data = document.geometry.data;
+    if (data === undefined || document.geometry.kind !== 'inline') throw new Error(`Cloth document '${document.id}' has an unsupported geometry kind`);
+    const execution = clothExecutionSettings(settings, this.options.liveOptimizations);
+    if (execution.newton.trustRegion === 'hybrid') throw new Error(`Cloth document '${document.id}': method 'icloth' takes the line-search Newton (newton.trustRegion 'hybrid' is unsupported)`);
+    // The proximity terms need neither the compiled OGC linearization nor its active set.
+    const { contactLinearization: _lin, contactLinearizationRecords: _records, ...newton } = execution.newton;
+    const icloth = await IClothCollision.create(this.device, model.topology, {
+      r: clothContactRadius(document), kc: clothContactStiffness(document).kc_N_m, selfFriction: settings.selfFriction ?? 0, dt_s: CLOTH_SCENE_STEP_S,
+      epsV_m_s: CLOTH_SCENE_CONTACT.epsV_m_s, rounds: execution.icloth.rounds, impactIterations: execution.icloth.impactIterations,
+      stepsPerFrame: CLOTH_BODY_POSES_PER_FRAME - 1, body: !!body, label: `icloth ${document.id}`,
+      ...(this.options.iclothStages ?? {}) });
+    let solver: ClothGPUSolver;
+    try {
+      const hooks = icloth.stepHooks;
+      solver = await ClothGPUSolver.create(this.device, model, {
+        origin_m: origin, dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: gravity, integrator: settings.integrator ?? 'bdf2', newton,
+        initialGuess: this.options.initialGuess ?? 'inertial',
+        positions_m: start?.positions_m ?? data.initialPositions_m, velocities_m_s: start ? start.velocities_m_s : data.initialVelocities_m_s,
+        solverState: start ? start.solverState : data.solverState, label,
+        proximity: icloth.solverProximity(CLOTH_BINDING.proximity),
+        hooks: { afterFrame: hooks.afterFrame, beforeFinish: hooks.beforeFinish },
+      });
+      icloth.bind({ positions: solver.positions, state: solver.state, stride: solver.tables.stride, xtSegment: CLOTH_STATE.xt, ySegment: CLOTH_STATE.y });
+      icloth.setSolidField(field);
+      if (bodyField) icloth.setBodyField(bodyField);
+      // A pose saved mid-run carries the stage's contact state (the BDF2 restart reads it at the next step).
+      const carried = (start ? start.solverState : data.solverState)?.contact;
+      if (carried) icloth.restoreContactState(carried.held);
+    } catch (error) { icloth.destroy(); throw error; }
+    const positions = Float64Array.from(start?.positions_m ?? data.initialPositions_m ?? data.restPositions_m);
+    const velocities = start ? start.velocities_m_s : data.initialVelocities_m_s, solverState = start ? start.solverState : data.solverState;
+    const entry: Entry = { document, key: this.entryKey(document), documentKey: clothDocumentsKey([document]), solver, mirror: new PoseMirror(this.device, solver, label, undefined, icloth), icloth, field, fieldKey, body, origin,
       revision: ++renderRevisions, topologyRevision, steps: 0, sinceStatus: 0,
       publication: { documentId: document.id, topology: data, positions_m: positions,
         ...(velocities ? { velocities_m_s: Float64Array.from(velocities) } : {}),
@@ -399,7 +459,7 @@ export class ClothSystem {
         }
       }
       // The moving solid's poses at this frame's step boundaries, uploaded before the frame's commands run.
-      if (e.body) e.contact.setBodyPoses(clothBodyPoses(e.body, e.origin, this.entryTime(e), owed, CLOTH_SCENE_STEP_S));
+      if (e.body) (e.contact ?? e.icloth!).setBodyPoses(clothBodyPoses(e.body, e.origin, this.entryTime(e), owed, CLOTH_SCENE_STEP_S));
       // The frame's passes: the detector's frame statistics restart, then the steps (its hooks run inside each).
       // A timed frame splits the pass at each stage change (ClothStagePasses), so each stage carries its own timestamps.
       // Untimed, the frame is submitted in chunks at the steps' stage boundaries (ClothGPUSolver.encodeStep's split):
@@ -411,7 +471,7 @@ export class ClothSystem {
         chunk = this.device.createCommandEncoder({ label: 'Cloth step chunk' });
         return chunk.beginComputePass({ label: 'Cloth step' });
       };
-      e.contact.encodeFrameBegin(pass);
+      if (e.contact) e.contact.encodeFrameBegin(pass); else e.icloth!.encodeFrameBegin();
       for (let s = 0; s < owed; s++) pass = e.solver.encodeStep(pass, split);
       pass.end();
       if (!timer) this.device.queue.submit([chunk.finish()]);
@@ -467,6 +527,11 @@ export class ClothSystem {
     for (const name of notes) if (!this.notes.has(name)) this.notes.set(name, this.entryTime(e));
     if (status.contact & CLOTH_CONTACT_FAILING)
       this.fail('cloth-contact', `contact failed: ${OgcContactDetector.describeStatus(status.contact & CLOTH_CONTACT_FAILING).join('; ')}`, 'OgcContactDetector', e, [status.contact]);
+    // I-Cloth: an iteration cap is a named note; a pool overflow or a step that ended with impacts left halts (the
+    // stage has already stopped on the GPU: IClothCollision's guard).
+    for (const name of IClothCollision.describe(status.icloth & ~ICLOTH_FAILING)) if (!this.notes.has(name)) this.notes.set(name, this.entryTime(e));
+    if (status.icloth & ICLOTH_FAILING)
+      this.fail('cloth-icloth', `collision handling failed: ${IClothCollision.describe(status.icloth & ICLOTH_FAILING).join('; ')}`, 'IClothCollision', e, [status.icloth]);
   }
 
   /**
@@ -508,13 +573,13 @@ export class ClothSystem {
       const encoder = this.device.createCommandEncoder({ label: 'Cloth pose read' }), entries = [...this.entries.values()].filter(e => e.mirror.encode(encoder));
       this.device.queue.submit([encoder.finish()]);
       // The detector's carried state at the same tick: its copy is submitted now, before any further step.
-      const carried = entries.map(e => e.contact.readCarriedState());
+      const carried = entries.map(e => e.contact?.readCarriedState() ?? e.icloth?.readCarriedState());
       await Promise.all(entries.map((e, k) => (e.inflight = this.receive(e, this.entryTime(e), carried[k]!))));
     })().finally(() => { if (this.poseRead === read) this.poseRead = undefined; });
     return (this.poseRead = read);
   }
 
-  private async receive(e: Entry, time_s: number, carried: Promise<OgcCarriedState>): Promise<void> {
+  private async receive(e: Entry, time_s: number, carried: Promise<OgcCarriedState> | undefined): Promise<void> {
     const tick = Math.round(time_s / CLOTH_SCENE_STEP_S);
     let read, contact;
     try { [read, contact] = await Promise.all([e.mirror.read(), carried]); } catch { return; } // device lost or destroyed: nothing to publish
@@ -522,7 +587,7 @@ export class ClothSystem {
     if (read.status & CLOTH_STATUS.nonFinite) { this.fail('cloth-non-finite', ClothGPUSolver.describeStatus(read.status).join('; '), 'finishStep', e, [read.status]); return; }
     if (tick < e.publication.tick) return;
     // The exact state at the pose: a cut or undo from it keeps the BDF2 history and the duals (remapped by vertex origin).
-    const { positions_m, velocities_m_s } = read.state, solverState = { ...read.state.solverState, contact: clothContactStateData(contact, e.origin) };
+    const { positions_m, velocities_m_s } = read.state, solverState = { ...read.state.solverState, ...(contact ? { contact: clothContactStateData(contact, e.origin) } : {}) };
     e.publication = { documentId: e.document.id, topology: e.document.geometry.data, positions_m, velocities_m_s,
       solverState, generation: this.generation, tick, topologyRevision: e.topologyRevision, time_s };
   }
@@ -588,7 +653,7 @@ export class ClothSystem {
         if (key === e.fieldKey) continue;
         try {
           const field = buildClothSceneField(this.scene, e.origin, clothContactRadius(e.document));
-          e.contact.setSolidField(field);
+          (e.contact ?? e.icloth!).setSolidField(field);
           e.field = field; e.fieldKey = key;
         } catch (error) { this.fail('cloth-solid-edit', error instanceof Error ? error.message : String(error), 'ClothSystem.adopt', e, []); return; }
       }
@@ -603,7 +668,7 @@ export class ClothSystem {
 
   private retire(e: Entry): void {
     // The renderer rebinds before its next draw; work already submitted finishes first.
-    void this.device.queue.onSubmittedWorkDone().then(() => { e.solver.destroy(); e.mirror.destroy(); e.contact.destroy(); }, () => undefined);
+    void this.device.queue.onSubmittedWorkDone().then(() => { e.solver.destroy(); e.mirror.destroy(); e.contact?.destroy(); e.icloth?.destroy(); }, () => undefined);
   }
 
   /**
@@ -631,7 +696,7 @@ export class ClothSystem {
 
   destroy(): void {
     this.destroyed = true;
-    for (const e of this.entries.values()) { e.solver.destroy(); e.mirror.destroy(); e.contact.destroy(); }
+    for (const e of this.entries.values()) { e.solver.destroy(); e.mirror.destroy(); e.contact?.destroy(); e.icloth?.destroy(); }
     this.entries.clear(); this.building.clear();
   }
 }

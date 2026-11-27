@@ -33,6 +33,114 @@ import { SOLID_CLEARANCE_CELLS, SOLID_HEADER_WORDS, SOLID_MU_SCALE, SOLID_MU_WOR
 
 
 /** Counter word indices (atomic<u32>) shared by the TS host and the WGSL. */
+/** EXPERIMENT: solids as a penalty valid through penetration (no barrier, no certificate, no hold). */
+/** EXPERIMENT: no cloth-cloth pairs or entries at all. */
+export const OGC_NO_SELF = typeof process !== "undefined" && process.env?.CLOTH_NO_SELF === "1";
+/** EXPERIMENT: the lean contact path: penalty entries only, no certificates, the projection the identity. */
+const PEN_CAP = (typeof process !== "undefined" && process.env?.CLOTH_PEN_CAP ? Number(process.env.CLOTH_PEN_CAP) : 1.0e6).toExponential(3);
+const PAIR_K = (typeof process !== "undefined" && process.env?.CLOTH_PAIR_K ? Number(process.env.CLOTH_PAIR_K) : 1).toExponential(3);
+const PENV: Record<string, string | undefined> = typeof process !== "undefined" ? process.env ?? {} : {};
+const EE_CLAMP_OFF = PENV.CLOTH_EE_CLAMP_OFF === '1';
+const PAIR_SOFT = Number(PENV.CLOTH_PAIR_SOFT ?? 1).toFixed(6), PAIR_TAU = Number(PENV.CLOTH_PAIR_TAU ?? 0.5).toFixed(6), PAIR_DELTA = Number(PENV.CLOTH_PAIR_DELTA ?? 0);
+const PAIR_HBAND = Number(PENV.CLOTH_PAIR_HBAND ?? 0);
+const PAIR_C2 = Number(PENV.CLOTH_PAIR_C2 ?? 0);
+const PEN_UNSIGNED = typeof process !== "undefined" && process.env?.CLOTH_PEN_UNSIGNED === "1";
+const PAIR_DIAG = typeof process !== "undefined" && process.env?.CLOTH_PAIR_DIAG === "1";
+const PAIR_MAJ = PAIR_DIAG || typeof process !== "undefined" && process.env?.CLOTH_PAIR_MAJ === "1";
+/** Active entries cached per vertex for the Newton product (0: no cache). */
+export const OGC_HV_CACHE = Number(typeof process !== "undefined" && process.env?.CLOTH_HV_CACHE || 0);
+/** The cache kernel's body: the host has bound the contact buffer read_write as ogcContacts. */
+export const OGC_HV_CACHE_WGSL = /* wgsl */`
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = gid.x;
+  let header = ogcContacts[0];
+  if (v >= header.x) { return; }
+  let cb = ogcContacts[12].w;
+  if (cb == 0u) { return; }
+  let params = bitcast<vec4<f32>>(ogcContacts[1]);
+  let count = min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y);
+  let base = header.w + v * header.y;
+  let hb = cb + v * ${1 + 8 * OGC_HV_CACHE};
+  let xv = ogcX(v);
+  var n = 0u; var over = 0u;
+  ${PAIR_DIAG ? `var S = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  for (var i = 0u; i < count; i++) { S += ogcEvalEntry(v, xv, ogcContacts[base + i], params).h; }
+  ogcContacts[hb + 1u] = bitcast<vec4<u32>>(vec4<f32>(S[0], 0.0)); ogcContacts[hb + 2u] = bitcast<vec4<u32>>(vec4<f32>(S[1], 0.0)); ogcContacts[hb + 3u] = bitcast<vec4<u32>>(vec4<f32>(S[2], 0.0));
+  if (true) { ogcContacts[hb] = vec4<u32>(0u); return; }` : ""}
+  for (var i = 0u; i < count; i++) {
+    let l = ogcEntryLin(v, xv, ogcContacts[base + i], params);
+    let A = l.wr * l.Mn; let B = l.wrl * l.Mf;
+    let live = dot(abs(A[0]) + abs(A[1]) + abs(A[2]) + abs(B[0]) + abs(B[1]) + abs(B[2]), vec3<f32>(1.0)) != 0.0;
+    if (!live) { continue; }
+    if (n >= ${OGC_HV_CACHE}u) { over = 1u; break; }
+    let b = hb + 1u + 8u * n;
+    ogcContacts[b] = l.ids; ogcContacts[b + 1u] = bitcast<vec4<u32>>(l.wc); ogcContacts[b + 2u] = bitcast<vec4<u32>>(l.wlc);
+    ogcContacts[b + 3u] = bitcast<vec4<u32>>(vec4<f32>(A[0], A[1].x)); ogcContacts[b + 4u] = bitcast<vec4<u32>>(vec4<f32>(A[1].yz, A[2].xy));
+    ogcContacts[b + 5u] = bitcast<vec4<u32>>(vec4<f32>(A[2].z, B[0])); ogcContacts[b + 6u] = bitcast<vec4<u32>>(vec4<f32>(B[1], B[2].x));
+    ogcContacts[b + 7u] = bitcast<vec4<u32>>(vec4<f32>(B[2].yz, 0.0, 0.0));
+    n++;
+  }
+  ogcContacts[hb] = vec4<u32>(n, over, 0u, 0u);
+}
+`;
+export const OGC_LEAN_LEVEL = typeof process !== "undefined" ? Number(process.env?.CLOTH_LEAN ?? 0) : 0;
+/** Level 1: solids only, no rounds. Level 2: cloth pair entries from a round at the step start, and one certify-and-truncate round on the solved move at the step's end. */
+export const OGC_LEAN = OGC_LEAN_LEVEL > 0;
+/** Level 3: cloth pair entries from one round at the step start, as signed quadratic penalties (the side is the pair's at the step start); no certificate. */
+export const OGC_PAIR_PENALTY = OGC_LEAN_LEVEL >= 3;
+export const OGC_SOLID_PENALTY = OGC_LEAN || (typeof process !== "undefined" && process.env?.CLOTH_SOLID_PENALTY === "1");
+const PAIR_STEP = typeof process !== "undefined" ? Number(process.env?.CLOTH_PAIR_STEP ?? 0) : 0;
+const OGC_LEAN_PROJECT_WGSL = /* wgsl */`
+struct OgcActive { q: vec3<f32>, held: bool, count: u32, n0: vec3<f32>, n1: vec3<f32>, n2: vec3<f32>, capOn: bool, nc: vec3<f32>, travel: bool }
+fn ogcProjectTrial(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> vec3<f32> { return y; }
+fn ogcProjectActive(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> OgcActive { var a: OgcActive; a.q = y; return a; }
+fn ogcProject(v: u32, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> { return y; }
+`;
+// The penalty pairs' arc: a listed pair out of range at the iterate (d >= r, so absent from Newton's model) lets its
+// vertices close it to ${PAIR_STEP} r along the direction, no further: the vertex's fraction of alpha d is the least over
+// its pairs (the linearised gap along the joint step). The pair is in range, and in the model, from the next iteration.
+const OGC_LEAN_PROJECT_STEP_WGSL = /* wgsl */`
+struct OgcActive { q: vec3<f32>, held: bool, count: u32, n0: vec3<f32>, n1: vec3<f32>, n2: vec3<f32>, capOn: bool, nc: vec3<f32>, travel: bool }
+fn ogcProjectTrial(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> vec3<f32> {
+  let header = ogcContacts[0];
+  let r = bitcast<vec4<f32>>(ogcContacts[1]).x;
+  let count = min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y);
+  let base = header.w + v * header.y;
+  var s = 1.0;
+  for (var i = 0u; i < count; i++) {
+    let ent = ogcContacts[base + i];
+    if (ent.y == OGC_SOLID_Y || ent.y == OGC_BODY_Y) { continue; }
+    let ee = (ent.y & OGC_EE_BIT) != 0u;
+    if (!ee && ent.w != 0u) { continue; }
+    var ids: vec4<u32>; var w: vec4<f32>; var X: array<vec3<f32>, 4>;
+    if (ee) {
+      ids = vec4<u32>(ogcEdgeVerts(ent.x), ogcEdgeVerts(ent.y & OGC_ID_MASK));
+      for (var j = 0u; j < 4u; j++) { X[j] = ogcX(ids[j]); }
+      let ss = ogcSegmentSegment(X[0], X[1], X[2], X[3]);
+      w = vec4<f32>(1.0 - ss.x, ss.x, -(1.0 - ss.y), -ss.y);
+    } else {
+      ids = vec4<u32>(ent.x, ogcTri(ent.y & OGC_ID_MASK));
+      for (var j = 0u; j < 4u; j++) { X[j] = ogcX(ids[j]); }
+      w = vec4<f32>(1.0, -ogcClosestTriangle(X[0], X[1], X[2], X[3]).bary);
+    }
+    var gap = vec3<f32>(0.0);
+    for (var j = 0u; j < 4u; j++) { gap += w[j] * X[j]; }
+    let d0 = length(gap);
+    if (d0 < r) { continue; }
+    let n = gap / d0;
+    var gd = 0.0;
+    for (var j = 0u; j < 4u; j++) { gd += w[j] * dot(n, ogcStepDir(ids[j])); }
+    gd *= alpha;
+    let room = d0 - ${PAIR_STEP.toFixed(4)} * r;
+    if (-gd > room) { s = min(s, room / -gd); }
+  }
+  return x + s * (y - x);
+}
+fn ogcProjectActive(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> OgcActive { var a: OgcActive; a.q = ogcProjectTrial(v, x, y, alpha); return a; }
+fn ogcProject(v: u32, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> { return y; }
+`;
+
 export const OGC_COUNTER = {
   exceed: 0, rounds: 1, status: 2, peakContacts: 3, peakGrid: 4, maxEnvelope: 5, cell: 6, invCell: 7,
   frameDetections: 8, frameSteps: 9, frameDecides: 10, frameTruncated: 11, frameTruncatedMax: 12,
@@ -151,14 +259,14 @@ export const OGC_COUNTER = {
    */
   heldStart:1133, heldNow:1134,
   /** The frame's steps whose mandatory round started as the fail-safe (fail-safe memory), and whose least shift ended there. */
-  frameHeldStarts:1135, frameFailSafeEntries:1136,
+  frameHeldStarts:1135, frameFailSafeEntries:1136, leanRelist:1137,
   framePairGeometryHits:1128, framePairGeometryMisses:1129, framePairGeometryCollisions:1130,
   macroGeometryInvalid:1125, frameGeometryHits:1126, frameGeometryMisses:1127,
   macroInvalid:1120,frameMacroBuilds:1121,frameMacroHits:1122,frameMacroOverflows:1123,frameMacroEscapes:1124,
 } as const;
 export const OGC_ROUND_LOG = 64;
 export const OGC_ROUND_LOG_WORDS = 12;
-export const OGC_COUNTER_WORDS = OGC_COUNTER.frameFailSafeEntries + 1;
+export const OGC_COUNTER_WORDS = OGC_COUNTER.leanRelist + 1;
 export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 83, 852, 853, 855, 857, 1116, 1117,1121,1122,1123,1124,1126,1127,1128,1129,1130,1131,1132,1135,1136];
 /** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, (origin, q, D) per solid, then (w, 0). */
 export const OGC_PROJECT_RECORD = 8;
@@ -284,6 +392,7 @@ const OGC_HELD_START = ${OGC_COUNTER.heldStart}u;
 const OGC_HELD_NOW = ${OGC_COUNTER.heldNow}u;
 const OGC_F_HELD_STARTS = ${OGC_COUNTER.frameHeldStarts}u;
 const OGC_F_FAILSAFE_ENTRIES = ${OGC_COUNTER.frameFailSafeEntries}u;
+const OGC_LEAN_RELIST = ${OGC_COUNTER.leanRelist}u;
 const OGC_F_CONFLICTS = ${OGC_COUNTER.frameConflicts}u;
 const OGC_F_REDOS = ${OGC_COUNTER.frameRedos}u;
 const OGC_F_HELD = ${OGC_COUNTER.frameHeld}u;
@@ -415,6 +524,34 @@ fn ogcBallExit(base: vec3<f32>, delta: vec3<f32>, R: f32) -> f32 {
   return clamp((sqrt(max(bd * bd + dd * (r2 - dot(base, base)), 0.0)) - bd) / dd, 0.0, 1.0);
 }
 
+// EXPERIMENT (CLOTH_SOLID_PENALTY): a solid's activation, quadratic through penetration.
+// The pair penalty: quadratic to depth PEN_CAP * r past contact, linear beyond (bounded force).
+const OGC_PAIR_K: f32 = ${PAIR_K};
+fn ogcPairAct(d: f32, r: f32, k: f32) -> vec3<f32> {
+  ${PAIR_HBAND > 1 ? `// Anticipation: a listed pair within ${PAIR_HBAND} r, out of range, carries normal stiffness in Newton's model alone (no energy,
+  // no force), ramping to 0 at the band's end: the model of a step that would bring it into range. The fixed point is unchanged.
+  if (d >= r) { return vec3<f32>(0.0, 0.0, k * max(0.0, 1.0 - (d - r) / (${(PAIR_HBAND - 1).toFixed(4)} * r))); }` : ''}
+  if (d >= r) { return vec3<f32>(0.0); }
+  ${PAIR_C2 > 0 ? `// C2 onset: the stiffness ramps from 0 at r to kk over the band w, constant beyond (the force at d = 0 is k r, as the quadratic's).
+  { let w = ${PAIR_C2.toFixed(6)} * r; let kk = k * r / (r - 0.5 * w); let p = r - d;
+    if (p <= w) { return vec3<f32>(kk * p * p * p / (6.0 * w), -kk * p * p / (2.0 * w), kk * p / w); }
+    let q = p - w;
+    return vec3<f32>(kk * (w * w / 6.0 + 0.5 * w * q + 0.5 * q * q), -kk * (0.5 * w + q), kk); }` : ''}
+  ${PAIR_DELTA > 0 ? `// Soft outer band, log stiffening from tau down to delta, then the quadratic that continues it through contact
+  // and past it (the signed gap): C1, convex, finite everywhere.
+  let ks = k * ${PAIR_SOFT}; let tau = ${PAIR_TAU} * r; let dl = ${PAIR_DELTA} * r;
+  if (d >= tau) { return vec3<f32>(0.5 * ks * (r - d) * (r - d), -ks * (r - d), ks); }
+  let k2 = ks * tau * (r - tau);
+  let b = 0.5 * ks * (r - tau) * (r - tau) + k2 * log(tau);
+  if (d >= dl) { return vec3<f32>(-k2 * log(d) + b, -k2 / d, k2 / (d * d)); }
+  let f = k2 / dl; let h = k2 / (dl * dl); let q = dl - d;
+  return vec3<f32>(-k2 * log(dl) + b + f * q + 0.5 * h * q * q, -f - h * q, h);` : `let m = (1.0 + ${PEN_CAP}) * r; let p = r - d;
+  if (p <= m) { return vec3<f32>(0.5 * k * p * p, -k * p, k); }
+  return vec3<f32>(0.5 * k * m * m + k * m * (p - m), -k * m, k);`}
+}
+fn ogcSolidAct(d: f32, r: f32, k: f32) -> vec3<f32> {
+  ${OGC_SOLID_PENALTY ? "if (d >= r) { return vec3<f32>(0.0); } return vec3<f32>(0.5 * k * (r - d) * (r - d), -k * (r - d), k);" : "return ogcActivation(d, r, k);"}
+}
 // OGC's two-stage activation (eqs. 18-20) with tau = r/2: (g, g', g'').
 fn ogcActivation(d: f32, r: f32, k: f32) -> vec3<f32> {
   if (d >= r) { return vec3<f32>(0.0); }
@@ -1314,14 +1451,14 @@ export function ogcVertexBlockWGSL(options: OgcVertexBlockOptions): string {
   if (difference !== 'absolute' && difference !== 'move') throw new Error(`Unknown OGC contact energy difference ${String(difference)}`);
   if (difference === 'move' && !options.newton) throw new Error("OGC contact energy difference 'move' needs the Newton forms (newton)");
   const energyDeltas = difference === 'move';
-  const project = options.travelBound === false ? ogcProjectNoTravelWGSL() : OGC_PROJECT_WGSL;
+  const project = OGC_LEAN ? (OGC_PAIR_PENALTY && PAIR_STEP > 0 && options.newton ? OGC_LEAN_PROJECT_STEP_WGSL : OGC_LEAN_PROJECT_WGSL) : options.travelBound === false ? ogcProjectNoTravelWGSL() : OGC_PROJECT_WGSL;
   return /* wgsl */`
 ${OGC_COMMON_WGSL}
 @group(${group}) @binding(${binding}) var<storage, read> ogcContacts: array<vec4<u32>>;
 fn ogcSolidBase() -> u32 { return ogcContacts[2].x; }
 fn ogcSolidWord(i: u32) -> u32 { return ogcContacts[i >> 2u][i & 3u]; }
 ${OGC_SOLID_WGSL}
-${metric ? `fn ogcMetricInv(v: u32) -> mat3x3<f32> { return ${metric}(v); }\n${ogcProjectMetricWGSL(project)}` : project}
+${metric && !OGC_LEAN ? `fn ogcMetricInv(v: u32) -> mat3x3<f32> { return ${metric}(v); }\n${ogcProjectMetricWGSL(project)}` : project}
 // Surface sample at index i >= N (sample-facet entries): static below N + S, else the
 // moving solid's body-frame sample posed at the step's end, and where it started the step.
 fn ogcSampleRel(i: u32) -> u32 { return i - ogcContacts[0].x; }
@@ -1387,8 +1524,8 @@ fn ogcFieldEval(v: u32, phi: f32, g: vec3<f32>, dx: vec3<f32>, nl: vec3<f32>, en
   let one = vec4<f32>(1.0, 0.0, 0.0, 0.0);
   var out = OgcPairLin(vec4<u32>(v, OGC_NONE, OGC_NONE, OGC_NONE), one, one, 1.0, 1.0, vec3<f32>(0.0), OGC_Z3, OGC_Z3, 0.0);
   // Infinity from a runtime word (ent.w is 0): a constant one would not fold.
-  if (!(phi > 0.0)) { out.e = bitcast<f32>(ent.w | 0x7f800000u); out.wr = 0.0; out.wrl = 0.0; return out; }
-  let act = ogcActivation(phi, params.x, params.y);
+  ${OGC_SOLID_PENALTY ? "" : "if (!(phi > 0.0)) { out.e = bitcast<f32>(ent.w | 0x7f800000u); out.wr = 0.0; out.wrl = 0.0; return out; }"}
+  let act = ogcSolidAct(phi, params.x, params.y);
   out.f = -act.y * g;
   out.Mn = act.z * mat3x3<f32>(g * g.x, g * g.y, g * g.z);
   out.e = act.x;
@@ -1445,6 +1582,35 @@ fn ogcVtWeights(feature: u32, p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<
   return w;
 }
 
+${OGC_PAIR_PENALTY ? `// Whether a listed pair passed through itself between its listing pose A and the pose B: the four points' signed
+// volume changes sign, and at the coplanar instant of the linear path between the poses (regula falsi on the cubic)
+// the vertex lies on the face, or the edges meet inside both.
+fn ogcPairVol(ee: bool, X: array<vec3<f32>, 4>) -> f32 {
+  if (ee) { return dot(cross(X[1] - X[0], X[3] - X[2]), X[2] - X[0]); }
+  return dot(cross(X[2] - X[1], X[3] - X[1]), X[0] - X[1]);
+}
+fn ogcSweptCross(ee: bool, A: array<vec3<f32>, 4>, B: array<vec3<f32>, 4>) -> bool {
+  let f0 = ogcPairVol(ee, A); let f1 = ogcPairVol(ee, B);
+  if (!(f0 * f1 < 0.0)) { return false; }
+  var lo = 0.0; var hi = 1.0; var flo = f0; var fhi = f1;
+  var X: array<vec3<f32>, 4>;
+  var t = f0 / (f0 - f1);
+  for (var it = 0u; it < 4u; it++) {
+    for (var i = 0u; i < 4u; i++) { X[i] = mix(A[i], B[i], t); }
+    let ft = ogcPairVol(ee, X);
+    if (ft == 0.0) { break; }
+    if (ft * flo > 0.0) { lo = t; flo = ft; } else { hi = t; fhi = ft; }
+    t = lo + (hi - lo) * flo / (flo - fhi);
+  }
+  for (var i = 0u; i < 4u; i++) { X[i] = mix(A[i], B[i], t); }
+  if (ee) {
+    let ss = ogcSegmentSegment(X[0], X[1], X[2], X[3]);
+    let da = ogcSegmentSegment(A[0], A[1], A[2], A[3]).z; let db = ogcSegmentSegment(B[0], B[1], B[2], B[3]).z;
+    return ss.x > 0.0 && ss.x < 1.0 && ss.y > 0.0 && ss.y < 1.0 && ss.z < 0.2 * max(da, db);
+  }
+  return ogcClosestTriangle(X[0], X[1], X[2], X[3]).feature == OGC_FACE;
+}
+` : ""}
 fn ogcEntryLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairLin {
   if (ent.y == OGC_SOLID_Y) { return ogcSolidLin(v, xv, ent, params); }
   if (ent.y == OGC_BODY_Y) { return ogcBodyLin(v, xv, ent, params); }
@@ -1454,6 +1620,7 @@ fn ogcEntryLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcP
   var X: array<vec3<f32>, 4>;
   var Xl: array<vec3<f32>, 4>;
   var cloth = vec4<f32>(1.0);
+  var vtCrossed = false; var isEE = false;
   let sampled = ent.w == 1u && (ent.y & OGC_EE_BIT) == 0u;
   // A hull-facet entry: vertex v against a facet of the samples, carrying mu lambda as a sample-facet entry does.
   let facet = ent.w == 2u && (ent.y & OGC_EE_BIT) == 0u;
@@ -1463,7 +1630,7 @@ fn ogcEntryLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcP
     X[0] = select(ogcX(ids[0]), xv, ids[0] == v); Xl[0] = ogcXt(ids[0]);
     for (var i = 1u; i < 4u; i++) { X[i] = ogcSamplePos(ids[i]); Xl[i] = ogcSampleStart(ids[i]); }
     cloth = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-    w = ogcVtWeights(feature, X[0], X[1], X[2], X[3]);
+    ${OGC_PAIR_PENALTY ? "let clp = ogcClosestTriangle(X[0], X[1], X[2], X[3]); w = vec4<f32>(1.0, -clp.bary); vtCrossed = ogcSweptCross(false, Xl, X);" : "w = ogcVtWeights(feature, X[0], X[1], X[2], X[3]);"}
     wl = ogcVtWeights(feature, Xl[0], Xl[1], Xl[2], Xl[3]);
   } else if ((ent.y & OGC_EE_BIT) == 0u) {
     let feature = (ent.y >> 28u) & 7u;
@@ -1471,7 +1638,7 @@ fn ogcEntryLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcP
     for (var i = 1u; i < 4u; i++) { X[i] = select(ogcX(ids[i]), xv, ids[i] == v); Xl[i] = ogcXt(ids[i]); }
     if (sampled) { X[0] = ogcSamplePos(ent.x); Xl[0] = ogcSampleStart(ent.x); cloth.x = 0.0; }
     else { X[0] = select(ogcX(ids[0]), xv, ids[0] == v); Xl[0] = ogcXt(ids[0]); }
-    w = ogcVtWeights(feature, X[0], X[1], X[2], X[3]);
+    ${OGC_PAIR_PENALTY ? "let clp = ogcClosestTriangle(X[0], X[1], X[2], X[3]); w = vec4<f32>(1.0, -clp.bary); vtCrossed = ogcSweptCross(false, Xl, X);" : "w = ogcVtWeights(feature, X[0], X[1], X[2], X[3]);"}
     wl = ogcVtWeights(feature, Xl[0], Xl[1], Xl[2], Xl[3]);
   } else {
     let e0 = ogcEdgeVerts(ent.x); let e1 = ogcEdgeVerts(ent.y & OGC_ID_MASK);
@@ -1480,6 +1647,9 @@ fn ogcEntryLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcP
     let st = unpack2x16unorm(ent.w);
     w = vec4<f32>(1.0 - st.x, st.x, -(1.0 - st.y), -st.y);
     wl = w;
+    ${OGC_PAIR_PENALTY ? `isEE = true; let ss = ogcSegmentSegment(X[0], X[1], X[2], X[3]);
+    w = vec4<f32>(1.0 - ss.x, ss.x, -(1.0 - ss.y), -ss.y);
+    ${EE_CLAMP_OFF ? "if (!(ss.x > 0.0 && ss.x < 1.0 && ss.y > 0.0 && ss.y < 1.0)) { return OgcPairLin(ids, vec4<f32>(0.0), vec4<f32>(0.0), 0.0, 0.0, vec3<f32>(0.0), OGC_Z3, OGC_Z3, 0.0); }" : ""}` : ""}
   }
   var gap = vec3<f32>(0.0);
   var wr = 0.0;
@@ -1489,13 +1659,21 @@ fn ogcEntryLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcP
     wr += select(0.0, w[i], ids[i] == v);
     wrl += select(0.0, wl[i], ids[i] == v);
   }
+${OGC_PAIR_PENALTY ? `
+  var glp = vec3<f32>(0.0);
+  for (var i = 0u; i < 4u; i++) { glp += wl[i] * Xl[i]; }
+  let nlp = ogcUnitOr(glp, vec3<f32>(0.0, 1.0, 0.0));
   let d = length(gap);
+  let side = select(1.0, -1.0, ${PEN_UNSIGNED ? "false && " : ""}((isEE && ogcSweptCross(true, Xl, X)) || vtCrossed));
+  var n = nlp;
+  if (d > 0.0) { n = side * gap / d; }
+  let act = ogcPairAct(side * d, params.x, params.y * ${PAIR_K});` : `  let d = length(gap);
   // Coincident primitives (d = 0) lie outside the barrier's domain, like phi <= 0 above: infinite
   // energy and no direction to push along. Detection fails a coincident pair explicitly (OGC_STATUS.coincident).
   // The infinity is built from a runtime word (ent.w & 0 is 0), as in ogcFieldEval: a constant one would not fold.
   if (!(d > 0.0)) { return OgcPairLin(ids, vec4<f32>(0.0), vec4<f32>(0.0), 0.0, 0.0, vec3<f32>(0.0), OGC_Z3, OGC_Z3, bitcast<f32>(0x7f800000u | (ent.w & 0u))); }
   let n = gap / d;
-  let act = ogcActivation(d, params.x, params.y);
+  let act = ogcActivation(d, params.x, params.y);`}
   var out = OgcPairLin(ids, cloth * w, cloth * wl, wr, wrl, -act.y * wr * n, act.z * mat3x3<f32>(n * n.x, n * n.y, n * n.z), OGC_Z3, act.x);
   // A sample-facet entry carries mu lambda with the solid's own mu; its sample's own
   // motion over the step is the solid's (none for a static one).
@@ -1513,7 +1691,9 @@ fn ogcEntryLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcP
 // wr^2 Mn + wrl^2 Mf, its energy.
 fn ogcEvalEntry(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
   let l = ogcEntryLin(v, xv, ent, params);
-  return OgcPairEval(l.f, (l.wr * l.wr) * l.Mn + (l.wrl * l.wrl) * l.Mf, l.e);
+  ${PAIR_MAJ ? `// Diagonal majorant of the pair's coupled Hessian: (sum_i w_i a_i)^2 <= (sum_j |w_j|) sum_i |w_i| a_i^2.
+  let sw = abs(l.wc.x) + abs(l.wc.y) + abs(l.wc.z) + abs(l.wc.w); let swl = abs(l.wlc.x) + abs(l.wlc.y) + abs(l.wlc.z) + abs(l.wlc.w);
+  return OgcPairEval(l.f, (max(sw, abs(l.wr)) * abs(l.wr)) * l.Mn + (max(swl, abs(l.wrl)) * abs(l.wrl)) * l.Mf, l.e);` : "return OgcPairEval(l.f, (l.wr * l.wr) * l.Mn + (l.wrl * l.wrl) * l.Mf, l.e);"}
 }
 
 fn ogcContactCount(v: u32) -> u32 {
@@ -1584,6 +1764,31 @@ fn ogcVertexContactHvLanes(v: u32, first: u32, stride: u32) -> vec3<f32> {
   let base = header.w + v * header.y;
   let xv = ogcX(v);
   var out = vec3<f32>(0.0);
+  // The entries' linearisation cached for this Newton iteration (OGC_HV_CACHE_WGSL): active entries only.
+  let cb = ogcContacts[12].w;
+  if (cb != 0u) {
+    let hb = cb + v * ${1 + 8 * OGC_HV_CACHE};
+    let h = ogcContacts[hb];
+    ${PAIR_DIAG ? `if (true) {
+      // The pairs' diagonal majorant alone (no coupling): one block per vertex.
+      let s0 = bitcast<vec4<f32>>(ogcContacts[hb + 1u]); let s1 = bitcast<vec4<f32>>(ogcContacts[hb + 2u]); let s2 = bitcast<vec4<f32>>(ogcContacts[hb + 3u]);
+      return mat3x3<f32>(s0.xyz, s1.xyz, s2.xyz) * ogcDir(v);
+    }` : ""}
+    if (h.y == 0u) {
+      for (var i = first; i < h.x; i += stride) {
+        let b = hb + 1u + 8u * i;
+        let ids = ogcContacts[b]; let wc = bitcast<vec4<f32>>(ogcContacts[b + 1u]); let wlc = bitcast<vec4<f32>>(ogcContacts[b + 2u]);
+        let c0 = bitcast<vec4<f32>>(ogcContacts[b + 3u]); let c1 = bitcast<vec4<f32>>(ogcContacts[b + 4u]); let c2 = bitcast<vec4<f32>>(ogcContacts[b + 5u]);
+        let c3 = bitcast<vec4<f32>>(ogcContacts[b + 6u]); let c4 = bitcast<vec4<f32>>(ogcContacts[b + 7u]);
+        var q = vec3<f32>(0.0); var ql = vec3<f32>(0.0);
+        for (var k = 0u; k < 4u; k++) {
+          if (wc[k] != 0.0 || wlc[k] != 0.0) { let p = ogcDir(ids[k]); q += wc[k] * p; ql += wlc[k] * p; }
+        }
+        out += mat3x3<f32>(c0.xyz, vec3<f32>(c0.w, c1.xy), vec3<f32>(c1.zw, c2.x)) * q + mat3x3<f32>(c2.yzw, c3.xyz, vec3<f32>(c3.w, c4.xy)) * ql;
+      }
+      return out;
+    }
+  }
   for (var i = first; i < count; i += stride) {
     let l = ogcEntryLin(v, xv, ogcContacts[base + i], params);
     var q = vec3<f32>(0.0); var ql = vec3<f32>(0.0);
@@ -1770,11 +1975,16 @@ fn ogcFieldBaseOf(v: u32, ent: vec4<u32>) -> OgcFieldBase {
 }
 // A pair entry's base: its ids, the recorded feature, its points relative to the anchor (the first cloth vertex's
 // base), the lagged weights' slip and normal.
-struct OgcPairBase { ids: vec4<u32>, kind: u32, feature: u32, st: vec2<f32>, R0: array<vec3<f32>, 4>, cloth: vec4<f32>, wl: vec4<f32>, u0: vec3<f32>, nl: vec3<f32>, y0: f32, ml: f32 }
+struct OgcPairBase { ids: vec4<u32>, kind: u32, feature: u32, st: vec2<f32>, R0: array<vec3<f32>, 4>, cloth: vec4<f32>, wl: vec4<f32>, u0: vec3<f32>, nl: vec3<f32>, y0: f32, ml: f32, sl: f32, Rl: array<vec3<f32>, 4> }
+fn ogcPenSide(kind: u32, Rl: array<vec3<f32>, 4>, X: array<vec3<f32>, 4>) -> f32 {
+  ${PEN_UNSIGNED ? "if (true) { return 1.0; }" : ""}
+  return select(1.0, -1.0, ogcSweptCross(kind == 3u, Rl, X));
+}
 // kind: 0 VT (cloth vertex, cloth face), 1 sample-face, 2 hull facet, 3 EE.
 fn ogcPairWeights(b: OgcPairBase, X: array<vec3<f32>, 4>) -> vec4<f32> {
-  if (b.kind == 3u) { return vec4<f32>(1.0 - b.st.x, b.st.x, -(1.0 - b.st.y), -b.st.y); }
-  return ogcVtWeights(b.feature, X[0], X[1], X[2], X[3]);
+  ${OGC_PAIR_PENALTY ? `if (b.kind == 3u) { let ss = ogcSegmentSegment(X[0], X[1], X[2], X[3]); return vec4<f32>(1.0 - ss.x, ss.x, -(1.0 - ss.y), -ss.y); }
+  return vec4<f32>(1.0, -ogcClosestTriangle(X[0], X[1], X[2], X[3]).bary);` : `if (b.kind == 3u) { return vec4<f32>(1.0 - b.st.x, b.st.x, -(1.0 - b.st.y), -b.st.y); }
+  return ogcVtWeights(b.feature, X[0], X[1], X[2], X[3]);`}
 }
 // The closest point's free parameters on the recorded feature of face (a, b, c) for point p (ogcVtWeights' own): an
 // edge's s (x), the face's barycentrics (bv, bw); none for a vertex feature.
@@ -1796,6 +2006,7 @@ fn ogcVtBary(feature: u32, p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32
 // parameters along the feature's in-plane differences (an edge: ds (R_i - R_j); the face: dbv (R_a - R_b) + dbw (R_a - R_c)),
 // so the weights' f32 rounding, which need not sum to the exact -1, cannot put d0 times an ulp into the normal change.
 fn ogcPairWeightShift(b: OgcPairBase, R1: array<vec3<f32>, 4>) -> vec3<f32> {
+  ${OGC_PAIR_PENALTY ? `{ let wa = ogcPairWeights(b, b.R0); let wb = ogcPairWeights(b, R1); var sh = vec3<f32>(0.0); for (var j = 0u; j < 4u; j++) { sh += (wb[j] - wa[j]) * b.R0[j]; } return sh; }` : ""}
   if (b.kind == 3u || b.feature < 3u) { return vec3<f32>(0.0); }
   let q0 = ogcVtBary(b.feature, b.R0[0], b.R0[1], b.R0[2], b.R0[3]);
   let q1 = ogcVtBary(b.feature, R1[0], R1[1], R1[2], R1[3]);
@@ -1833,13 +2044,16 @@ fn ogcPairBaseOf(ent: vec4<u32>, params: vec4<f32>) -> OgcPairBase {
   let w0 = ogcPairWeights(b, b.R0);
   var g0 = vec3<f32>(0.0);
   for (var i = 0u; i < 4u; i++) { g0 += w0[i] * b.R0[i]; }
-  b.wl = select(ogcVtWeights(b.feature, Xl[0], Xl[1], Xl[2], Xl[3]), w0, b.kind == 3u);
+  b.wl = select(ogcVtWeights(b.feature, Xl[0], Xl[1], Xl[2], Xl[3]), ${OGC_PAIR_PENALTY ? "vec4<f32>(1.0 - b.st.x, b.st.x, -(1.0 - b.st.y), -b.st.y)" : "w0"}, b.kind == 3u);
   b.ml = select(params.z * bitcast<f32>(ent.z), bitcast<f32>(ent.z), sampled || facet);
   var dx = vec3<f32>(0.0); var gl = vec3<f32>(0.0);
   for (var i = 0u; i < 4u; i++) { dx += b.wl[i] * (Xb[i] - Xl[i]); gl += b.wl[i] * Xl[i]; }
   b.nl = ogcUnitOr(gl, ogcUnitOr(g0, vec3<f32>(0.0)));
   b.u0 = dx - b.nl * dot(b.nl, dx);
   b.y0 = length(b.u0);
+  b.sl = dot(cross(Xl[2] - Xl[1], Xl[3] - Xl[1]), Xl[0] - Xl[1]);
+  let Al = Xl[select(0u, 1u, b.kind == 1u)];
+  for (var i = 0u; i < 4u; i++) { b.Rl[i] = Xl[i] - Al; }
   return b;
 }
 fn ogcContactEnergyDeltasOwnedLanes(v: u32, first: u32, stride: u32) -> array<vec2<f32>, OGC_NEWTON_TRIALS> {
@@ -1855,16 +2069,16 @@ fn ogcContactEnergyDeltasOwnedLanes(v: u32, first: u32, stride: u32) -> array<ve
     if (!ogcEntryOwned(v, ent)) { continue; }
     if (ent.y == OGC_SOLID_Y || ent.y == OGC_BODY_Y) {
       let f = ogcFieldBaseOf(v, ent);
-      let ok0 = f.phi0 > 0.0;
-      let e0 = select(ogcInfAt(ent.w), ogcActivation(f.phi0, params.x, params.y).x, ok0) + select(0.0, f.ml * ogcFrictionF0(f.y0, params.w), f.ml > 0.0);
+      let ok0 = ${OGC_SOLID_PENALTY ? "true" : "f.phi0 > 0.0"};
+      let e0 = select(ogcInfAt(ent.w), ogcSolidAct(f.phi0, params.x, params.y).x, ok0) + select(0.0, f.ml * ogcFrictionF0(f.y0, params.w), f.ml > 0.0);
       E0 += e0;
       for (var k = 0u; k < OGC_NEWTON_TRIALS; k++) {
         let m = ogcMove(v, k);
         let dphi = ogcSolidPhiDelta(f.h, f.q0, (transpose(f.R) * m) / f.h.cell);
         var de: f32;
         if (!ok0) { de = e0 - e0; }
-        else if (!(f.phi0 + dphi > 0.0)) { de = ogcInfAt(ent.w); }
-        else { de = ogcActivationDelta(f.phi0, dphi, params.x, params.y); }
+        else if (${OGC_SOLID_PENALTY ? "false" : "!(f.phi0 + dphi > 0.0)"}) { de = ogcInfAt(ent.w); }
+        else { ${OGC_SOLID_PENALTY ? "let pa = min(f.phi0, params.x); let pb = min(f.phi0 + dphi, params.x); de = 0.5 * params.y * (pa - pb) * (2.0 * params.x - pa - pb);" : "de = ogcActivationDelta(f.phi0, dphi, params.x, params.y);"} }
         if (f.ml > 0.0) {
           let du = m - f.nl * dot(f.nl, m);
           let y1 = length(f.u0 + du);
@@ -1878,9 +2092,9 @@ fn ogcContactEnergyDeltasOwnedLanes(v: u32, first: u32, stride: u32) -> array<ve
     let w0 = ogcPairWeights(b, b.R0);
     var g0 = vec3<f32>(0.0);
     for (var j = 0u; j < 4u; j++) { g0 += w0[j] * b.R0[j]; }
-    let d0 = length(g0);
-    let ok0 = d0 > 0.0;
-    let e0 = select(ogcInfAt(ent.w), ogcActivation(d0, params.x, params.y).x, ok0) + select(0.0, b.ml * ogcFrictionF0(b.y0, params.w), b.ml > 0.0);
+    ${OGC_PAIR_PENALTY ? "let off0 = ${EE_CLAMP_OFF} && b.kind == 3u && !(w0.y > 0.0 && w0.y < 1.0 && w0.w < 0.0 && w0.w > -1.0); let d0 = select(ogcPenSide(b.kind, b.Rl, b.R0) * length(g0), 1.0e30, off0);" : "let d0 = length(g0);"}
+    let ok0 = ${OGC_PAIR_PENALTY ? "true" : "d0 > 0.0"};
+    let e0 = select(ogcInfAt(ent.w), ${OGC_PAIR_PENALTY ? "ogcSolidAct" : "ogcActivation"}(d0, params.x, params.y).x, ok0) + select(0.0, b.ml * ogcFrictionF0(b.y0, params.w), b.ml > 0.0);
     E0 += e0;
     for (var k = 0u; k < OGC_NEWTON_TRIALS; k++) {
       var M: array<vec3<f32>, 4>;
@@ -1894,11 +2108,14 @@ fn ogcContactEnergyDeltasOwnedLanes(v: u32, first: u32, stride: u32) -> array<ve
       let w1 = ogcPairWeights(b, R1);
       var dg = ogcPairWeightShift(b, R1);
       for (var j = 0u; j < 4u; j++) { dg += w1[j] * (M[j] - mA); }
-      let d1 = length(g0 + dg);
+${OGC_PAIR_PENALTY ? `
+      let off1 = ${EE_CLAMP_OFF} && b.kind == 3u && !(w1.y > 0.0 && w1.y < 1.0 && w1.w < 0.0 && w1.w > -1.0);
+      let d1 = select(ogcPenSide(b.kind, b.Rl, R1) * length(g0 + dg), 1.0e30, off1);
+      var de = ogcPairAct(d1, params.x, params.y * ${PAIR_K}).x - ogcPairAct(d0, params.x, params.y * ${PAIR_K}).x;` : `      let d1 = length(g0 + dg);
       var de: f32;
       if (!ok0) { de = e0 - e0; }
       else if (!(d1 > 0.0)) { de = ogcInfAt(ent.w); }
-      else { de = ogcActivationDelta(d0, ogcLengthDelta(g0, dg, d0, d1), params.x, params.y); }
+      else { de = ogcActivationDelta(d0, ogcLengthDelta(g0, dg, d0, d1), params.x, params.y); }`}
       if (b.ml > 0.0) {
         var dx = vec3<f32>(0.0);
         for (var j = 0u; j < 4u; j++) { dx += b.wl[j] * M[j]; }

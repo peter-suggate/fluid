@@ -48,3 +48,16 @@ test('cloth experiment choices survive document serialization and invalid choice
   assert.ok(validateClothDocument({...saved,solver:{...settings,contactBroadphase:'unknown'}}).some(e=>e.includes('broadphase')));
   assert.ok(validateClothDocument({...saved,solver:{...settings,multigrid:'yes'}}).some(e=>e.includes('boolean')));
 });
+
+test('the cloth method defaults to newton, resolves I-Cloth caps, and an unknown method fails explicitly', () => {
+  assert.equal(clothExecutionSettings().method,'newton');
+  assert.deepEqual(clothExecutionSettings({method:'icloth'},true).icloth,{rounds:8,impactIterations:100});
+  assert.deepEqual(clothExecutionSettings({method:'icloth',icloth:{rounds:3}},true).icloth,{rounds:3,impactIterations:100});
+  const document=bridson2002RotatingSphere({nodesAcross:4}).cloth;
+  const saved=JSON.parse(JSON.stringify({...document,solver:{...document.solver,method:'icloth',icloth:{rounds:4,impactIterations:50}}}));
+  assert.deepEqual(validateClothDocument(saved),[]);
+  assert.equal(clothExecutionSettings(saved.solver,true).method,'icloth');
+  assert.ok(validateClothDocument({...saved,solver:{...saved.solver,method:'vbd'}}).some(e=>e.includes('Unknown cloth method')));
+  assert.ok(validateClothDocument({...saved,solver:{...saved.solver,icloth:{rounds:0}}}).length);
+  assert.ok(validateClothDocument({...saved,solver:{...saved.solver,icloth:{impactIterations:1.5}}}).length);
+});

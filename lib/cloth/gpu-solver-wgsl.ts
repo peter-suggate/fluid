@@ -29,7 +29,7 @@ export const CLOTH_WORKGROUP = 64;
 /** Uniform records of the per-dispatch data, one per PCG iteration (its index in range.z). */
 export const CLOTH_DISPATCH_STRIDE = 256;
 /** Bindings (group 0). */
-export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, newton: 10, contactState: 12 } as const;
+export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, newton: 10, contactState: 12, proximity: 13 } as const;
 export const CLOTH_SCRIPT_KIND = { translate: 0, rotate: 1, oscillate: 2 } as const;
 
 export interface ClothSolverWGSLOptions {
@@ -46,14 +46,24 @@ export interface ClothSolverWGSLOptions {
   /** The contact detector verifies a candidate done (ClothSolverContact.verifies): Newton's done word is 2 until the
    * contact hook writes 1 or 0, and a step that ends at 2 fails (CLOTH_STATUS.unverifiedDone). */
   readonly verifies?: boolean;
+  /** I-Cloth's proximity block (lib/cloth/icloth, at group 0, CLOTH_BINDING.proximity): penalty repulsion and lagged
+   * friction as plain global terms of g, H and the trial energy - no projection, no active set, no restart. It defines
+   * pxVertexTerms, pxVertexHv and pxOwnedEnergy over the host's pxX (trial-aware), pxXt and pxDir. Never with contactBlock. */
+  readonly proximityBlock?: string;
+  /** Without contactBlock: a per-vertex contact state of the same contract (bit 1: the contact switched on in the step
+   * that wrote it) is bound at CLOTH_BINDING.contactState, and the BDF2 history restarts on it (I-Cloth's). */
+  readonly restartState?: boolean;
 }
 
 export function clothSolverWGSL(options: ClothSolverWGSLOptions): string {
   // With contact the BDF2 history restarts at a contact onset (C2's contact state).
-  const contact = !!options.contactBlock, restart = contact;
+  const contact = !!options.contactBlock, restart = contact || !!options.restartState;
   // The projected arc's Pi_v is C2's ogcProject (a block without it is refused).
   if (contact && !options.contactBlock!.includes('fn ogcProjectTrial(')) throw new Error('Cloth solver contact block lacks ogcProjectTrial (the projected arc search needs Pi_v at each trial level)');
   if (contact && !options.contactBlock!.includes('fn ogcProjectActive(')) throw new Error('Cloth solver contact block lacks ogcProjectActive (the projected Newton active set needs the binding certificate normals)');
+  const proximity = !!options.proximityBlock;
+  if (proximity && contact) throw new Error('Cloth solver takes a contact block or a proximity block, not both');
+  for (const fn of ['pxVertexTerms', 'pxVertexHv', 'pxOwnedEnergy']) if (proximity && !options.proximityBlock!.includes(`fn ${fn}(`)) throw new Error(`Cloth solver proximity block lacks ${fn}`);
   return (options.subgroups ? 'enable subgroups;\n' : '') + /* wgsl */`
 struct Params {
   n: vec4u,      // N, T, E, bending rows (N: row r is vertex r)
@@ -89,6 +99,7 @@ struct Dispatch { range: vec4u, values: vec4f } // (0, N, PCG iteration from 0)
 
 const ALPHA: f32 = ${CLOTH_AVBD.alpha};
 const EDGE_ALPHA: f32 = ${CLOTH_AVBD.edgeAlpha};
+const EDGE_K_RATIO: f32 = ${CLOTH_AVBD.edgeStiffnessRatio.toFixed(1)};
 const GAMMA: f32 = ${CLOTH_AVBD.gamma};
 const BETA: f32 = ${CLOTH_AVBD.beta};
 const K_MAX_RATIO: f32 = ${CLOTH_AVBD.maxStiffnessRatio};
@@ -138,11 +149,22 @@ fn ogcX(i: u32) -> vec3f {
   return positions[i].xyz;
 }
 fn ogcDir(i: u32) -> vec3f { return pcgDir(i); }
+fn ogcStepDir(i: u32) -> vec3f { return nwD(i); }
 ` : ''}
 ${contact ? `fn ogcXt(i: u32) -> vec3f { return state[seg(S_XT, i)].xyz; }
 fn ogcTri(t: u32) -> vec3u { return tris(t).xyz; }
 fn ogcEdgeVerts(e: u32) -> vec2u { return edges(e).xy; }
 ${options.contactBlock}` : ''}
+${proximity ? `// I-Cloth proximity terms (lib/cloth/icloth): the line search evaluates their energy at each trial point x + alpha d
+// (nwTrialMove = k + 1 for trial k, 0 everywhere else); H.p multiplies the PCG vector u.
+var<private> nwTrialMove: u32;
+fn pxX(i: u32) -> vec3f {
+  if (nwTrialMove != 0u) { let k = nwTrialMove - 1u; return positions[i].xyz + nwMove(i, k, exp2(-f32(k))); }
+  return positions[i].xyz;
+}
+fn pxDir(i: u32) -> vec3f { return pcgDir(i); }
+fn pxXt(i: u32) -> vec3f { return state[seg(S_XT, i)].xyz; }
+${options.proximityBlock}` : ''}
 
 // Nearest PSD matrix of a symmetric 3x3: cyclic Jacobi, negative eigenvalues clamped.
 // PSD projection of a membrane vertex block H = J D J^T + sigma I (sigma < 0). Every column of J lies in span(f0, f1),
@@ -381,7 +403,7 @@ fn constraints(v: u32, xv: vec3f, s0: System) -> System {
     for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { let ge = s.g; s = edgeTerm(v, xv, topo[P.topo1.y + j] >> 2u, s); gTerms += abs(s.g - ge); }
   }
   let gp = s.g;
-  ${contact ? 's = pinTerms(v, xv, s); _ = contactTerms(v, xv, 0u, 1u, &s);' : 's = pinTerms(v, xv, s);'}
+  ${contact ? 's = pinTerms(v, xv, s); _ = contactTerms(v, xv, 0u, 1u, &s);' : proximity ? 's = pinTerms(v, xv, s); { var gx = vec3f(0.0); var Hx = mat3x3f(); pxVertexTerms(v, xv, &gx, &Hx); s.g += gx; s.H += Hx; }' : 's = pinTerms(v, xv, s);'}
   gTerms += abs(s.g - gp);
   return s;
 }
@@ -442,7 +464,7 @@ ${restart ? `
   if (id.x < P.n.x && (ogcState[id.x] & 2u) != 0u) { atomicOr(&status[${CLOTH_STATUS_WORD.onset}u], 1u); }
 }` : ''}
 
-// At x_t, before the frame pass moves positions: AVBD warm start of the edge duals and
+// At x_t, before the frame pass moves positions: the strain-limit edges' fixed stiffness and
 // their stabilized limits, and the damping tangent of every face.
 @compute @workgroup_size(${CLOTH_WORKGROUP}) fn frameElements(@builtin(global_invocation_id) id: vec3u) {
   let i = id.x;
@@ -453,7 +475,8 @@ ${restart ? `
       let s = max(referenceStiffness(ev.x), referenceStiffness(ev.y));
       let limit = (1.0 + er.y) * er.x;
       var d = edgeDual(i);
-      d.x *= ALPHA * GAMMA; d.y = max(GAMMA * d.y, s);
+      // The multiplier carries over the step undecayed; the stiffness is fixed (no ramp).
+      d.x *= ${typeof process !== "undefined" && process.env?.CLOTH_LIMIT_PEN === "1" ? "0.0" : "1.0"}; d.y = ${typeof process !== "undefined" && process.env?.CLOTH_LIMIT_K ? Number(process.env.CLOTH_LIMIT_K).toFixed(1) : "EDGE_K_RATIO"} * s;
       d.z = limit + EDGE_ALPHA * max(length(pos(ev.x) - pos(ev.y)) - limit, 0.0);
       state[P.state0.y + i] = d;
     }
@@ -503,7 +526,11 @@ fn adaptiveGravity(a: vec3f, g: vec3f) -> f32 {
   positions[v] = vec4f(init, positions[v].w);
 }
 
-// AVBD dual update of edge e at the current positions: lambda <- clamp(k C + lambda, 0, kMax l), k grows while active.
+// The strain limit is a bounded-stiffness augmented Lagrangian: within a step the multiplier is fixed and the limit is
+// the smooth term max(k C + lambda, 0)^2 / 2k of the Newton solve (its Hessian in the PCG diagonal); once per step, from
+// the step's final pose, lambda <- clamp(lambda + k C, 0, kMax l). k does not grow: a multiplier stepped at every Newton
+// iteration from an unconverged pose, with k ramping while active, compounded the solve's error (measured 2026-11-24:
+// Bridson curtain residual 33 -> 1.1e4 and 131% strain at the pins over ten steps without one contact).
 fn updateEdgeDual(e: u32) {
   if (e >= P.n.z) { return; }
   let er = rest[P.rest0.w + e];
@@ -513,8 +540,8 @@ fn updateEdgeDual(e: u32) {
   var d = edgeDual(e);
   let C = length(pos(ev.x) - pos(ev.y)) - d.z;
   let lambda = d.y * C + d.x;
+  ${typeof process !== "undefined" && process.env?.CLOTH_LIMIT_PEN === "1" ? "return;" : ""}
   d.x = min(max(lambda, 0.0), kMax * er.x);
-  if (lambda > 0.0) { d.y = min(d.y + BETA * s * abs(C) / er.x, kMax); }
   state[P.state0.y + e] = d;
 }
 
@@ -614,5 +641,5 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
   state[seg(S_NORMAL, v)] = vec4f(select(vec3f(0.0, 1.0, 0.0), n / ln, ln > 0.0), 0.0);
   if (!finite3(x) || !finite3(vNew)) { atomicOr(&status[0], ${CLOTH_STATUS.nonFinite}u); }
 }
-${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact, options.pcg, !!options.subgroups, !!options.trustRegion, options.activeSet ?? true, contact && !!options.verifies)}`;
+${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact, options.pcg, !!options.subgroups, !!options.trustRegion, options.activeSet ?? true, contact && !!options.verifies, proximity)}`;
 }

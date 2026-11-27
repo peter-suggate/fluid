@@ -1,12 +1,10 @@
 // Compile one WGSL entry point through Dawn (no dispatch) and dump its MSL.
 // usage: dump-msl.mts <wgsl> <entry> <constants.json> <out.metal>
 import { readFileSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
-import { createProcessRetainedDawnGPU } from "/Users/petersuggate/code/me/fluid-scratch/lane-n/tree/lib/harness/node-dawn-provider";
-import { requiredFluidDeviceLimits } from "/Users/petersuggate/code/me/fluid-scratch/lane-n/tree/lib/core/webgpu-device-limits";
+import { createProcessRetainedDawnGPU } from "../../../lib/harness/node-dawn-provider";
+import { requiredFluidDeviceLimits } from "../../../lib/core/webgpu-device-limits";
 const [wgsl, entry, constantsFile, out] = process.argv.slice(2) as [string, string, string, string];
-const dawn = await import(pathToFileURL(resolve("/Users/petersuggate/code/me/fluid-scratch/lane-n/tree/node_modules/webgpu/index.js")).href);
+const dawn = await import(new URL("../../../node_modules/webgpu/index.js", import.meta.url).href);
 Object.assign(globalThis, dawn.globals);
 const gpu = createProcessRetainedDawnGPU(dawn, ["backend=metal", "enable-dawn-features=skip_validation,dump_shaders,disable_symbol_renaming"]);
 const adapter = await gpu.requestAdapter();

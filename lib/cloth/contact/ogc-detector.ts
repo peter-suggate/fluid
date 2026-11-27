@@ -1,5 +1,9 @@
 import { pairGeometryLayout, pairGeometryResetWGSL } from './pair-geometry-cache';
-import { ogcPairGeometryBoundsWGSL } from './ogc-detector-wgsl';
+import { ogcPairGeometryBoundsWGSL, OGC_LEAN_WGSL, OGC_REARM_WGSL } from './ogc-detector-wgsl';
+import { OGC_HV_CACHE, OGC_LEAN, OGC_LEAN_LEVEL } from './ogc-wgsl';
+const LEAN_UNTANGLE = Number(typeof process !== 'undefined' && process.env?.CLOTH_UNTANGLE || 0);
+const LEAN_REDOS = Number(typeof process !== 'undefined' && process.env?.CLOTH_LEAN_REDOS || 6);
+const LEAN_RELIST: number[] = (typeof process !== 'undefined' && process.env?.CLOTH_LEAN_RELIST || '2').split(',').map(Number);
 import { macroCacheLayout, macroCacheResetWGSL } from './macro-cache';
 import { ogcMacroBoundsWGSL } from './ogc-detector-wgsl';
 import { buildOgcBVH, type OgcBVHLayout } from './bvh';
@@ -44,7 +48,7 @@ import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-
 import { OGC_FACE_RECORD_WORDS, buildOgcFaceRecords, buildOgcQueryOrder } from "./ogc-topology";
 import { OGC_LOCALITY_DEFAULT, OGC_LOC_GEOMETRY_WGSL, ogcQueryBindings, parseOgcLocality, type OgcLocalityFlags } from "./ogc-detector-wgsl";
 import {
-  OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, ogcDecideWGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
+  OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, ogcDecideWGSL, OGC_INTERSECT_WGSL, OGC_HV_CACHE_KERNEL_WGSL, ogcUntangleWGSL, ogcUntangleApplyWGSL, OGC_PARAM,
   OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_ALLOC_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, ogcCandidateCacheWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
   ogcSolidWitnessProbeWGSL, ogcWitnessProbeWGSL, OGC_WITNESS_GATE_WGSL, ogcEdgeStageControlWGSL, ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL, ogcVerifyArgsWGSL, ogcVerifyWGSL,
 } from "./ogc-detector-wgsl";
@@ -544,7 +548,8 @@ export class OgcContactDetector {
     if(config.pairDecisions && config.pairGeometryBuckets===undefined)throw new Error("Pair decisions require a geometry cache");
     const pairGeometry=config.pairGeometryBuckets===undefined ? undefined : pairGeometryLayout(workWords,N,config.pairGeometryBuckets,config.pairDecisions);
     if(4*(workWords+(pairGeometry?.words??0))>device.limits.maxStorageBufferBindingSize)throw new Error('Pair geometry work exceeds storage binding limit');
-    this.work = mk("work",4*(workWords+(pairGeometry?.words??0)));
+    this.untangleOff = workWords+(pairGeometry?.words??0);
+    this.work = mk("work",4*(this.untangleOff+4*N));
     this.counts = mk("grid counts", 4 * H);
     const local1Off = 0, sums1Off = H, local2Off = H + B1, sums2Off = H + 2 * B1, local3Off = H + 2 * B1 + B2, sums3Off = H + 2 * B1 + 2 * B2;
     // Entries of 8 words: face, cell key, the face's round box (wgsl GRID_READ_FNS).
@@ -618,7 +623,8 @@ export class OgcContactDetector {
     const fixedBase = this.projBase + 1 + OGC_LEVEL_VEC4S, segBase = fixedBase + OGC_PROJECT_RECORD * N, recBase = segBase + Math.ceil(N / 2);
     // The records' far bits (one per slot, ogcRecordFar) follow the pool.
     const contactVec4s = config.newton ? recBase + recCap + Math.ceil(recCap / 128) : solidVec4s;
-    this.contacts = mk("contacts", 16 * contactVec4s);
+    this.hvCacheBase = OGC_HV_CACHE > 0 && OGC_LEAN_LEVEL >= 3 ? contactVec4s : 0;
+    this.contacts = mk("contacts", 16 * (contactVec4s + (this.hvCacheBase ? N * (1 + 8 * OGC_HV_CACHE) : 0)));
     if (this.contacts.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the contact buffer exceeds one storage binding");
     this.pairs = mk("dat pairs", 32 * config.pairCapacity);
     this.counters = mk("counters", 4 * OGC_COUNTER_WORDS);
@@ -702,7 +708,7 @@ export class OgcContactDetector {
     for (const k of [0, 1]) { hf[16 + OGC_POSE_WORDS * k + 4] = 1; hf[16 + OGC_POSE_WORDS * k + 9] = 1; hf[16 + OGC_POSE_WORDS * k + 14] = 1; }
     // vec4 12: the static facets' vec4 offset and capacity (a facet entry's slot below it is static), the moving
     // solid's facets' offset (its slot k - capacity), 0.
-    hdr[16 + 2 * OGC_POSE_WORDS] = this.facetBase; hdr[17 + 2 * OGC_POSE_WORDS] = this.facetCapacity; hdr[18 + 2 * OGC_POSE_WORDS] = this.bodyFacetBase;
+    hdr[16 + 2 * OGC_POSE_WORDS] = this.facetBase; hdr[17 + 2 * OGC_POSE_WORDS] = this.facetCapacity; hdr[18 + 2 * OGC_POSE_WORDS] = this.bodyFacetBase; hdr[19 + 2 * OGC_POSE_WORDS] = this.hvCacheBase;
     device.queue.writeBuffer(this.contacts, 0, hdr);
     if (this.projBase) device.queue.writeBuffer(this.contacts, 16 * this.projBase, new Uint32Array([fixedBase, 4 * segBase, recBase, recCap]));
     // No solid until one is set: one empty slot, no bricks, an unbounded band.
@@ -918,7 +924,7 @@ export class OgcContactDetector {
     const metric = newton && this.config.projectionMetric === "hvv" ? { metric: "nwVertexInv" } : {};
     const travel = newton && this.config.travelBound === "off" ? { travelBound: false } : {};
     const difference = options.energyDifference === undefined ? {} : { energyDifference: options.energyDifference };
-    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton, ...metric, ...travel, ...difference }), buffer: this.contacts, verifies: newton && this.verifies };
+    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton, ...metric, ...travel, ...difference }), buffer: this.contacts, verifies: !OGC_LEAN && newton && this.verifies };
   }
 
   /**
@@ -935,16 +941,39 @@ export class OgcContactDetector {
   get stepHooks() {
     return {
       afterFrame: (pass: GPUComputePassEncoder, split?: (pass: GPUComputePassEncoder) => GPUComputePassEncoder) => {
+        if (OGC_LEAN_LEVEL >= 2) { this.leanIteration = 0; this.encodeStepBegin(pass); this.leanStart = OGC_LEAN_LEVEL >= 3; pass = this.encodeDetection(pass, true, split); this.leanStart = false; this.run(pass, "lean", Math.ceil(this.N / WG)); this.hvCache(pass); return pass; }
+        if (OGC_LEAN) { this.run(pass, "stepBegin", 1); this.run(pass, "lean", Math.ceil(this.N / WG)); return pass; }
         this.encodeStepBegin(pass); pass = this.encodeDetection(pass, true, split); this.encodeTruncate(pass); return pass;
       },
       afterIteration: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); this.encodeDecide(pass); this.encodeDetection(pass, false); },
       // The solver's two-level correction moves every vertex at once: truncate that move too.
       afterCoarse: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); },
       // A Newton solver (newton config): filter its direction, then after its step re-detect.
-      filter: (pass: GPUComputePassEncoder) => { this.encodeFilter(pass); },
-      afterNewtonStep: (pass: GPUComputePassEncoder, last = false) => { this.encodeAfterNewtonStep(pass, last); },
+      filter: (pass: GPUComputePassEncoder) => { if (!OGC_LEAN) this.encodeFilter(pass); },
+      beforeFinish: (pass: GPUComputePassEncoder) => {
+        if (LEAN_UNTANGLE > 0) {
+          const H = this.config.bucketCount, B1 = Math.ceil(H / 1024), B2 = Math.ceil(B1 / 1024), wgT = Math.max(1, Math.ceil(this.T / WG));
+          this.run(pass, "xCount", wgT); this.run(pass, "scan1", B1); this.run(pass, "scan2", B2); this.run(pass, "scan3", 1);
+          this.run(pass, "xInsert", wgT); this.run(pass, "xUntangle" as never, wgT); this.run(pass, "xUntangleApply" as never, Math.ceil(this.N / WG));
+        }
+        if (OGC_LEAN_LEVEL !== 2 && OGC_LEAN_LEVEL !== 4 && OGC_LEAN_LEVEL !== 6) return;
+        if (this.bvhLayout?.pairGeometry) this.run(pass, "pairGeometryReset", Math.ceil(this.bvhLayout.pairGeometry.buckets / WG));
+        if (this.bvhLayout?.macroCache) this.run(pass, "macroReset", Math.ceil(this.bvhLayout.macroCache.queries / WG));
+        if (this.candidateLayout) this.run(pass, "cacheReset", 1);
+        this.run(pass, "rearm", 1); this.encodeDetection(pass, true); this.encodeTruncate(pass);
+      },
+      afterNewtonStep: (pass: GPUComputePassEncoder, last = false) => {
+        if (OGC_LEAN_LEVEL >= 5 && LEAN_RELIST.includes(++this.leanIteration) && !last) {
+          if (this.bvhLayout?.pairGeometry) this.run(pass, "pairGeometryReset", Math.ceil(this.bvhLayout.pairGeometry.buckets / WG));
+          if (this.bvhLayout?.macroCache) this.run(pass, "macroReset", Math.ceil(this.bvhLayout.macroCache.queries / WG));
+          if (this.candidateLayout) this.run(pass, "cacheReset", 1);
+          this.run(pass, "rearm", 1); this.leanStart = true; this.encodeDetection(pass, true); this.leanStart = false; this.run(pass, "lean", Math.ceil(this.N / WG));
+          this.hvCache(pass);
+          return;
+        }
+        if (OGC_LEAN_LEVEL >= 2) { if (!last) this.hvCache(pass); return; } if (OGC_LEAN) this.run(pass, "lean", Math.ceil(this.N / WG)); else this.encodeAfterNewtonStep(pass, last); },
       // Once per step, after the last position update and before velocities and history.
-      stepEnd: (pass: GPUComputePassEncoder) => { this.encodeContactState(pass); },
+      stepEnd: (pass: GPUComputePassEncoder) => { if (OGC_LEAN_LEVEL !== 1) this.encodeContactState(pass); },
     };
   }
 
@@ -960,6 +989,7 @@ export class OgcContactDetector {
       ...OGC_QUERY_ROLES.map(role => [role, ogcQueryWGSL(role), [0, 1, 4, 5, 7, 8, 9, 11, 14]] as [string, string, number[]]),
       ["bound", OGC_BOUND_WGSL, [0, 1, 4, 5, 8, 9, 12]],
       ["stepBegin", OGC_STEP_BEGIN_WGSL, [0, 8, 9, 10]],
+      ...(OGC_LEAN ? [["lean", OGC_LEAN_WGSL, [0, 2, 8, 9, 13]] as [string, string, number[]], ["rearm", OGC_REARM_WGSL, [0, 8, 9, 10]] as [string, string, number[]]] : []),
       ["decide", ogcDecideWGSL(!!this.config.newton, this.config.contactFreeze === "mandatory"), this.config.newton ? [0, 8, 9, 10, 19] : [0, 9, 10]],
       ["redo", OGC_REDO_WGSL, [0, 8, 9, 10]],
       ["redoLast", OGC_REDO_LAST_WGSL, [0, 9, 10]],
@@ -981,6 +1011,8 @@ export class OgcContactDetector {
       ["xCount", ogcGridCountWGSL(true), [0, 1, 4, 6, 9], { 4: "positions" }],
       ["xInsert", ogcGridInsertWGSL(true), [0, 1, 4, 6, 7, 9], { 4: "positions" }],
       ["xTest", OGC_INTERSECT_WGSL, [0, 1, 4, 7, 8, 9], { 4: "positions" }],
+      ...(OGC_HV_CACHE > 0 && OGC_LEAN_LEVEL >= 3 ? [["hvCache", OGC_HV_CACHE_KERNEL_WGSL, [0, 1, 2, 8, 13]]] as never[] : []),
+      ...(LEAN_UNTANGLE > 0 ? [["xUntangle", ogcUntangleWGSL(this.untangleOff), [0, 1, 4, 5, 7, 8, 9], { 4: "positions" }], ["xUntangleApply", ogcUntangleApplyWGSL(this.untangleOff, LEAN_UNTANGLE), [0, 4, 5], { 4: "positions" }]] as never[] : []),
     ];
     // The locality switch: the query roles' variants and its round pass (off: the specs above, untouched).
     const loc = this.locality;
@@ -1138,13 +1170,13 @@ export class OgcContactDetector {
     // impact zones too (redoCap, as the kernel counts it). A later round predicts 0 about the
     // iterate, the moving solid at rest at its end pose (a_v = 0 exactly): only its levelled form
     // can conflict, and its one redo (unlevelled) cannot; a conflict there fails as heldConflict.
-    const slots = !mandatory ? 1 : this.bodyField ? (this.config.mandatoryRedoCap ?? OGC_REDO_MANDATORY) : OGC_REDO_ROUNDS + 1;
+    const slots = this.leanStart ? 0 : !mandatory ? 1 : OGC_LEAN_LEVEL >= 6 ? LEAN_REDOS : this.bodyField ? (this.config.mandatoryRedoCap ?? OGC_REDO_MANDATORY) : OGC_REDO_ROUNDS + 1;
     for (let k = 0; k < slots; k++) {
       if (split && k % 16 === 0) pass = split(pass);
       this.run(pass, "redo", 1);
       for (const name of this.roundKernels) this.runIndirect(pass, name);
     }
-    this.run(pass, "redoLast", 1);
+    if (!this.leanStart) this.run(pass, "redoLast", 1);
     return pass;
   }
   /** One kernel of a detection round, indirectly, or the redo decision (profiling only). */
@@ -1158,6 +1190,12 @@ export class OgcContactDetector {
     pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.planesArgs, 0);
   }
   /** Between iterations: count the iteration's truncations and arm a round when gamma_e N were truncated. */
+  /** EXPERIMENT (CLOTH_LEAN >= 3): the round being encoded only lists pair entries (no redos, no conflict failure). */
+  private leanStart = false;
+  private untangleOff = 0;
+  private hvCacheBase = 0;
+  private hvCache(pass: GPUComputePassEncoder) { if (this.hvCacheBase) this.run(pass, "hvCache" as never, Math.ceil(this.N / WG)); }
+  private leanIteration = 0;
   encodeDecide(pass: GPUComputePassEncoder) { this.run(pass, "decide", 1); }
   /** Truncate the accumulated displacement x - x_det of every vertex: division planes (indirect), then apply. */
   encodeTruncate(pass: GPUComputePassEncoder) {

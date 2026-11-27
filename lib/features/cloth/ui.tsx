@@ -7,7 +7,7 @@ import { Stepper } from "../../../components/ui";
 import { clothExecutionSettings } from "../../cloth/execution-settings";
 import { CLOTH_NEWTON_SCENE_DEFAULTS } from "../../cloth/newton-defaults";
 import { CLOTH_STAGES, type ClothPerformanceSample, type ClothStageId } from "../../cloth/stage-timing";
-import type { ClothDocument, ClothNewtonSettings, ClothSolverSettings } from "../../cloth/types";
+import type { ClothDocument, ClothIClothSettings, ClothMethod, ClothNewtonSettings, ClothSolverSettings } from "../../cloth/types";
 import { useSession } from "../../core/session/session-context";
 import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
 import { clothFeature } from "./definition";
@@ -133,6 +133,15 @@ function PcgIterationsRange({ value, onChange }: { value: number; onChange: (val
     onGestureEnd={() => setDraft(undefined)} />;
 }
 
+/** The impact-zone iteration cap spans two orders of magnitude, so it is a slider; committed on release like the PCG cap. */
+function ImpactIterationsRange({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  const [draft, setDraft] = useState<number>();
+  return <RailRange label="Impact its" hint="Gradient-descent iterations per impact-zone solve (cap; the paper's 100)." ariaLabel="Cloth impact-zone iterations"
+    value={draft ?? value} min={10} max={500} step={10} digits={0}
+    onInput={setDraft} onChange={next => { setDraft(undefined); if (next !== value) onChange(Math.round(next)); }}
+    onGestureEnd={() => setDraft(undefined)} />;
+}
+
 /** A tolerance is a log-scale knob: tightened and loosened by decades, printed as one. */
 function ToleranceStepper({ value, min, max, ariaLabel, onChange }: {
   value: number; min: number; max: number; ariaLabel: string; onChange: (value: number) => void;
@@ -158,14 +167,30 @@ export function ClothSettingsLines() {
     const newton = { ...CLOTH_NEWTON_SCENE_DEFAULTS, ...document.solver?.newton, ...patch };
     patchScene({ cloth: cloth.map(d => d.id === document.id ? { ...d, solver: { ...d.solver, newton } } : d) });
   };
+  const patchICloth = (document: ClothDocument, patch: Partial<ClothIClothSettings>) => patchSolver(document, { icloth: { ...document.solver?.icloth, ...patch } });
   return <>
     {cloth.map(document => {
       const execution = clothExecutionSettings(document.solver, true);
-      const newton = execution.newton;
+      const newton = execution.newton, newtonMethod = execution.method === "newton";
       const fact = facts?.find(f => f.id === document.id);
       const name = cloth.length > 1 ? `Solver · ${document.id}` : "Solver";
       return <div key={document.id} data-testid={`cloth-settings-${document.id}`}>
         <RailRule label={name} />
+        <RailChoice<ClothMethod> label="Method" value={execution.method} testId={`cloth-method-${document.id}`}
+          hint="Newton: Newton-PCG with OGC contact inside the solve. I-Cloth (Tang et al. 2018): implicit Euler with proximity repulsion, then rounds of incremental continuous collision detection and an impact-zone solve. Switching carries on from the live pose."
+          options={[{ value: "newton", label: "Newton" }, { value: "icloth", label: "I-Cloth" }]}
+          onChange={method => patchSolver(document, method === "icloth" && newton.trustRegion === "hybrid"
+            ? { method, newton: { ...CLOTH_NEWTON_SCENE_DEFAULTS, ...document.solver?.newton, trustRegion: "off" } } : { method })} />
+        {execution.method === "icloth" && <>
+          <RailLine label="Collision rounds" hint="Detection and impact-zone rounds per step (cap). A step that is still penetrating at the cap is reported, not hidden.">
+            <Stepper value={execution.icloth.rounds} min={1} max={32} step={1} digits={0} ariaLabel="Cloth collision rounds"
+              decreaseHint="One round fewer" increaseHint="One round more"
+              onChange={value => patchICloth(document, { rounds: Math.round(value) })} />
+          </RailLine>
+          <ImpactIterationsRange value={execution.icloth.impactIterations} onChange={impactIterations => patchICloth(document, { impactIterations })} />
+        </>}
+        {/* OGC contact and the Newton variants I-Cloth does not take: shown for the Newton method only. */}
+        {newtonMethod && <>
         <RailChoice label="Optimizations" value={execution.enabled ? "on" : "off"}
           hint="Validated live performance improvements. Off restores baseline defaults; your explicit solver tuning is retained."
           options={[{value:"on",label:"On"},{value:"off",label:"Off"}]}
@@ -206,13 +231,14 @@ export function ClothSettingsLines() {
           hint="Multigrid is experimental; compare its total cost and convergence against the diagonal preconditioner."
           options={[{value:"diagonal",label:"Diagonal"},{value:"multigrid",label:"Multigrid"}]}
           onChange={v => patchSolver(document,{multigrid:v === "multigrid"})} />
+        </>}
         <RailLine label="Inexact solve" hint="Adaptive inner-solve tolerance ceiling; zero uses the fixed PCG tolerance.">
           <Stepper value={newton.forcingMax ?? 0} min={0} max={0.9} step={0.1} digits={1} ariaLabel="Cloth inexact solve ceiling"
             onChange={forcingMax => patchNewton(document,{forcingMax})} />
         </RailLine>
-        <RailChoice label="Contact products" value={newton.contactLinearization ?? "off"}
+        {newtonMethod && <RailChoice label="Contact products" value={newton.contactLinearization ?? "off"}
           options={[{value:"off",label:"Direct"},{value:"factorized",label:"Cached"},{value:"blocks",label:"Blocks"}]}
-          onChange={contactLinearization => patchNewton(document,{contactLinearization})} />
+          onChange={contactLinearization => patchNewton(document,{contactLinearization})} />}
         <RailLine label="Newton its" hint="Newton iterations per step (cap). Each one re-assembles, solves and line-searches.">
           <Stepper value={newton.iterations} min={1} max={32} step={1} digits={0} ariaLabel="Cloth Newton iterations"
             decreaseHint="One Newton iteration fewer" increaseHint="One Newton iteration more"
@@ -227,11 +253,12 @@ export function ClothSettingsLines() {
           <ToleranceStepper value={newton.residualTolerance ?? 1e-4} min={1e-9} max={1e-1} ariaLabel="Cloth residual tolerance"
             onChange={value => patchNewton(document, { residualTolerance: value })} />
         </RailLine>
-        <RailChoice<"off" | "hybrid"> label="Trust region" value={newton.trustRegion ?? "off"}
+        {newtonMethod && <RailChoice<"off" | "hybrid"> label="Trust region" value={newton.trustRegion ?? "off"}
           hint="'hybrid': the line search until two consecutive full steps, then Steihaug-Toint trust-region iterations for the rest of the step."
           options={[{ value: "off", label: "Off" }, { value: "hybrid", label: "Hybrid" }]}
-          onChange={trustRegion => patchSolver(document, { multigrid: trustRegion === "hybrid" ? false : document.solver?.multigrid, newton: { ...CLOTH_NEWTON_SCENE_DEFAULTS, ...document.solver?.newton, trustRegion } })} />
-        <RailReadout label="Integrator" value={(document.solver?.integrator ?? "bdf2").toUpperCase()} />
+          onChange={trustRegion => patchSolver(document, { multigrid: trustRegion === "hybrid" ? false : document.solver?.multigrid, newton: { ...CLOTH_NEWTON_SCENE_DEFAULTS, ...document.solver?.newton, trustRegion } })} />}
+        <RailReadout label="Integrator" value={newtonMethod ? (document.solver?.integrator ?? "bdf2").toUpperCase() : "IMPLICIT EULER"}
+          hint={newtonMethod ? undefined : "I-Cloth always takes implicit Euler steps, whatever integrator the document names."} />
         {fact && <RailReadout label="Mesh" value={`${fact.vertices.toLocaleString()} v · ${fact.triangles.toLocaleString()} t`}
           hint={`${fact.vertices} vertices, ${fact.triangles} triangles, ${fact.edges} edges; contact radius ${(fact.contactRadius_m * 1000).toFixed(2)} mm.`} />}
       </div>;

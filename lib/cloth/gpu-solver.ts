@@ -51,6 +51,17 @@ export interface ClothSolverContact {
   readonly verifies?: boolean;
 }
 
+/** I-Cloth's proximity terms (lib/cloth/icloth): penalty repulsion and lagged friction, global terms of the Newton
+ * system with no projection, active set, restart or hooks of their own. One read-only storage buffer. */
+export interface ClothSolverProximity {
+  /** The block: pxVertexTerms, pxVertexHv, pxOwnedEnergy at group 0, CLOTH_BINDING.proximity. */
+  readonly wgsl: string;
+  readonly buffer: GPUBuffer;
+  /** A per-vertex contact state under ClothSolverContact.state's contract (bit 1: the contact switched on in the step
+   * that wrote it, before the solver's onsetScan): the BDF2 history restarts on it exactly as on the detector's. */
+  readonly state?: GPUBuffer;
+}
+
 /** Points inside one step where another lane encodes work into the solver's
  * compute pass. They never advance time: C2's detection and truncation
  * rounds run here, between iterations of the one step. */
@@ -93,6 +104,8 @@ export interface ClothGPUSolverOptions {
   /** Write the diagnostics slot of every step (residual, strain, energies). */
   readonly diagnostics?: boolean;
   readonly contact?: ClothSolverContact;
+  /** I-Cloth's proximity terms; never with `contact`, multigrid, the hybrid trust region or the lazy line search. */
+  readonly proximity?: ClothSolverProximity;
   readonly hooks?: ClothStepHooks;
   readonly label?: string;
   /** 'newton', the only method (VBD and its two-level correction were removed in M4); any other value fails. */
@@ -530,8 +543,10 @@ export class ClothGPUSolver {
       throw new Error('Cloth Newton solver with contact needs the contact state (contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
     // With contact: the contact records and the contact state (the per-stage limit is 10 storage buffers; nwLinCount and
     // nwLinBuild with the indirect overflow bind 7 + 2 + the args, within it).
-    this.restarts = !!options.contact;
-    const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 3 : 0);
+    if (options.proximity && (options.contact || options.multigrid || this.newton.trustRegion !== 'off' || options.lazyLineSearch))
+      throw new Error('Cloth proximity terms take the line-search Newton alone: no OGC contact, multigrid, hybrid trust region or lazy line search');
+    this.restarts = !!options.contact || !!options.proximity?.state;
+    const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 3 : 0) + (options.proximity ? 1 : 0) + (options.proximity?.state ? 1 : 0);
     if (device.limits.maxStorageBuffersPerShaderStage < need)
       throw new Error(`Cloth solver needs ${need} storage buffers per stage; the device grants ${device.limits.maxStorageBuffersPerShaderStage}`);
     this.diagnostics = !!options.diagnostics; this.hooks = options.hooks ?? {};
@@ -611,16 +626,21 @@ export class ClothGPUSolver {
     const contact = this.options.contact;
     entries.push(storage(B.newton));
     if (contact) entries.push(storage(B.contact, true), storage(B.contactState, true));
+    const proximity = this.options.proximity;
+    if (proximity) entries.push(storage(B.proximity, true));
+    if (proximity?.state) entries.push(storage(B.contactState, true));
     const layout = d.createBindGroupLayout({ label: 'Cloth solver bindings', entries });
     const buffer = (binding: number, b: GPUBuffer, size?: number): GPUBindGroupEntry => ({ binding, resource: { buffer: b, size } });
     this.bindGroup = d.createBindGroup({ label: 'Cloth solver', layout, entries: [
       buffer(B.params, this.params), buffer(B.dispatch, this.dispatch, 32), buffer(B.positions, this.positions), buffer(B.state, this.state),
       buffer(B.status, this.status), buffer(B.topo, this.topo), buffer(B.rest, this.rest), buffer(B.topo4, this.topo),
       buffer(B.newton, this.newtonWork),
-      ...(contact ? [buffer(B.contact, contact.buffer), buffer(B.contactState, contact.state)] : [])] });
+      ...(contact ? [buffer(B.contact, contact.buffer), buffer(B.contactState, contact.state)] : []),
+      ...(proximity ? [buffer(B.proximity, proximity.buffer)] : []),
+      ...(proximity?.state ? [buffer(B.contactState, proximity.state)] : [])] });
     // The PCG reductions take two subgroupAdds where the device has subgroups of at least 16 lanes (256 / 16 partials).
     const subgroups = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= 16;
-    const baseSource = clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid', activeSet: this.newton.activeSet === 'on', verifies: !!contact?.verifies });
+    const baseSource = clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid', activeSet: this.newton.activeSet === 'on', verifies: !!contact?.verifies, ...(proximity ? { proximityBlock: proximity.wgsl, restartState: !!proximity.state } : {}) });
     const module = d.createShaderModule({label:'Cloth solver',code:this.options.lazyLineSearch ? withLazyClothLineSearch(baseSource,this.options.lazyLineSearch) : baseSource});
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
     // The indirect overflow: group 1 (the linearization's) holds pcgStepOverflow's dispatch
@@ -632,7 +652,7 @@ export class ClothGPUSolver {
       linLayout = d.createPipelineLayout({ bindGroupLayouts: [layout, group1] });
       this.linArgsGroup = d.createBindGroup({ label: 'Cloth contact linearization args', layout: group1, entries: [buffer(CLOTH_CONTACT_LIN_ARGS.binding, this.linArgs)] });
     }
-    const kernels: readonly Kernel[] = [...KERNELS, ...(this.options.lazyLineSearch ? ['nwTrialHead','nwTrialHeadGate','nwTrialTail'] as const : []), ...(this.tables.pcg.multigrid ? CLOTH_MG_KERNELS : []), ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : []), ...(this.tables.pcg.contactLin ? [...CONTACT_LIN_KERNELS, ...CONTACT_LIN_PCG_KERNELS] : [])];
+    const kernels: readonly Kernel[] = [...KERNELS, ...(this.options.lazyLineSearch ? ['nwTrialHead','nwTrialHeadGate','nwTrialTail'] as const : []), ...(this.tables.pcg.multigrid ? CLOTH_MG_KERNELS : []), ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : this.restarts ? RESTART_KERNELS : []), ...(this.tables.pcg.contactLin ? [...CONTACT_LIN_KERNELS, ...CONTACT_LIN_PCG_KERNELS] : [])];
     const lin = new Set<Kernel>(CONTACT_LIN_KERNELS);
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: lin.has(entryPoint) ? linLayout : pipelineLayout, compute: { module, entryPoint } }).catch(async error => {
       const info = await module.getCompilationInfo();
@@ -726,7 +746,8 @@ export class ClothGPUSolver {
     this.run(pass, 'frame', W);
     pass = this.hooks.afterFrame?.(pass, split) ?? pass;
     this.run(pass, 'nwBeginStep', 1);
-    for (let n = 0; n < o.iterations; n++) {
+    const its = Math.max(1, Math.min(o.iterations, this.encodeIterations ?? o.iterations));
+    for (let n = 0; n < its; n++) {
       if (split) pass = split(pass);
       this.run(pass, 'nwFaces', this.threads(this.T));
       this.run(pass, 'nwGradient', W);
@@ -757,8 +778,7 @@ export class ClothGPUSolver {
       // The accepted trial's active set and re-detection arming, at x (before the move).
       if (this.options.contact) this.run(pass, 'nwAccept', W);
       this.run(pass, 'nwApply', W);
-      this.hooks.afterNewtonStep?.(pass, n === o.iterations - 1);
-      if (limited) this.run(pass, 'nwEdgeDuals', this.threads(this.E));
+      this.hooks.afterNewtonStep?.(pass, n === its - 1);
     }
     this.hooks.beforeFinish?.(pass);
     if (this.diagnostics) {
@@ -767,6 +787,9 @@ export class ClothGPUSolver {
     }
     this.hooks.stepEnd?.(pass);
     if (this.restarts) this.run(pass, 'onsetScan', W);
+    // The strain limit's multipliers step once, from the step's final pose (after the diagnostics, whose residual is
+    // the solve's own).
+    if (limited) this.run(pass, 'nwEdgeDuals', this.threads(this.E));
     this.run(pass, 'finishStep', W);
     return pass;
   }
@@ -786,6 +809,10 @@ export class ClothGPUSolver {
     const data=new Float32Array(await this.readRange(this.newtonWork,16*at,16));
     return {heads:data[1]!,tails:data[2]!};
   }
+  /** EXPERIMENT: Newton iterations encoded a step (at most newton.iterations): a host following the control record's
+   * count keeps the early-exit dispatches of a step that stops sooner off the queue. Undefined: the cap. */
+  encodeIterations?: number;
+
   async readNewtonControl(): Promise<Float32Array> {
     const L = this.tables.newtonRecords - CLOTH_SEGMENT_ALIGN;
     const out = new Float32Array(await this.readRange(this.newtonWork, 16 * L, 112));

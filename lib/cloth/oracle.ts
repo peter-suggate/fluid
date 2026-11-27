@@ -27,7 +27,11 @@ export const CLOTH_AVBD = Object.freeze({ alpha: 0.95, gamma: 0.99, beta: 10, ma
   /** The strain limit's stabilization: 0, so an edge's target is its limit itself and a violation carried in from
    * x_t (OGC's truncation leaves one) is corrected in this step, not accepted at 95% (coordinator ruling 2026-11-09,
    * progress-lane-c1.md RESULT 11). Pins keep alpha. The warm start lambda <- alpha gamma lambda is unchanged. */
-  edgeAlpha: 0 });
+  edgeAlpha: 0,
+  /** The strain limit is a bounded-stiffness augmented Lagrangian: its stiffness is this multiple of the edge's
+   * reference stiffness, fixed (no growth), and its multiplier steps once per step from the final pose and carries over
+   * undecayed. alpha, gamma, beta and maxStiffnessRatio's growth are the pins' alone. */
+  edgeStiffnessRatio: 30 });
 /** Per-vertex backtracking line search: Armijo constant and halvings. */
 export const CLOTH_LINE_SEARCH = Object.freeze({ armijo: 1e-4, halvings: 8 });
 
@@ -465,7 +469,8 @@ export function clothStepFrame(model: ClothSolverModel, state: ClothOracleState,
   return { frame: { hEff, y, xHat, x0: Float64Array.from(state.x), target0, target1, damping: clothDampingTangent(model, state.x) }, init, bdf2 };
 }
 
-/** Warm start (AVBD 19): k = max(gamma k, k_start), lambda = alpha gamma lambda. */
+/** Warm start (AVBD 19) of the pins: k = max(gamma k, k_start), lambda = alpha gamma lambda. A strain-limit edge takes
+ * its fixed stiffness; its multiplier carries over. */
 export function clothWarmStartDuals(model: ClothSolverModel, state: ClothOracleState, hEff: number): void {
   const t = model.topology, { alpha, gamma } = CLOTH_AVBD;
   for (let v = 0; v < t.vertexCount; v++) {
@@ -477,12 +482,11 @@ export function clothWarmStartDuals(model: ClothSolverModel, state: ClothOracleS
   for (let e = 0; e < t.edgeCount; e++) {
     if (!(model.edgeStrainLimit[e]! > 0)) continue;
     const s = Math.max(clothReferenceStiffness(model, t.edges[4 * e]!, hEff), clothReferenceStiffness(model, t.edges[4 * e + 1]!, hEff));
-    state.edgeDuals[2 * e] *= alpha * gamma;
-    state.edgeDuals[2 * e + 1] = Math.max(gamma * state.edgeDuals[2 * e + 1]!, s);
+    state.edgeDuals[2 * e + 1] = CLOTH_AVBD.edgeStiffnessRatio * s;
   }
 }
 
-/** AVBD dual and stiffness update after an iteration (11, 12, with clamps). */
+/** AVBD dual and stiffness update of the pins after an iteration (11, 12, with clamps). */
 export function clothUpdateDuals(model: ClothSolverModel, frame: ClothStepFrame, state: ClothOracleState): void {
   const t = model.topology, { alpha, beta, maxStiffnessRatio } = CLOTH_AVBD;
   for (let v = 0; v < t.vertexCount; v++) {
@@ -495,6 +499,10 @@ export function clothUpdateDuals(model: ClothSolverModel, frame: ClothStepFrame,
     }
     state.pinDuals[4 * v + 3] = Math.min(k + beta * s * Math.sqrt(c2) / l, kMax);
   }
+}
+/** The strain limits' multiplier update, once per step at its final pose: lambda <- clamp(lambda + k C, 0, kMax l). */
+export function clothUpdateEdgeDuals(model: ClothSolverModel, frame: ClothStepFrame, state: ClothOracleState): void {
+  const t = model.topology, { maxStiffnessRatio } = CLOTH_AVBD;
   for (let e = 0; e < t.edgeCount; e++) {
     const eps = model.edgeStrainLimit[e]!;
     if (!(eps > 0)) continue;
@@ -504,7 +512,6 @@ export function clothUpdateDuals(model: ClothSolverModel, frame: ClothStepFrame,
     const C = Math.sqrt(dot(d, d)) - (1 + eps) * L - CLOTH_AVBD.edgeAlpha * Math.max(Math.sqrt(dot(d0, d0)) - (1 + eps) * L, 0);
     const k = state.edgeDuals[2 * e + 1]!, lambda = k * C + state.edgeDuals[2 * e]!;
     state.edgeDuals[2 * e] = Math.min(Math.max(lambda, 0), kMax * L);
-    if (lambda > 0) state.edgeDuals[2 * e + 1] = Math.min(k + beta * s * Math.abs(C) / L, kMax);
   }
 }
 
@@ -556,6 +563,7 @@ export function clothOracleStep(model: ClothSolverModel, state: ClothOracleState
     clothUpdateDuals(model, frame, state);
     if (track) residuals.push(clothStepResidual(model, frame, state, options.gravity_m_s2));
   }
+  clothUpdateEdgeDuals(model, frame, state);
   for (let i = 0; i < 3 * n; i++) {
     const vNew = (state.x[i]! - frame.xHat[i]!) / frame.hEff;
     state.vPrev[i] = state.v[i]!; state.v[i] = vNew; state.dxPrev[i] = state.x[i]! - frame.x0[i]!;

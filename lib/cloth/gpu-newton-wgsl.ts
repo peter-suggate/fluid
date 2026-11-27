@@ -109,7 +109,9 @@ export const CLOTH_CONTACT_LIN_ARGS = { group: 1, binding: 0 } as const;
 /** Records per item: an entry ('factorized'), a partner term ('blocks'). */
 export const CLOTH_CONTACT_LIN_RECORDS = { factorized: 6, blocks: 2 } as const;
 
-export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout, subgroups = false, trustRegion = false, activeSet = true, verifies = false): string {
+export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout, subgroups = false, trustRegion = false, activeSet = true, verifies = false, proximity = false): string {
+  // I-Cloth's proximity terms (gpu-solver-wgsl.ts proximityBlock): plain global terms of the product and the trial energy.
+  if (proximity && (contact || trustRegion || pcg.multigrid)) throw new Error('Cloth proximity terms take the line-search Newton without OGC contact, trust region or multigrid');
   // The done word Newton writes when it stops: 1, done; with a verifying detector (ClothSolverContact.verifies) 2, a
   // candidate done, which the contact hook's end-of-step radius-r query turns into 1 (every pair within r has an entry)
   // or 0 (a missing pair: a re-detection round is armed and Newton runs on). Every kernel skips on a nonzero done.
@@ -179,7 +181,7 @@ ${phase === 'product' ? '' : `  if (i > 0u) {
       // Done at the iterate: |P g|^2 within the residual tolerance and (C1 RESULT 50, as for nwChoose's small step and
       // stall) every vertex's whole gradient within its f32 floor (sums.w: the rows with g.w > 1). |P g| alone is the
       // round's constrained residual: certificates carrying load hold the rest of g, and the step is not solved there.
-      if (sums.z <= bitcast<f32>(P.newton1.z) && sums.w == 0.0) { if (lead) { nwDoneAtSolve(); } return; }
+      if (sums.z <= bitcast<f32>(P.newton1.z) && (${typeof process !== 'undefined' && process.env?.CLOTH_RES_STOP === '1' ? 'ctl.w > 0.0' : 'false'} || sums.w == 0.0)) { if (lead) { nwDoneAtSolve(); } return; }
     }
     // The last dispatch's step reached the trust boundary (its alpha record -1): the solve is done.
     if (i >= 2u && scal.y < 0.0) { if (lead) { nw[nwControl()].y = 1.0; } return; }
@@ -245,7 +247,7 @@ ${phase === 'prepare' ? `}` : `
   if (own) {
     w = pcgRowProduct(lane, K1, K2, blocks, bends);
     // Contact pairs (C2), matrix-free: the sum over v's entries of w_v M (sum_j w_j u_j), linearized at the iterate.
-    ${contact ? `if (!nwPinned(v)) { w = nwProjectP(v, w + ${hv}); }` : ''}
+    ${contact ? `if (!nwPinned(v)) { w = nwProjectP(v, w + ${hv}); }` : proximity ? 'if (!nwPinned(v)) { w += pxVertexHv(v); }' : ''}
     nw[nseg(${S.w0}u + i % 2u, v)] = vec4f(w, 0.0);
   }
   ${reduce(`vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), select(0.0, f32(own && nw[nseg(${S.g}u, v)].w > 1.0), i == 0u))`)}
@@ -772,7 +774,7 @@ ${pcgStepWGSL('pcgStepOverflow', 'overflow')}` : ''}
         let e = nw[bends + m * PCG_PATCH + lane];
         w += e.y * pcgULocal(bitcast<u32>(e.x)) + e.w * pcgULocal(bitcast<u32>(e.z));
       }
-      ${contact ? `if (!nwPinned(v)) { w = nwProjectP(v, w + ${contactHv}); }` : ''}
+      ${contact ? `if (!nwPinned(v)) { w = nwProjectP(v, w + ${contactHv}); }` : proximity ? 'if (!nwPinned(v)) { w += pxVertexHv(v); }' : ''}
     }
     // The reduction's barriers also order this iteration's reads of the staged u before the next one overwrites it;
     // pcgOut is read after the next iteration's uniform load (a barrier).
@@ -945,6 +947,13 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
     for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
       nwTrialMove = k + 1u; let ec = ogcContactEnergyOwnedLanes(v, 0u, 1u); nwTrialMove = 0u;
       nwAdd(k, vec2f(ec - ec0, abs(ec0) + abs(ec)));
+    }` : proximity ? `// I-Cloth proximity records v owns (each once over all vertices), at x and at every trial point (pxX).
+    let ex0 = pxOwnedEnergy(v);
+    if (ex0.y != 0.0) {
+      for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
+        nwTrialMove = k + 1u; let ex = pxOwnedEnergy(v); nwTrialMove = 0u;
+        nwAdd(k, vec2f(ex.x - ex0.x, abs(ex0.x) + abs(ex.x)));
+      }
     }` : ''}
   }
   let base = nwPartial(0u);
@@ -1111,16 +1120,14 @@ ${contact ? `// After the line search and before the move (every position still 
   if (ctl.x != 0.0) { nw[nseg(${S.d}u, v)] = vec4f(0.0); }
 }
 
-// After each applied Newton iteration (not once Newton is done): the AVBD dual update of every strain-limit edge, so
-// the next iteration's gradient carries the new multipliers and the residual test sees any constraint still violated.
-// The method of multipliers steps a dual only where the primal could respond: with contact, not in an iteration that
-// moved nothing (the stall), and not on an edge an endpoint of which the arc cut (its chosen move is not alpha d) or the
-// active set holds (d projected off its normals: the cut the reduced direction no longer makes), since there the
-// violation measures the projection, not the multiplier, and ascent would ramp lambda and k without bound.
-@compute @workgroup_size(${workgroup}) fn nwEdgeDuals(@builtin(global_invocation_id) id: vec3u) {
+// Once per step, at its final pose (after the Newton iterations and the contact stage's last work): the multiplier
+// update of every strain-limit edge (updateEdgeDual). The method of multipliers steps a dual only where the primal
+// could respond: with OGC contact, not when the last iteration moved nothing (the stall), and not on an edge an endpoint
+// of which the arc cut (its chosen move is not alpha d) or the active set holds (d projected off its normals), since
+// there the violation measures the projection, not the multiplier, and ascent would wind lambda up.
+@compute @workgroup_size(${workgroup}) fn nwEdgeDuals(@builtin(global_invocation_id) id: vec3u) {${contact ? `
   let ctl = nw[nwControl()];
-  // Not after an iteration that moved nothing (a stall, or a rejected trust-region step).
-  if (ctl.x != 0.0 || ctl.z == 0.0) { return; }${contact ? `
+  if (ctl.z == 0.0) { return; }
   if (id.x >= P.n.z) { return; }
   let ev = edges(id.x);
   if (nwChosenCut(ev.x, ctl.z) || nwChosenCut(ev.y, ctl.z)) { return; }` : ''}

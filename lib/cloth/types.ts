@@ -140,10 +140,34 @@ export interface ClothNewtonSettings {
   readonly contactLinearizationRecords?: number;
 }
 
+/**
+ * The cloth method of a document. 'newton' (default): Newton-PCG with OGC contact inside the solve (its filter,
+ * truncation and re-detection rounds). 'icloth': I-Cloth (Tang et al. 2018, ACM TOG 37(6) 204): implicit Euler with
+ * proximity repulsion in the solve, then rounds of incremental continuous collision detection and a non-linear
+ * (augmented-Lagrangian gradient-descent) impact-zone solve until the step is penetration-free. Any other value fails
+ * when the document is built.
+ */
+export type ClothMethod = "newton" | "icloth";
+export const CLOTH_METHODS: readonly ClothMethod[] = ["newton", "icloth"];
+
+/** Caps of I-Cloth's collision handling (decided on the GPU; the caps bound the encoded work, inside the one step). */
+export interface ClothIClothSettings {
+  /** Detection + impact-zone rounds per step (cap; default CLOTH_ICLOTH_DEFAULTS.rounds). */
+  readonly rounds?: number;
+  /** Gradient-descent iterations per impact-zone solve (cap; the paper's 100). */
+  readonly impactIterations?: number;
+}
+/** The paper's caps: 100 gradient-descent iterations a solve; its benchmarks resolve in a few rounds (Fig. 9). */
+export const CLOTH_ICLOTH_DEFAULTS = Object.freeze({ rounds: 8, impactIterations: 100 });
+
 /** Per-scene solver authoring. The cloth takes exactly one implicit step per
  * advance, at the frame/fluid dt: there is no substepping of any kind; the
  * Newton and PCG caps are the only budget. */
 export interface ClothSolverSettings {
+  /** The cloth method (default 'newton'). */
+  readonly method?: ClothMethod;
+  /** I-Cloth's collision caps; read only by method 'icloth'. */
+  readonly icloth?: ClothIClothSettings;
   /** Validated live optimizations (viewport default on). False restores the original defaults. */
   readonly optimizations?: boolean;
   readonly contactBroadphase?: 'grid' | 'bvh' | 'cached-grid';
