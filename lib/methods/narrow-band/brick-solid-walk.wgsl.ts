@@ -18,7 +18,8 @@
  *   - a seed site in a closed cell is refused (seedSite's nbParticleBlocked).
  *   A record outside the NEAR_SOLID bricks that travels the ring is pSolid's too (below).
  * - The level set (uniform-mixed-surface.ts umTrace, umWalk; uniform-solid-point-open.wgsl.ts umSlideWalk mode 2):
- *   - the trace from the vertex's foot slides along a face it starts on;
+ *   - the vertex's departure (the trace from its foot, shifted back to the vertex: umVertexTrace) is walked from the
+ *     vertex (umWalk(p, end)): it slides along a face the vertex lies on;
  *   - it then walks to its end in half-cell steps and stops at the last open point;
  *   - a buried vertex (umVertexBuried: no incident cell open) is not state, and keeps its stored value.
  *
@@ -352,6 +353,9 @@ const LADVECT_FOOT_STENCIL = "if(lStencil(v-vec3i(2),v+vec3i(2))){for(var k=0u;k
 // docs/plans/gpu-shape/m1-distinct-once.md), bit-identical either way.
 const PHISOLID_FOOT_TAPS = "for(var k=0u;k<10u;k++){t[k]=lPhi0(vec3i(at[k]));}";
 const PHISOLID_CUBIC = "value=nbfCubicLimited(f,lowHeld,highHeld);";
+const LADVECT_CONTACT_VAR = "var contact=false;";
+const LADVECT_CONTACT_AXIS = "contact=true;travel[a]=-dt*speed/h[a];";
+const LADVECT_CONTACT = "if(contact){value=min(value,fgPhiAt(fgHeld(p+travel)));}";
 
 /** lAdvect's text with statics: phiSolid advects the NEAR_SOLID bricks. Elsewhere the walk is proven empty only for
  * a trace that stays inside the ring of its vertex (the foot and the end): lAdvect leaves a vertex whose trace leaves
@@ -382,13 +386,21 @@ export function brickPhiSolidWGSL(body: string): string {
   head = once(head, LADVECT_FOOT_STENCIL, PHISOLID_FOOT_TAPS, "lAdvect");
   head = once(head, LADVECT_FOOT, "let slid=psSlideWalk(p,fgHeld(p+offset),1u);if(!slid.closed){foot=slid.end;shift=p-foot;}}", "lAdvect");
   head = once(head, LADVECT_SMOOTH_AXIS, LADVECT_SMOOTH_AXIS.replace("var valid=true;", "var valid=psSmoothOpen(v,a);"), "lAdvect");
-  // umAdvected with solids: the sample is umVertexCell's open point cell, and a buried weighted cubic tap keeps the
-  // trilinear value. Stated difference: the trace is walked from the foot (umTrace), not the old umWalk(p, end) from
-  // the vertex to the shifted end. That walk measured +3.5 ms a step on reservoir-seep (300 steps: 46.3 ms against
-  // 42.7, the volume curve 1.03% against 0.69%, peak particles 377k against 298k; 2026-11-19).
-  head = once(head, LADVECT_TRACE, "let traced=psWalkPhi(foot,nbfSurfaceTrace(foot,dt,h,wall));", "lAdvect");
-  head = once(head, LADVECT_CELL, LADVECT_CELL.replace("vec3i(floor(q))", "psOpenPointCell(q)"), "lAdvect");
+  // umAdvected with solids (umVertexTrace, then umWalk(p, end)): the trace runs from the foot unwalked, and the
+  // vertex's own departure (the shifted end) is walked from the vertex, which lies on its cells' faces, so the slide
+  // drops the axes that enter the wall and keeps the rest. The sample is umVertexCell's open point cell, and a buried
+  // weighted cubic tap keeps the trilinear value. (Walking the foot's trace instead, 2026-11-19 to 11-27, froze a wall
+  // vertex whose foot sat a hair off the wall: the slide needs a start on a face, so a trace into the wall stopped at
+  // the foot, and the shift put the departure back on the vertex; its φ never changed, A2 2026-11-27.)
+  head = once(head, LADVECT_CELL, "q=psWalkPhi(p,q);" + LADVECT_CELL.replace("vec3i(floor(q))", "psOpenPointCell(q)"), "lAdvect");
   head = once(head, LADVECT_CUBIC, `if(!psCubicBuried(cell,f,lowHeld,highHeld)){${PHISOLID_CUBIC}}`, "lAdvect");
+  // umWallContact with solids: the interior point (one cell in from each wall the vertex's inner neighbour flows into)
+  // must be reached from the vertex (a hit keeps the value), and the departure from it is walked (umWalk(interior,
+  // start)). The trace is unwalked, so an unwalked departure crossed a solid: the pour's glass base leaked the
+  // inside's liquid onto the floor outside it (A2 2026-11-27).
+  head = once(head, LADVECT_CONTACT_VAR, LADVECT_CONTACT_VAR + "var interior=p;", "lAdvect");
+  head = once(head, LADVECT_CONTACT_AXIS, "interior[a]+=inward;" + LADVECT_CONTACT_AXIS, "lAdvect");
+  head = once(head, LADVECT_CONTACT, "if(contact&&!psSlideWalk(p,interior,2u).closed){value=min(value,fgPhiAt(psWalkPhi(interior,fgHeld(p+travel))));}", "lAdvect");
   entry = once(entry, LADVECT_HEAD, LADVECT_HEAD.replace("fn lAdvect(", "fn phiSolid("), "lAdvect");
   entry = once(entry, LIST_HEAD, `${LIST_HEAD}
  let near=psNearSolid(slot);`, "lAdvect");

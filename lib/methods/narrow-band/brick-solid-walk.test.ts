@@ -66,9 +66,12 @@ test("brick solid walk: pSolid and phiSolid join F's stage set only with statics
     assert.ok(p.includes("if(!near&&phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]!=PS_PHI_FAR){return;}") && !p.includes("psFar=true"), "phiSolid takes the far vertices and walks them");
     assert.match(p, /fn phiSolid\(/); assert.match(p, /let near=psNearSolid\(slot\);/);
     // The old solid rules of umVertexFoot and umAdvected (2026-11-19): the open point cell, the buried cubic taps'
-    // trilinear, the foot's closed taps and slide, the smoothing's bits; the trace walked from the foot.
-    assert.match(p, /let traced=psWalkPhi\(foot,nbfSurfaceTrace\(foot,dt,h,wall\)\);/);
-    assert.ok(!p.includes("q=psWalkPhi(p,q);"), "no walk from the vertex (seep +3.5 ms)");
+    // trilinear, the foot's closed taps and slide, the smoothing's bits; the departure walked from the vertex
+    // (umWalk(p, end)), the foot's trace unwalked.
+    assert.match(p, /let traced=nbfSurfaceTrace\(foot,dt,h,wall\);/);
+    assert.ok(p.includes("q=psWalkPhi(p,q);let cell=min(psOpenPointCell(q),"), "the departure is walked from the vertex");
+    assert.doesNotMatch(p, /psWalkPhi\(foot/, "the foot's trace is not walked");
+    assert.ok(p.includes("if(contact&&!psSlideWalk(p,interior,2u).closed){value=min(value,fgPhiAt(psWalkPhi(interior,fgHeld(p+travel))));}"), "the wall contact's departure is walked from the interior point");
     assert.match(p, /let cell=min\(psOpenPointCell\(q\),NB_\w+-vec3i\(1\)\);/, "umVertexCell's open point cell");
     assert.ok(p.includes("if(!psCubicBuried(cell,f,lowHeld,highHeld)){value=nbfCubicLimited(f,lowHeld,highHeld);}"), "a buried weighted tap keeps the trilinear");
     assert.ok(!p.includes("if(lStencil("), "phiSolid takes its taps a tap (stepab: the stencil form ran it +9.8% on seep)");
