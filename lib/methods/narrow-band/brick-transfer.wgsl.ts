@@ -415,6 +415,23 @@ fn xWriteC(T:vec3i,value:f32){
   phi[NB_PHI_C_PHI+NB_STRIDE*cs+nbTileIndex(T)]=bitcast<u32>(value);
 }
 fn xCorner(p:vec3i,T:vec3i)->bool{return all((p-4*T)%vec3i(4)==vec3i(0));}
+// umVertexBuried (brick-solid-walk.wgsl.ts psBuried) in a NEAR_SOLID brick: none of p's eight cells is open (FLAGS.OPEN
+// of its F slot; outside the box closed, a cell no F slot holds open). A buried vertex is not state and keeps its
+// stored value, as phiSolid and lResolve keep it: a hanging vertex's interpolant is not written there (a tile the
+// solid closes, its corners on the solid's faces, held liquid inside the solid, which the redistance then kept: its
+// sign is the old value's; the column, brick-solid-walk.test.ts, A2 2026-11-27). Only a scene with statics marks
+// NEAR_SOLID.
+fn xClosed(c:vec3i)->bool{
+  if(!nbInWallBox(c)){return true;}
+  let s=nbFSlotOfBrick(c>>vec3u(3u));if(s>=NB_SEAM){return false;}
+  return (phi[NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(c)]&NB_FLAG_OPEN)==0u;
+}
+fn xKept(p:vec3i)->bool{
+  let s=nbFSlotOfBrick(p>>vec3u(3u));
+  if(s>=NB_SEAM||(nbFRec(s,NB_REC_CLASS)&NB_CLASS_NEAR_SOLID)==0u){return false;}
+  for(var k=0u;k<8u;k++){if(!xClosed(p-vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)))){return false;}}
+  return true;
+}
 @compute @workgroup_size(64) fn setTransferCells(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   let g=nbGroup(wid);let live=g<xCount();
   var entry=vec2u(0u);if(live){entry=xEntry(g);}
@@ -445,6 +462,8 @@ fn xCorner(p:vec3i,T:vec3i)->bool{return all((p-4*T)%vec3i(4)==vec3i(0));}
     // The old layout's storage of p: F (no coarse incident tile), C (a coarse corner), or none (hanging).
     let To=nbVertexCoarse(p);let oldF=To.x<0;let oldC=!oldF&&xCorner(p,To);
     if((newC&&oldC)||(!newC&&oldF)){continue;}
+    // A hanging vertex that becomes F's keeps its stored value where it is buried.
+    if(!newC&&!oldC&&xKept(p)){continue;}
     var value=0.0;
     if(oldC){value=nbCVertex(p>>vec3u(2u));}
     else if(oldF){value=nbFVertex(p);}

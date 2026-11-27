@@ -15,6 +15,7 @@ import { validateBrickStages, type BrickStageContext, type BrickStages } from ".
 import { brickSetKernels } from "./brick-set.wgsl";
 import { brickSolidStampKernels } from "./brick-solid-stamp.wgsl";
 import { brickStaticMaskWalls } from "./brick-static.wgsl";
+import { brickTransferKernels } from "./brick-transfer.wgsl";
 import { ARGS } from "./brick-abi";
 import "../index";
 
@@ -43,6 +44,14 @@ test("brick solid walk: pSolid and phiSolid join F's stage set only with statics
     // Two workgroups a brick (a vertex a lane), as lAdvect: F_ALL's X8, the halves its first two (LADVECT_HEAD_WGSL).
     assert.deepEqual(on.levelSet.find(p => p.kernel.label === "phiSolid")!.dispatch, { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.X8 }, "phiSolid runs over F_ALL (its NEAR_SOLID bricks and the far vertices)");
     assert.deepEqual(on.levelSet.find(p => p.kernel.label === "lAdvect")!.dispatch, { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.X8 }, "lAdvect runs over F_ALL's X8");
+    // Tiered, the resolve writes a non-owned vertex its 4h interpolant, except a buried one, which keeps its stored
+    // value (BRICK_SOLID_RESOLVE_WGSL): with statics only.
+    if (tiered) for (const label of ["lResolve", "lResolveD"]) {
+      const r = code(on, label), r0 = code(plain, label);
+      assert.ok(r.includes("if(T.x>=0&&!lrKept(slot,v)){w[r]=true;x[r]=fgWinVertexPhiAt(v,T);}") && r0.includes("if(T.x>=0&&!lrKept(slot,v))"), `${label} keeps a kept vertex`);
+      assert.ok(r.includes("fn lrKept(slot:u32,v:vec3i)->bool{return psNearSolid(slot)&&psBuried(v);}"), `${label}: a buried vertex of a NEAR_SOLID brick is kept`);
+      assert.ok(r0.includes("fn lrKept(slot:u32,v:vec3i)->bool{return false;}"), `${label}: without statics none is`);
+    }
     // Both bind pMove's buffers alone (8 storage buffers, the limit).
     assert.deepEqual(placements(on).find(p => p.kernel.label === "pSolid")!.kernel.bindings, placements(on).find(p => p.kernel.label === "pMove")!.kernel.bindings);
     // pMove skips a NEAR_SOLID brick's records and keeps the ring; pSolid takes exactly those, and walks them. The
@@ -94,6 +103,11 @@ test("brick solid walk: setMark keeps NEAR_SOLID, solidStamp marks it", () => {
   const stamp = brickSolidStampKernels(L, { walls: brickStaticMaskWalls([32, 32, 32], false) }).solidStamp.code;
   assert.match(stamp, /l<13824u/); assert.match(stamp, /atomicOr\(&dir\[r\+NB_REC_CLASS\],NB_CLASS_NEAR_SOLID\)/);
   assert.ok(stamp.indexOf("NB_CLASS_NEAR_SOLID") < stamp.indexOf("if(h.w!=0u){return;}"), "a body brick is marked before P's skip");
+  // The transfer's prolongation: a hanging vertex that becomes F's keeps its stored value where it is buried in a
+  // NEAR_SOLID brick (only statics mark one), as the resolve keeps it.
+  const cells = brickTransferKernels(L).setTransferCells.code;
+  assert.ok(cells.includes("if(!newC&&!oldC&&xKept(p)){continue;}"), "a buried hanging vertex is not written its interpolant");
+  assert.match(cells, /if\(s>=NB_SEAM\|\|\(nbFRec\(s,NB_REC_CLASS\)&NB_CLASS_NEAR_SOLID\)==0u\)\{return false;\}/);
 });
 
 // GPU: a 32 x 64 x 32 tank (tiered) with voxel blocks, the engine's options built directly (the scenes' static mask

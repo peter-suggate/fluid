@@ -38,7 +38,7 @@ import { nbfCubicLimitedWGSL, nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhi
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 import { CENSUS } from "./brick-census.wgsl";
 import { brickSourceWGSL } from "./brick-source.wgsl";
-import { BRICK_SOLID_LEVEL_SET_WGSL, brickLevelSetDeferWGSL, brickPhiSolidWGSL, LADVECT_HEAD_WGSL } from "./brick-solid-walk.wgsl";
+import { BRICK_SOLID_LEVEL_SET_WGSL, BRICK_SOLID_RESOLVE_WGSL, brickLevelSetDeferWGSL, brickPhiSolidWGSL, LADVECT_HEAD_WGSL } from "./brick-solid-walk.wgsl";
 import { brickStaticWGSL, type BrickStaticWalls } from "./brick-static.wgsl";
 
 const LS_SET_WGSL = /* wgsl */`
@@ -829,6 +829,8 @@ fn dNear(c:vec3i)->u32{
   // The C vertices a non-owned vertex of the brick at o = 8B reads: its authority lies in tiles 2B-1..2B+1, so their
   // corners in 2B-1..2B+2 (4^3), staged once in place of eight reads a vertex (a 4h tile's 64 vertices read the same
   // eight).
+  // Statics: a buried vertex keeps its stored value (brick-solid-walk.wgsl.ts BRICK_SOLID_RESOLVE_WGSL).
+  const LR_KEPT_WGSL = statics ? BRICK_SOLID_RESOLVE_WGSL : "fn lrKept(slot:u32,v:vec3i)->bool{return false;}\n";
   const LR_STAGE_WGSL = /* wgsl */`
 var<workgroup> lrCV:array<f32,64>;
 var<private> lrLow:vec3i;
@@ -842,7 +844,7 @@ fn lrCVertex(T:vec3i)->f32{
  return foCVertex(T);
 }
 ` + FG_WIN_VERTEX_PHI_AT_WGSL;
-  const lResolve = F.tiered ? k("lResolve", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, LS_WGSL, "var<workgroup> sHead:u32;", LR_STAGE_WGSL].join("\n") + /* wgsl */`
+  const lResolve = F.tiered ? k("lResolve", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, LS_WGSL, LR_KEPT_WGSL, "var<workgroup> sHead:u32;", LR_STAGE_WGSL].join("\n") + /* wgsl */`
 @compute @workgroup_size(256) fn lResolve(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  if(lid==0u){sHead=nbListCount(NB_LIST_F_ALL);}
  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&sHead)){return;}
@@ -854,7 +856,7 @@ fn lrCVertex(T:vec3i)->f32{
  lrStage(o,lid);
  for(var r=0u;r<2u;r++){
   let v=o+nbLocalCoord(lid+256u*r);w[r]=false;
-  if(all(v<=NB_LATTICE)){let T=fgWinVertexCoarse(v);if(T.x>=0){w[r]=true;x[r]=fgWinVertexPhiAt(v,T);}}
+  if(all(v<=NB_LATTICE)){let T=fgWinVertexCoarse(v);if(T.x>=0&&!lrKept(slot,v)){w[r]=true;x[r]=fgWinVertexPhiAt(v,T);}}
  }
  for(var r=0u;r<2u;r++){if(w[r]){phi[NB_PHI_F_PHI+NB_STRIDE*slot+lid+256u*r]=bitcast<u32>(x[r]);}}
 }`) : undefined;
@@ -863,7 +865,7 @@ fn lrCVertex(T:vec3i)->f32{
   // ownership, so a non-owned vertex's value changes only where lClear rewrote it (its slot's stamp) or lcClear one of
   // the C vertices it reads (the corners of a tile within one of its own, x in o-4..o+8: the stamps of at most 2^3
   // pages). Every other slot's words already hold their resolve, and it leaves before the window stage.
-  const lResolveD = F.tiered ? k("lResolveD", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, LS_WGSL, LR_STAGE_WGSL, "var<workgroup> sHead:u32;\nvar<workgroup> sAny:atomic<u32>;\nvar<workgroup> sDirty:u32;"].join("\n") + /* wgsl */`
+  const lResolveD = F.tiered ? k("lResolveD", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, LS_WGSL, LR_KEPT_WGSL, LR_STAGE_WGSL, "var<workgroup> sHead:u32;\nvar<workgroup> sAny:atomic<u32>;\nvar<workgroup> sDirty:u32;"].join("\n") + /* wgsl */`
 @compute @workgroup_size(256) fn lResolveD(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  if(lid==0u){sHead=nbListCount(NB_LIST_F_ALL);}
  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&sHead)){return;}
@@ -884,7 +886,7 @@ fn lrCVertex(T:vec3i)->f32{
  lrStage(o,lid);
  for(var r=0u;r<2u;r++){
   let v=o+nbLocalCoord(lid+256u*r);w[r]=false;
-  if(all(v<=NB_LATTICE)){let T=fgWinVertexCoarse(v);if(T.x>=0){w[r]=true;x[r]=fgWinVertexPhiAt(v,T);}}
+  if(all(v<=NB_LATTICE)){let T=fgWinVertexCoarse(v);if(T.x>=0&&!lrKept(slot,v)){w[r]=true;x[r]=fgWinVertexPhiAt(v,T);}}
  }
  for(var r=0u;r<2u;r++){if(w[r]){phi[NB_PHI_F_PHI+NB_STRIDE*slot+lid+256u*r]=bitcast<u32>(x[r]);}}
 }`) : undefined;

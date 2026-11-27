@@ -68,6 +68,22 @@ fn psUnit(a:u32)->vec3f{return vec3f(select(0.0,1.0,a==0u),select(0.0,1.0,a==1u)
 fn psAxis(a:u32)->vec3<bool>{return vec3<bool>(a==0u,a==1u,a==2u);}
 `;
 export const BRICK_SOLID_CELL_WGSL = brickSolidCellWGSL(false);
+const PS_BURIED_WGSL = /* wgsl */`
+// umVertexBuried at h: none of vertex v's eight cells is open.
+fn psBuried(v:vec3i)->bool{
+ for(var k=0u;k<8u;k++){if(!psClosed(v-vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)))){return false;}}
+ return true;
+}
+`;
+/** lResolve's burial (statics; levelset-kernels.wgsl.ts lResolve, lResolveD). A buried vertex is not state and keeps
+ * its stored value (umVertexBuried, as phiSolid keeps it), so the resolve does not write it the 4h tile's interpolant:
+ * a tile the solid closes whose corners lie on the solid's faces held liquid there (their trilinear), which put
+ * liquid inside the solid (the column, brick-solid-walk.test.ts; since e26b45a0 the still tank's closed tiles go 4h,
+ * A2 2026-11-27). A buried vertex lies in a brick with a mask voxel, which is NEAR_SOLID. */
+export const BRICK_SOLID_RESOLVE_WGSL = BRICK_SOLID_CELL_COMMON_WGSL + PS_BURIED_WGSL + /* wgsl */`
+fn lrKept(slot:u32,v:vec3i)->bool{return psNearSolid(slot)&&psBuried(v);}
+`;
+
 /** A rank word pMove leaves for pSolid: a record outside the NEAR_SOLID bricks that travels the ring or more. */
 const PS_FAR_WGSL = "const PS_FAR:u32=0xfffffffeu;\n";
 
@@ -236,12 +252,7 @@ fn psWalkPhi(p:vec3f,destination:vec3f)->vec3f{
  let walk=psSlideWalk(p,destination,2u);
  return select(walk.end,walk.previous,walk.closed);
 }
-// umVertexBuried at h: none of vertex v's eight cells is open.
-fn psBuried(v:vec3i)->bool{
- for(var k=0u;k<8u;k++){if(!psClosed(v-vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)))){return false;}}
- return true;
-}
-// umOpenPointCell: the point's cell, else, for a point on a face whose cell ahead is closed and behind open (the
+${PS_BURIED_WGSL}// umOpenPointCell: the point's cell, else, for a point on a face whose cell ahead is closed and behind open (the
 // slide's probes toward +1/4), the cell behind on that axis, else the point's cell.
 fn psOpenPointCell(q:vec3f)->vec3i{
  let base=vec3i(floor(q));if(!psClosed(base)){return base;}
