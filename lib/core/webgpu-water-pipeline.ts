@@ -4,6 +4,7 @@ import { StagedReadback } from "./staged-readback";
 import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import { WATER_INTERFACE_DEPTH, waterInterfaceDepthWGSL } from "./water-interface-depth";
 import { HdrLensBloom, DEFAULT_LENS_BLOOM_OPTIONS, resolveLensBloomOptions, type LensBloomOptions } from "./webgpu-lens-bloom";
+import { waterCausticReceiverWGSL } from "./water-caustic-receiver.wgsl";
 import { waterTransmissionWGSL } from "./water-transmission.wgsl";
 import { waterInterfaceSamplingWGSL, waterRayExitWGSL } from "./water-interface-sampling.wgsl";
 import { waterSolidContactWGSL } from "./water-solid-contact";
@@ -2051,35 +2052,15 @@ fn refineContactSurface(ro:vec3f,rd:vec3f,rasterT:f32,cellSize:f32)->ContactSurf
 // The compact SVO G-buffer uses zero linear depth on a miss, while the raster
 // compatibility pass retains its historical half-float maximum sentinel.
 fn resolvedDrySceneDepth(encodedDepth:f32)->f32{return select(65504.0,encodedDepth,encodedDepth>0.0);}
-// The caustic consumer. The map holds the ratio between the illumination the
-// refracting surface actually delivers to a receiver point and the flat-water
-// illumination the dry pass already applied there, so this is a modulation of
-// the transmitted radiance rather than an addition to it: an uncovered texel
-// (alpha zero) leaves the dry pass's own answer alone, which is what a
-// screen-space additive overlay could never do.
-//
-// The receiver point is reconstructed from the dry scene's own linear depth
-// rather than assumed, so the caustic lands on the sculpted basin the renderer
-// actually drew. resolvedDrySceneDepth turns a miss into the far sentinel.
-fn causticModulation(textureUV:vec2f)->vec3f{
-  let strength=waterCausticStrength();
-  if(strength<=0.0){return vec3f(1.0);}
-  let depth=resolvedDrySceneDepth(safeSample(sceneTexture,textureUV).a);
-  if(!(depth>0.0)||depth>60000.0){return vec3f(1.0);}
-  let world=u.cameraPosition.xyz+cameraRay(textureUV)*depth;
-  let mapUV=vec2f(.5+world.x/max(u.container.x,1e-4),.5-world.z/max(u.container.z,1e-4));
-  if(any(mapUV<vec2f(0.0))||any(mapUV>vec2f(1.0))){return vec3f(1.0);}
-  let sampled=textureSampleLevel(causticMap,linearSampler,mapUV,0.0);
-  if(sampled.a<=1e-4){return vec3f(1.0);}
-  // The additive caustic target is premultiplied at filtered coverage edges:
-  // RGB and alpha both approach zero between tiny landing triangles. Restore
-  // the uncovered share to neutral illumination instead of mistaking that
-  // fractional RGB for a fully covered, nearly black caustic. Alpha above one
-  // remains unnormalized because it represents real overlapping ray bundles.
-  let coverage=clamp(sampled.a,0.0,1.0);
-  let deposited=max(sampled.rgb,vec3f(0.0))/max(coverage,1e-4);
-  let modulation=mix(vec3f(1.0),deposited,coverage);
-  return mix(vec3f(1.0),modulation,strength);
+${waterCausticReceiverWGSL}
+fn causticModulation(uv:vec2f)->vec3f{
+  if(waterCausticStrength()<=0.0||!waterInterfaceUVValid(uv)){return vec3f(1);}
+  let size=vec2i(textureDimensions(sceneTexture));
+  let at=clamp(vec2i(uv*vec2f(size)),vec2i(0),size-1);
+  let depth=resolvedDrySceneDepth(textureLoad(sceneTexture,at,0).a);
+  if(depth>60000.0){return vec3f(1);}
+  let ray=cameraRay((vec2f(at)+.5)/vec2f(size));
+  return dryReceiverCaustic(u.cameraPosition.xyz+ray*depth);
 }
 // A back face that lies on the dry scene's own solid is a liquid/basin contact,
 // not a water-to-air interface. The mesh is extracted at solver-cell pitch, so
@@ -2118,9 +2099,11 @@ fn solidTerminatedHit(origin:vec3f,direction:vec3f,reach:f32)->vec4f{
 fn submergedReceiver(exit:WaterRayExit,entryUV:vec2f,cell:f32)->vec3f{
   let mismatch=abs(waterReflectionDepth(exit.uv)-length(exit.point-u.cameraPosition.xyz));
   let visible=1.0-smoothstep(.5*cell,1.5*cell,mismatch);
-  let fallback=safeSample(sceneTexture,entryUV).rgb*causticModulation(entryUV);
-  if(visible<=0.0){return fallback;}
-  return mix(fallback,safeSample(sceneTexture,exit.uv).rgb*causticModulation(exit.uv),visible);
+  var color=safeSample(sceneTexture,entryUV).rgb;
+  if(visible>0.0){color=mix(color,safeSample(sceneTexture,exit.uv).rgb,visible);}
+  // Visibility chooses a source for dry radiance. The light bundle still
+  // lands at the refracted ray's solid endpoint, even behind the coping.
+  return color*solidReceiverCaustic(exit.point,exit.normal);
 }
 // The first depth-tested pair describes only the nearest connected water
 // interval. A breaking sheet can leave another interval behind it, so the
