@@ -79,9 +79,10 @@ test("brick solver (GPU): the app's ledger advances the dam one step a frame, bo
  */
 /**
  * The presentation's plain copy (smooth off) is the tier authority's φ at every vertex. The drawn copy (the solver's)
- * is presentVertex's: the CPU oracle below rebuilds it from the authority, the C corner words and the tiles' coarse
- * bits, and at every tile corner it is the authority's word (the cubic takes the corners, and C mirrors F's word at a
- * fine-owned corner, lcMirror).
+ * is presentVertex's: the CPU oracle below rebuilds it from the authority (q, at every vertex and so at the tile
+ * corners the cubic takes) and the tiles' coarse bits, and at every tile corner it is the authority's word. A corner
+ * only h tiles touch keeps a stale C word (no C kernel writes it); the cubic read those words until 2026-11-27 and drew
+ * a ring along the figure-7 pour's static h band, so the probe also counts them (stale corner words).
  */
 test("brick solver (GPU): the presentation is the tier authority's phi at every vertex", GPU, async () => {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
@@ -160,11 +161,11 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
         minQ = Math.min(minQ, q); minOld = Math.min(minOld, old); minShown = Math.min(minShown, got); if (q < FAR_H - 1e-3) finite++;
         if ((q < 0) !== (old < 0)) oldWrong++;
       }
-      // The drawn copy: presentVertex rebuilt (brick-present.ts), from the authority q, the C corner words and coarse bits.
+      // The drawn copy: presentVertex rebuilt (brick-present.ts), from the authority q (its tile corners too) and coarse bits.
       const vi = (x: number, y: number, z: number) => x + V[0]! * (y + V[1]! * z);
       const at = (x: number, y: number, z: number) => shown[x + rowFloats * (y + V[1]! * z)]!;
       const cl = (v: number, n: number) => Math.min(Math.max(v, 0), n);
-      const corner = (T: number[]) => cw[2 * (cl(T[0]!, C[0]! - 1) + C[0]! * (cl(T[1]!, C[1]! - 1) + C[1]! * cl(T[2]!, C[2]! - 1)))]!;
+      const corner = (T: number[]) => want[2 * vi(4 * cl(T[0]!, C[0]! - 1), 4 * cl(T[1]!, C[1]! - 1), 4 * cl(T[2]!, C[2]! - 1))]!;
       const coarse = (t: number[]) => t.every((c, a) => c >= 0 && 4 * c < N[a]!) && cw[2 * (t[0]! + C[0]! * (t[1]! + C[1]! * t[2]!)) + 1] === 1;
       const cr = (t: number) => [0.5 * (-t * t * t + 2 * t * t - t), 0.5 * (3 * t * t * t - 5 * t * t + 2), 0.5 * (-3 * t * t * t + 4 * t * t + t), 0.5 * (t * t * t - t * t)];
       const nb = V.map(n => Math.ceil(n / 8));
@@ -177,7 +178,12 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
         for (let k = 0; k < 64; k++) if (coarse([2 * bx - 1 + (k & 3), 2 * by - 1 + ((k >> 2) & 3), 2 * bz - 1 + (k >> 4)])) any = true;
         surface[bx + nb[0]! * (by + nb[1]! * bz)] = near && any ? 1 : 0;
       }
-      let drawnBad = 0, drawnFirst = "", moved = 0, cornerBad = 0, worst = 0;
+      let drawnBad = 0, drawnFirst = "", moved = 0, cornerBad = 0, worst = 0, stale = 0;
+      // Corners the cubic reads whose C word is not the authority's (corners only h tiles touch): the old taps.
+      for (let i = 0; i < cornerCount; i++) {
+        const T = [i % C[0]!, Math.floor(i / C[0]!) % C[1]!, Math.floor(i / (C[0]! * C[1]!))], q = want[2 * vi(4 * T[0]!, 4 * T[1]!, 4 * T[2]!)]!;
+        if (Math.abs(q) < 4 && Math.abs(cw[2 * i]! - q) > 1e-3) stale++;
+      }
       for (let z = 0; z < V[2]!; z++) for (let y = 0; y < V[1]!; y++) for (let x = 0; x < V[0]!; x++) {
         const plainV = at(x, y, z), got = drawn[x + rowFloats * (y + V[1]! * z)]!, q = want[2 * vi(x, y, z)]!, v = [x, y, z];
         let expect = plainV;
@@ -210,7 +216,7 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
         if (x % 4 === 0 && y % 4 === 0 && z % 4 === 0 && plainV !== Math.fround(farM) && Math.abs(got - plainV) > 2e-4 * h) cornerBad++;
       }
       smoothTex.unmap(); cornerRead.unmap(); smoothTex.destroy(); cornerRead.destroy(); cornerBuf.destroy(); plain.destroy();
-      console.log(`drawn copy: ${moved} vertices moved past 0.01 h by presentVertex, worst oracle error ${worst.toExponential(2)} h, ${drawnBad} past 2e-4 h, ${cornerBad} tile corners off the authority`);
+      console.log(`drawn copy: ${moved} vertices moved past 0.01 h by presentVertex, worst oracle error ${worst.toExponential(2)} h, ${drawnBad} past 2e-4 h, ${cornerBad} tile corners off the authority, ${stale} near-surface corners whose C word is stale`);
       assert.equal(drawnBad, 0, `the drawn copy differs from presentVertex's oracle at ${drawnBad} vertices, first ${drawnFirst}`);
       assert.equal(cornerBad, 0, `the drawn copy leaves the authority at ${cornerBad} tile corners`);
       assert.ok(moved > 0, "presentVertex smooths some 4h vertex near the surface");

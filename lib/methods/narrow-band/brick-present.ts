@@ -86,8 +86,8 @@ var<workgroup> presentState:u32;
 var<workgroup> presentSlot:u32;
 // Catmull-Rom weights of the four taps about a cell at fraction t.
 fn presentCR(t:f32)->vec4f{let t2=t*t;let t3=t2*t;return 0.5*vec4f(-t3+2.0*t2-t,3.0*t3-5.0*t2+2.0,-3.0*t3+4.0*t2+t,t3-t2);}
-// The brick's tile-corner values (C's words, h units: at a fine-owned corner lcMirror keeps F's word, so each is the
-// authority's nbVertexPhi(4T)) for T in 2b - 1 .. 2b + 3 (the cubic's taps about the brick's tiles 2b .. 2b + 1),
+// The brick's tile-corner values (the authority's nbVertexPhi(4T), h units) for T in 2b - 1 .. 2b + 3 (the cubic's taps
+// about the brick's tiles 2b .. 2b + 1),
 // clamped to the lattice's corners, and its tiles' coarse bits (resident and 4h-owned, bit
 // x + 4 (y + 4 z) of t - (2b - 1)) for t in 2b - 1 .. 2b + 2 (the tiles about each vertex's own).
 var<workgroup> presentCorner:array<f32,125>;
@@ -188,7 +188,12 @@ ${smooth ? `  // The brick's tiles' coarse bits first; the corners and the cubic
   let mask=workgroupUniformLoad(&presentCoarse);
   let surface=workgroupUniformLoad(&presentSurface)==3u;
   if(surface){
-    for(var i=lid;i<125u;i+=64u){let T=2*b-vec3i(1)+vec3i(i32(i%5u),i32((i/5u)%5u),i32(i/25u));presentCorner[i]=nbCVertex(clamp(T,vec3i(0),NB_LATTICE>>vec3u(2u)));}
+    // The authority, not the C word: no C kernel writes a corner only h tiles touch (levelset-coarse.wgsl.ts: such a
+    // vertex is F's and never read as C), so its C word is stale. The cubic's taps and its clamp reach such corners in an
+    // h tile beside a 4h one and a tile past the seam in the 4h tile: the calm figure-7 pour at 12.5 s drew a ring
+    // there, 1-cell rms Laplacian 0.4-0.5 h against the authority's 0.1-0.25 (A2, 2026-11-27). Where a 4h tile reads
+    // the corner nbVertexPhi is its C word (C-owned, or F's copy, lcMirror), bit for bit.
+    for(var i=lid;i<125u;i+=64u){let T=2*b-vec3i(1)+vec3i(i32(i%5u),i32((i/5u)%5u),i32(i/25u));presentCorner[i]=nbVertexPhi(4*clamp(T,vec3i(0),NB_LATTICE>>vec3u(2u)));}
     workgroupBarrier();
     presentCubicStage(lid);
   }
