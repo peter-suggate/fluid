@@ -33,7 +33,7 @@ const local8 = (c: V3) => (c[0] & 7) | ((c[1] & 7) << 3) | ((c[2] & 7) << 6);
 const brickLocal = (b: V3) => (b[0] & 3) | ((b[1] & 3) << 2) | ((b[2] & 3) << 4);
 const P = CENSUS_POLICY;
 const NO_WALL = 0xffff, CROSSES = 1 << 28, WET = 1 << 29, REQUIRED = 1 << 25, HEAT_SHAPE = 1 << 26, HEAT_THIN = 1 << 27, OPEN_CROSS = 1 << 30;
-// C'': FIN's energetic bit (|Du/Dt| >= |g|/2 at an open face of a liquid cell of the crossing tile) and its class flag.
+// C'' / C''': FIN's energetic bit (|Du/Dt| >= |g|/2: an h tile's liquid cells' mean, a 4h tile's own) and its class flag.
 const ENERGETIC = 0x80000000, CLASS_ENERGETIC = 16;
 const trig = (k: number) => (1 << (16 + k)) >>> 0;
 const on = (k: number) => ((P.criteria >> k) & 1) !== 0;
@@ -217,6 +217,26 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   // (umCensusCellOpen: a cell outside the tile is closed), as censusFine stages them; an uncut tile's every one open.
   // The tier's pass (cutPass false) takes every cell open, HEAD's; the heat's (a cut tile with an open crossing) the cut,
   // with no buried vertex in the corner curvature.
+  // cfCentre (the cell centre phi, m: its 8 vertices' f32 mean) and cfAccelerating.
+  const centrePhi = (c: V3) => { let sum = 0; for (let k = 0; k < 8; k++) sum = fr(sum + load(add(c, corner(k, 2)))); return fr(0.125 * sum); };
+  const accelerating = (t: V3) => {
+    const cut = tileCut(t), lanes: number[][] = [];
+    for (let lane = 0; lane < 64; lane++) {
+      const l = corner(lane, 4), c = add(scale3(t, 4), l), v = [0, 0, 0, 0, 0, 0], own = centrePhi(c), fs = fSlot(shr(c, 3));
+      if (!cellClosed(c) && fs !== undefined && own < 0) for (let a = 0; a < 3; a++) {
+        const below = add(c, unit(a, -1));
+        if (!faceInLattice(c, a) || c[a]! <= 0 || c[a]! >= N[a]!) continue;
+        if ((cut || l[a] === 0) && cellClosed(below)) continue;
+        const b = centrePhi(below), theta = b < 0 ? 1 : fr(own / fr(own - b));
+        v[a] = fr(theta * (s.fUP?.(a, fs)[local8(c)] ?? 0)); v[3 + a] = theta;
+      }
+      lanes.push(v);
+    }
+    for (let lane = 0; lane < 32; lane++) for (let k = 0; k < 6; k++) lanes[lane]![k] = fr(lanes[lane]![k]! + lanes[lane + 32]![k]!);
+    const sum = [0, 0, 0, 0, 0, 0]; for (let j = 0; j < 32; j++) for (let k = 0; k < 6; k++) sum[k] = fr(sum[k]! + lanes[j]![k]!);
+    const d = [0, 1, 2].map(a => sum[3 + a]! > 0 ? fr(sum[a]! / sum[3 + a]!) : 0);
+    return accelBound > 0 && fr(fr(fr(d[0]! * d[0]!) + fr(d[1]! * d[1]!)) + fr(d[2]! * d[2]!)) >= fr(accelBound * accelBound);
+  };
   const tileCut = (t: V3) => { for (let i = 0; i < 64; i++) if (cellClosed(add(scale3(t, 4), corner(i, 4)))) return true; return false; };
   const wideBuried = (T: V3) => Array.from({ length: 8 }, (_, q) => add(scale3(T, 4), scale3(corner(q, 2), -1))).every(cellClosed);
   const displacement = (t: V3, cutPass: boolean) => {
@@ -439,12 +459,10 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
           for (let k = 0; k < 6; k++) { c.gap[k] = Math.min(c.gap[k]!, l.gap[k]!); c.reach[k] = Math.min(c.reach[k]!, l.reach[k]!); }
           c.flags |= l.flags; c.crossing = [(c.crossing[0] | l.crossing[0]) >>> 0, (c.crossing[1] | l.crossing[1]) >>> 0];
         }
-        // C'': a liquid open cell (its 8 vertices' f32 sum below 0) of the crossing tile, last step accelerated.
-        if ((c.flags & 2) !== 0) for (let lane = 0; lane < 64; lane++) {
-          const cell = add(scale3(t, 4), corner(lane, 4)); let sum = 0;
-          for (let k = 0; k < 8; k++) sum = fr(sum + load(add(cell, corner(k, 2))));
-          if (!cellClosed(cell) && sum < 0 && energeticCell(cell)) c.flags |= CLASS_ENERGETIC;
-        }
+        // C''' (cfAccelerating): the crossing tile's liquid cells' mean acceleration, per axis the theta-weighted mean of
+        // the last step's UP over the open lower faces of its liquid cells (centre phi < 0), at least |g|/2. The lanes'
+        // sums in the shader's order: lane + 32 into lane, then lanes 0..31 in turn.
+        if ((c.flags & 2) !== 0 && accelerating(t)) c.flags |= CLASS_ENERGETIC;
         const openCross = (c.flags & OPEN_CROSS) !== 0; c.flags &= ~OPEN_CROSS;
         const reheat = (c.flags & 2) !== 0 && openCross && tileCut(t);
         let error = 0, heatError = 0;

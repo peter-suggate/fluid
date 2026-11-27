@@ -214,8 +214,9 @@ const NC_HEAT_SHAPE:u32=67108864u;const NC_HEAT_THIN:u32=134217728u;
 const NC_OPEN_CROSS:u32=0x40000000u;
 // C'' (coordinator 2026-11-26, the user's "fine h for accurate physics, no particles unless heat calls for them"): a
 // shape misfit heats only an energetic tile, fast (ncFastTile) or accelerating. NC_ENERGETIC is FIN's (and W1's) bit:
-// an open face of a liquid cell of the crossing tile had |Du/Dt| >= |g|/2 over the last step (ncEnergeticCell).
-// NC_CLASS_ENERGETIC is the class flag (mixedTile) it is reduced through.
+// the crossing tile's liquid had |Du/Dt| >= |g|/2 over the last step: an h tile's liquid cells' mean acceleration
+// (cfAccelerating, C'''), a 4h tile's own (ncEnergeticCell at its corner cell). NC_CLASS_ENERGETIC is the class flag
+// (mixedTile) it is reduced through.
 const NC_ENERGETIC:u32=0x80000000u;const NC_CLASS_ENERGETIC:u32=16u;
 fn ncCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
 fn ncCriterionOn(k:u32)->bool{return ((NC_CRITERIA>>k)&1u)!=0u;}
@@ -1347,25 +1348,57 @@ fn cfStage(t:vec3i,lane:u32){
     var f=0.0;if(nbFaceInLattice(q,a)){f=nbFFace(q,a);}cfFaces[i]=f;
   }
 }
-// The cell's centre φ (its 8 staged vertices' mean) below 0.
-fn cfCellLiquid(lane:u32)->bool{
- let l=ncCorner(lane,4u);var sum=0.0;
- for(var k=0u;k<8u;k++){let q=l+ncCorner(k,2u);sum+=ncTileRaw[q.x+5u*q.y+25u*q.z];}
- return sum<0.0;
+// C''' (A2, 2026-11-27): an h tile is energetic where its liquid accelerates: the liquid cells' mean acceleration,
+// each axis the liquid-fraction-weighted mean of the last step's velocity change over the open lower faces of the
+// tile's liquid cells (centre phi < 0), A_a = sum theta d_a / sum theta, at least |g|/2 (ncEnergeticCell's bound).
+// theta is a face's liquid fraction between its two cell centres (1 liquid-liquid, phi_l / (phi_l - phi_a) across the
+// surface: the ghost fluid's). A mass-weighted sum: each face's theta d is theta g dt less its pressure difference
+// dt / (rho h), so the pressure forces between the tile's liquid cells cancel in it, and it reads g (free fall) or 0
+// (hydrostatic rest) as each cell's test did. A single cell's reading did not separate the two at the surface: a
+// cell-scale ripple of the h level set (a record's) drives O(g) pressure differences between neighbouring cells, and
+// the ghost fluid's 1 / theta lifts a partial face's. The calm pour's rim (2026-11-27, steps 600-900, n = 3): one or
+// two surface cells of 64 at 0.5-0.6 g heated a tile; a ring tile holding records was 40-100x more often energetic
+// than one without (1.2-1.9% of tile-steps against 0.01-0.05%), and their dilated heat seeded 80% of the window's
+// records, a self-sustaining flicker. The lane's cell's lower faces are F's (the tile is h-owned, nbFacePlane's owner
+// rule), at the cell in the tile's own brick slot; a face with a closed cell either side is a constraint, not the
+// liquid's (the lane's cell open, the cell below open unless the tile is cut or that cell lies across the tile's low
+// side, where ncCellClosed says), and a face on the box wall carries none.
+// The cell centre phi (its 8 vertices' mean, m): the staged vertices, or across the tile's low side the authority.
+fn cfVertex(origin:vec3i,v:vec3i)->f32{
+ if(all(v>=vec3i(0))){return ncTileRaw[u32(v.x)+5u*u32(v.y)+25u*u32(v.z)];}
+ return ncLoadFine(origin+v);
 }
-// ncEnergeticCell on the lane's cell of h tile t, cheaply: the tile is h-owned, so each lower face of its cells is F's
-// (nbFacePlane's owner rule), at the cell in the tile's own brick slot; the lane's cell is open (cfClosed), and the
-// cell below it is open unless the tile is cut or that cell lies across the tile's low side, where ncCellClosed says.
-fn cfEnergetic(t:vec3i,lane:u32,cut:bool)->bool{
- let l=ncCorner(lane,4u);let c=4*t+vec3i(l);
- let s=nbFSlotOfBrick(c>>vec3u(3u));if(s>=NB_SEAM){return false;}
- var d=vec3f(0.0);
- for(var a=0u;a<3u;a++){
-  var e=vec3i(0);e[a]=1;
-  if(!nbFaceInLattice(c,a)||nbOnWall(c,a)){continue;}
-  if((cut||l[a]==0u)&&ncCellClosed(c-e)){continue;}
-  d[a]=vel[NB_VEL_F_UP0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];
+fn cfCentre(origin:vec3i,l:vec3i)->f32{
+ var sum=0.0;for(var k=0u;k<8u;k++){sum+=cfVertex(origin,l+vec3i(ncCorner(k,2u)));}
+ return 0.125*sum;
+}
+// The face's liquid fraction from its liquid cell's centre phi (l < 0) and the other cell's (b).
+fn cfTheta(l:f32,b:f32)->f32{if(b<0.0){return 1.0;}return l/(l-b);}
+// The lane's (theta d, theta) sums, then the tile's through cfFaces (classify's staging, read only before the
+// barrier that follows cfClassify): lanes 32..63 into lanes 0..31, then lane 0 over 32. Uniform control flow (every
+// lane of a crossing tile calls it); lane 0's result.
+fn cfAccelerating(t:vec3i,lane:u32,cut:bool)->bool{
+ let origin=4*t;let l=vec3i(ncCorner(lane,4u));let c=origin+l;
+ var v=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+ let s=nbFSlotOfBrick(c>>vec3u(3u));let own=cfCentre(origin,l);
+ if(!cfClosed&&s<NB_SEAM&&own<0.0){
+  for(var a=0u;a<3u;a++){
+   var e=vec3i(0);e[a]=1;
+   if(!nbFaceInLattice(c,a)||nbOnWall(c,a)){continue;}
+   if((cut||l[a]==0)&&ncCellClosed(c-e)){continue;}
+   let theta=cfTheta(own,cfCentre(origin,l-e));
+   v[a]=theta*vel[NB_VEL_F_UP0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];v[3u+a]=theta;
+  }
  }
+ workgroupBarrier();
+ if(lane>=32u){for(var k=0u;k<6u;k++){cfFaces[6u*(lane-32u)+k]=v[k];}}
+ workgroupBarrier();
+ if(lane<32u){for(var k=0u;k<6u;k++){v[k]+=cfFaces[6u*lane+k];cfFaces[6u*lane+k]=v[k];}}
+ workgroupBarrier();
+ if(lane!=0u){return false;}
+ var sum=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+ for(var j=0u;j<32u;j++){for(var k=0u;k<6u;k++){sum[k]+=cfFaces[6u*j+k];}}
+ var d=vec3f(0.0);for(var a=0u;a<3u;a++){if(sum[3u+a]>0.0){d[a]=sum[a]/sum[3u+a];}}
  return cAccel>0.0&&dot(d,d)>=cAccel*cAccel;
 }
 // ncFace at the cell of local coordinate l with plane p along a (p = l[a] its low face, l[a] + 1 its high face).
@@ -1456,8 +1489,8 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
     // The tier's misfit, every cell open (HEAD's): a wet wall's crossing keeps its tile h as it did.
     ncCut=false;
     if(shaping){atomicMax(&tileError,bitcast<u32>(ncSurfaceDisplacement(t,lane,false)));}
-    // C'': a liquid cell of a crossing tile (its 8 staged vertices' mean below 0) whose last step accelerated it.
-    if(crossing&&!cfClosed&&cfCellLiquid(lane)&&cfEnergetic(t,lane,cut)){atomicOr(&mixedTile,NC_CLASS_ENERGETIC);}
+    // C''': the crossing tile's liquid accelerating (cfAccelerating, lane 0's).
+    if(crossing){if(cfAccelerating(t,lane,cut)){atomicOr(&mixedTile,NC_CLASS_ENERGETIC);}}
     if((atomicLoad(&mixedTile)&2u)!=0u){let deep=ncDepthSample(t,lane);for(var q=0u;q<2u;q++){atomicMax(&tileDeep[q],deep[q]);}}
     workgroupBarrier();
     var c=ncEmptyClass();
